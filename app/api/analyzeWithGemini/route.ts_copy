@@ -1,0 +1,101 @@
+import { NextRequest, NextResponse } from "next/server";
+import { buildAnalyzeWithGeminiPrompt } from "@/lib/prompts/analyzeWithGeminiPrompt";
+import { getErrorMessage } from "@/lib/errors";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type InTweet = {
+  textContent?: string;
+  text?: string;
+  full_text?: string;
+  content?: string;
+};
+
+function normalizeTweets(raw: unknown): { textContent: string }[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((t: any) => {
+      const textContent =
+        (typeof t?.textContent === "string" && t.textContent) ||
+        (typeof t?.text === "string" && t.text) ||
+        (typeof t?.full_text === "string" && t.full_text) ||
+        (typeof t?.content === "string" && t.content) ||
+        "";
+      return textContent ? { textContent } : null;
+    })
+    .filter(Boolean) as { textContent: string }[];
+}
+
+function pickGeminiText(json: any): string | undefined {
+  return (
+    json?.candidates?.[0]?.content?.parts?.[0]?.text ||
+    json?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n")
+  );
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Missing GEMINI_API_KEY in environment." },
+        { status: 500 }
+      );
+    }
+
+    const body = await req.json().catch(() => ({}));
+    const safeTweets = normalizeTweets((body as { tweets?: InTweet[] }).tweets);
+
+    if (safeTweets.length === 0) {
+      return NextResponse.json(
+        { error: "No parsable tweets (need textContent/text/full_text/content)." },
+        { status: 400 }
+      );
+    }
+
+    const prompt = buildAnalyzeWithGeminiPrompt(safeTweets);
+
+    const gRes = await fetch(
+      "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" +
+        apiKey,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+        }),
+      }
+    );
+
+    const gJson = await gRes.json().catch(() => ({}));
+
+    if (!gRes.ok) {
+      const msg =
+        gJson?.error?.message ||
+        gJson?.error ||
+        gRes.statusText ||
+        "Gemini HTTP error";
+      return NextResponse.json({ error: msg }, { status: gRes.status || 500 });
+    }
+
+    const text = pickGeminiText(gJson);
+    if (!text) {
+      return NextResponse.json(
+        {
+          error:
+            "Gemini returned no text. Check model/quota/payload.",
+          raw: gJson,
+        },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json({ text }, { status: 200 });
+  } catch (e) {
+    const msg = getErrorMessage?.(e) ??
+      (e instanceof Error ? e.message : "Unknown error");
+    console.error("[/api/analyzeWithGemini] Fatal:", e);
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}

@@ -1,0 +1,79 @@
+// app/api/ctsearch/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { getErrorMessage } from "@/lib/errors";
+
+const BASE_URL = process.env.TWITTER_SCANNER_API_URL!;
+const BEARER = process.env.TWITTER_SCANNER_SECRET!;
+
+export async function POST(req: NextRequest) {
+  if (req.method !== "POST") {
+    return new NextResponse(null, { status: 405 });
+  }
+
+  const { projectName, twitterHandle, contractAddress } = await req.json();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const write = (msg: string) =>
+        controller.enqueue(new TextEncoder().encode(`${msg}\n`));
+
+      try {
+        const keywords: string[] = [];
+        if (projectName) keywords.push(String(projectName).replaceAll(" ", ""));
+        if (contractAddress) keywords.push(String(contractAddress));
+        if (twitterHandle)
+          keywords.push(String(twitterHandle).replace("@", ""));
+
+        write(`🔍 Scanning for keywords: ${keywords.join(", ")}`);
+
+        const today = new Date();
+        const start = new Date();
+        start.setDate(today.getDate() - 7);
+        const end = new Date(today);
+        end.setDate(today.getDate() + 1);
+
+        const body = {
+          keyword: keywords,
+          start_date: start.toISOString().split("T")[0],
+          end_date: end.toISOString().split("T")[0],
+          max_tweets: 30,
+          min_faves: 2,
+        };
+
+        const response = await fetch(`${BASE_URL}/search/speed`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${BEARER}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+
+        const data = await response.json();
+
+        if (!data?.success) {
+          write(`❌ Scanner error: ${data?.message || "Unknown error"}`);
+          controller.close();
+          return;
+        }
+
+        write(`✅ Job started: ${data.job_id}`);
+        write(`📦 Job submitted. You can now begin AI analysis.`);
+      } catch (err: unknown) {
+        const msg = getErrorMessage(err);
+        write(`❌ Error: ${msg || "Unknown error"}`);
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new NextResponse(stream, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-cache",
+      "Transfer-Encoding": "chunked",
+      Connection: "keep-alive",
+    },
+  });
+}
