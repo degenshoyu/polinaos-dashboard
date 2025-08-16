@@ -125,7 +125,23 @@ async function buildPromptSafe(
     | { summaries: string[] },
 ) {
   try {
-    const contents = await buildAnalyzeWithGeminiPrompt({ phase, ...payload });
+    const contents =
+      phase === "batch"
+        ? await buildAnalyzeWithGeminiPrompt({
+            phase: "batch",
+            ...(payload as {
+              tweets: string[];
+              index: number;
+              total: number;
+            }),
+          })
+        : await buildAnalyzeWithGeminiPrompt({
+            phase: "reduce",
+            ...(payload as {
+              summaries: string[];
+            }),
+          });
+
     if (Array.isArray(contents) && contents.length > 0) return contents;
     return null;
   } catch {
