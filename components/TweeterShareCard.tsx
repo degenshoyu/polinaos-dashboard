@@ -92,7 +92,7 @@ export default function TweeterShareCard({
     topTweetLinks: string[]; // up to 3
   };
 
-  const { total, pieData, tableRows } = useMemo(() => {
+  const { pieData, tableRows } = useMemo(() => {
     // 1) Group by tweeter (accumulate metrics + keep tweet list for top links)
     const by: Record<string, AggRow & { _tweets: MinimalTweet[] }> = {};
     for (const t of tweets) {
@@ -163,7 +163,7 @@ export default function TweeterShareCard({
       };
     });
 
-    return { total: totalVal, pieData: pieTop, tableRows: rowsForTable };
+    return { pieData: pieTop, tableRows: rowsForTable };
   }, [tweets, metric, topN]);
 
   /** Wheel & touch handlers for TopN */

@@ -162,7 +162,7 @@ I'll guide you through the whole process:
         const lines = chunk.split("\n").filter(Boolean);
 
         for (const raw of lines) {
-          let line = raw;
+          const line = raw;
 
           // Ignore submission hint
           if (line.includes("Job submitted")) continue;

@@ -3,8 +3,6 @@
 
 import Link from "next/link";
 import clsx from "clsx";
-// 兼容你现有的 JS 配置：[{ label, href, disabled?, external? }]
-// 如果是 TS 配置文件，改成 "./navLinks.config"
 import navLinks from "./navLinks.config";
 
 type NavItem = {
@@ -19,11 +17,8 @@ export default function NavLinks({
   className = "",
   onItemClick,
 }: {
-  /** 当前路径，用于高亮。示例：usePathname() */
   active?: string;
-  /** 外层容器 className（一般用于 gap 控制） */
   className?: string;
-  /** 点击任意链接后的回调（移动端用于收起抽屉） */
   onItemClick?: (href: string) => void;
 }) {
   const items = (navLinks as NavItem[]).filter(Boolean);
@@ -66,7 +61,7 @@ export default function NavLinks({
 
         if (disabled) {
           return (
-            <li key={href} aria-disabled className="opacity-70">
+            <li key={href} className="opacity-70">
               <span className="inline-flex items-center">{content}</span>
             </li>
           );

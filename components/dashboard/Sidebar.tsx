@@ -25,7 +25,6 @@ export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
 
-  // 持久化收起状态
   useEffect(() => {
     const saved = localStorage.getItem("sidebar:collapsed");
     if (saved) setCollapsed(saved === "1");
@@ -36,13 +35,11 @@ export default function Sidebar() {
 
   return (
     <aside
-      className={[
-        "shrink-0 border-r border-white/10 bg-white/[0.02] transition-[width] duration-200 overflow-hidden",
-        collapsed ? "w-[68px]" : "w-[220px]",
-      ].join(" ")}
-      aria-expanded={!collapsed}
+       className={[
+         "shrink-0 border-r border-white/10 bg-white/[0.02] transition-[width] duration-200 overflow-hidden",
+         collapsed ? "w-[68px]" : "w-[220px]",
+       ].join(" ")}
     >
-      {/* 顶部：标题 + 折叠按钮 */}
       <div className="flex items-center justify-between px-3 py-3">
         <div className="text-xs uppercase tracking-wider text-gray-400">
           {!collapsed ? "Campaign" : <span className="sr-only">Campaign</span>}
@@ -51,13 +48,13 @@ export default function Sidebar() {
           onClick={() => setCollapsed((v) => !v)}
           className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-white/10 text-gray-300 hover:text-white hover:border-white/20"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!collapsed}
           title={collapsed ? "Expand" : "Collapse"}
         >
           {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </button>
       </div>
 
-      {/* 菜单 */}
       <nav className="px-2 pb-4 space-y-1">
         {items.map(({ href, label, locked, Icon }) => {
           const active = pathname.startsWith(href);
@@ -71,22 +68,18 @@ export default function Sidebar() {
 
           const content = (
             <>
-              {/* 图标 */}
               <span className="inline-flex items-center justify-center w-8">
                 <Icon size={18} className={active ? "text-emerald-300" : "text-gray-300"} />
               </span>
 
-              {/* 文字（收起时隐藏） */}
               {!collapsed && <span className="ml-2 truncate">{label}</span>}
 
-              {/* 锁标记 */}
               {locked && (
                 <span className="ml-auto">
                   <Lock size={14} className="text-gray-400" />
                 </span>
               )}
 
-              {/* 收起时：悬浮提示 */}
               {collapsed && (
                 <span
                   className="pointer-events-none absolute left-[64px] top-1/2 -translate-y-1/2 whitespace-nowrap
