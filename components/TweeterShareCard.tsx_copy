@@ -1,0 +1,287 @@
+// components/TweeterShareCard.tsx
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recharts";
+
+export type ShareMetric = "tweets" | "views" | "engagements" | "likes";
+
+/** Minimal fields we need from a tweet row */
+export type MinimalTweet = {
+  tweeter?: string;
+  views?: number;
+  likes?: number;
+  retweets?: number;
+  replies?: number;
+};
+
+const COLORS = ["#3ef2ac", "#27a567", "#7dd3fc", "#fca5a5", "#fcd34d", "#d8b4fe", "#f9a8d4", "#93c5fd"];
+const REST_COLOR = "#475569"; // slate-600
+
+// Top-level helper so label renderer can use it
+const truncateName = (s: unknown, max = 14) => {
+  const str = typeof s === "string" ? s : String(s ?? "");
+  return str.length > max ? str.slice(0, max - 1) + "…" : str;
+};
+
+const clamp = (v: number, a: number, b: number) => Math.min(Math.max(v, a), b);
+const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+const compact = (v: number) => new Intl.NumberFormat("en", { notation: "compact" }).format(v);
+const pctText = (v: number) => `${(v * 100).toFixed(1)}%`;
+
+export default function TweeterShareCard({
+  tweets,
+  className = "",
+  defaultMetric = "views",
+  defaultTopN = 5,
+  minTopN = 3,
+  maxTopN = 12,
+}: {
+  tweets: MinimalTweet[];
+  className?: string;
+  defaultMetric?: ShareMetric;
+  defaultTopN?: number;
+  minTopN?: number;
+  maxTopN?: number;
+}) {
+  const [metric, setMetric] = useState<ShareMetric>(defaultMetric);
+  const [topN, setTopN] = useState<number>(clamp(defaultTopN, minTopN, maxTopN));
+
+  // Optional: persist user preference per session
+  useEffect(() => {
+    try {
+      const m = sessionStorage.getItem("tweeterShare.metric");
+      const t = sessionStorage.getItem("tweeterShare.topN");
+      if (m === "tweets" || m === "views" || m === "engagements" || m === "likes") setMetric(m);
+      if (t) setTopN(clamp(parseInt(t, 10), minTopN, maxTopN));
+    } catch {}
+  }, [minTopN, maxTopN]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("tweeterShare.metric", metric);
+      sessionStorage.setItem("tweeterShare.topN", String(topN));
+    } catch {}
+  }, [metric, topN]);
+
+  /** Aggregate by tweeter for the selected metric */
+  const series = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const t of tweets) {
+      const name = t.tweeter || "unknown";
+      let value = 0;
+      switch (metric) {
+        case "tweets":
+          value = 1;
+          break;
+        case "views":
+          value = n(t.views);
+          break;
+        case "likes":
+          value = n(t.likes);
+          break;
+        case "engagements":
+          value = n(t.likes) + n(t.retweets) + n(t.replies);
+          break;
+      }
+      map[name] = (map[name] || 0) + value;
+    }
+    const entries = Object.entries(map)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+
+    const total = entries.reduce((s, e) => s + e.value, 0);
+    const top = entries.slice(0, topN);
+    const restValue = entries.slice(topN).reduce((s, e) => s + e.value, 0);
+    const withShare = top.map((e) => ({ ...e, share: total > 0 ? e.value / total : 0 }));
+    if (restValue > 0) withShare.push({ name: "Rest", value: restValue, share: total > 0 ? restValue / total : 0 });
+    return { total, data: withShare };
+  }, [tweets, metric, topN]);
+
+  /** Wheel & touch handlers for TopN */
+  const numRef = useRef<HTMLButtonElement | null>(null);
+  const touchY = useRef<number | null>(null);
+
+  function onWheel(e: React.WheelEvent) {
+    e.preventDefault();
+    const dir = e.deltaY < 0 ? 1 : -1;
+    setTopN((prev) => clamp(prev + dir, minTopN, maxTopN));
+  }
+
+  function onTouchStart(e: React.TouchEvent) {
+    touchY.current = e.touches[0]?.clientY ?? null;
+  }
+  function onTouchMove(e: React.TouchEvent) {
+    if (touchY.current == null) return;
+    const dy = (e.touches[0]?.clientY ?? touchY.current) - touchY.current;
+    if (Math.abs(dy) > 18) {
+      const dir = dy < 0 ? 1 : -1; // swipe up -> increase
+      setTopN((prev) => clamp(prev + dir, minTopN, maxTopN));
+      touchY.current = e.touches[0]?.clientY ?? null;
+    }
+  }
+
+  return (
+    <div className={`rounded-2xl border border-white/10 bg-black/10 p-4 ${className}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+        <div className="text-xs text-gray-400">
+          {labelForMetric(metric)} (Top {topN}; others merged)
+        </div>
+
+        {/* Controls */}
+        <div className="flex items-center gap-2">
+          {/* Segmented metric selector */}
+          <div
+            className="flex rounded-lg overflow-hidden border border-white/10 bg-white/5"
+            role="tablist"
+            aria-label="Share metric"
+          >
+            {(["tweets", "views", "engagements", "likes"] as ShareMetric[]).map((m) => (
+              <button
+                key={m}
+                role="tab"
+                aria-selected={metric === m}
+                onClick={() => setMetric(m)}
+                className={`px-2.5 py-1 text-xs transition
+                  ${metric === m ? "bg-emerald-500/20 text-emerald-200" : "text-white/80 hover:bg-white/10"}`}
+                title={labelForMetric(m)}
+              >
+                {tabText(m)}
+              </button>
+            ))}
+          </div>
+
+          {/* TopN stepper with wheel & touch */}
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setTopN((v) => clamp(v - 1, minTopN, maxTopN))}
+              className="h-7 w-7 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80 text-sm"
+              aria-label="Decrease Top N"
+            >
+              –
+            </button>
+            <button
+              ref={numRef}
+              onWheel={onWheel}
+              onTouchStart={onTouchStart}
+              onTouchMove={onTouchMove}
+              type="button"
+              title="Scroll / swipe to change Top N"
+              className="h-7 px-2 rounded-md border border-white/10 bg-white/5 text-white/90 text-sm select-none"
+              aria-live="polite"
+            >
+              Top {topN}
+            </button>
+            <button
+              type="button"
+              onClick={() => setTopN((v) => clamp(v + 1, minTopN, maxTopN))}
+              className="h-7 w-7 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80 text-sm"
+              aria-label="Increase Top N"
+            >
+              +
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="h-64">
+        <ResponsiveContainer>
+          <PieChart>
+            <Pie
+              data={series.data}
+              dataKey="value"
+              nameKey="name"
+              cx="50%"
+              cy="50%"
+              outerRadius="72%"
+              labelLine={false}
+              isAnimationActive={false}
+              label={(p: any) => renderNameOnlyLabel(p)}
+            >
+              {series.data.map((entry, idx) => (
+                <Cell
+                  key={`slice-${entry.name}-${idx}`}
+                  fill={entry.name === "Rest" ? REST_COLOR : COLORS[idx % COLORS.length]}
+                  stroke="#0f1413"
+                  strokeWidth={1}
+                />
+              ))}
+            </Pie>
+            <Tooltip
+              contentStyle={{ background: "#0f1413", border: "1px solid #222", color: "#e5e7eb" }}
+              labelStyle={{ color: "#e5e7eb" }}
+              itemStyle={{ color: "#e5e7eb" }}
+              formatter={(val: any, _name, item: any) => [
+                compact(val as number),
+                `${item?.payload?.name} (${pctText(item?.payload?.share ?? 0)})`,
+              ]}
+            />
+            <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: 12 }} />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Tiny footnote explaining interactions */}
+      <div className="mt-2 text-[11px] text-gray-500">
+        Tip: use mouse wheel or swipe up/down on the “Top N” pill to adjust the number.
+      </div>
+    </div>
+  );
+}
+
+/** Render only the tweeter name as label (no %) with overlap mitigation */
+function renderNameOnlyLabel(props: any) {
+  const { cx, cy, midAngle, outerRadius, percent, name, payload } = props;
+  if (percent < 0.04) return null; // hide tiny slices
+
+  const RADIAN = Math.PI / 180;
+  const extra = Math.min(28, 10 + (1 - percent) * 24); // push small slices farther
+  const r = outerRadius + extra;
+  const x = cx + r * Math.cos(-midAngle * RADIAN);
+  const y = cy + r * Math.sin(-midAngle * RADIAN);
+  const color = payload?.name === "Rest" ? "#94a3b8" : "#34d399";
+
+  return (
+    <text
+      x={x}
+      y={y}
+      fill={color}
+      fontSize={11.5}
+      textAnchor={x > cx ? "start" : "end"}
+      dominantBaseline="central"
+      paintOrder="stroke"
+      stroke="#0a0f0e"
+      strokeWidth={4}
+      strokeOpacity={0.9}
+    >
+      {truncateName(name, 14)}
+    </text>
+  );
+}
+
+function labelForMetric(m: ShareMetric) {
+  switch (m) {
+    case "tweets":
+      return "Tweets count share by tweeter";
+    case "views":
+      return "Views share by tweeter";
+    case "engagements":
+      return "Engagements share by tweeter";
+    case "likes":
+      return "Like share by tweeter";
+  }
+}
+
+function tabText(m: ShareMetric) {
+  switch (m) {
+    case "tweets":
+      return "Tweets";
+    case "views":
+      return "Views";
+    case "engagements":
+      return "Engs";
+    case "likes":
+      return "Likes";
+  }
+}

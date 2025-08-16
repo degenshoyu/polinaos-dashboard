@@ -10,38 +10,62 @@ export default function AnalysisConsole({
   inputs,
   onTweetCountUpdate,
   onAnalysisResult,
+  onJobIdChange,
   className = "",
 }: {
   inputs?: AnalysisInput | null;
   onTweetCountUpdate?: (n: number) => void;
   onAnalysisResult?: (res: { summary: string }) => void;
+  onJobIdChange?: (id: string | null) => void;
   className?: string;
 }) {
+  // UI + status states
   const [status, setStatus] = useState<"idle" | "scanning" | "complete" | "error">("idle");
   const [messages, setMessages] = useState<{ text: string; time?: string }[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [tweetCount, setTweetCount] = useState<number>(0);
 
+  // Collapsible card state (persisted)
+  const [collapsed, setCollapsed] = useState<boolean>(false);
+
+  // Refs for effects and timers
   const containerRef = useRef<HTMLDivElement>(null);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const genMsgIndexRef = useRef<number | null>(null);
 
-  // one-shot gates & live status
+  // One-shot gates & live status mirrors
   const jobStartedRef = useRef<string | null>(null);
   const analysisStartedRef = useRef(false);
   const statusRef = useRef(status);
-  useEffect(() => { statusRef.current = status; }, [status]);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
-  // smooth scroll
+  // Restore collapsed preference on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("analysisConsoleCollapsed");
+      if (raw != null) setCollapsed(JSON.parse(raw) === true);
+    } catch {/* ignore */}
+  }, []);
+
+  // Persist collapsed preference when it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem("analysisConsoleCollapsed", JSON.stringify(collapsed));
+    } catch {/* ignore */}
+  }, [collapsed]);
+
+  // Auto scroll to latest message
   useEffect(() => {
     containerRef.current?.scrollTo({ top: containerRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  // welcome text when idle & empty
+  // Welcome text on idle
   useEffect(() => {
     if (status === "idle" && messages.length === 0) {
       append(
-`👋 Hi, I’m Polina – your assistant for understanding how your project is performing on Twitter.
+        `👋 Hi, I’m Polina – your assistant for understanding how your project is performing on Twitter.
 
 I'll guide you through the whole process:
 1. Fetch the most recent tweets that mention your project.
@@ -54,7 +78,7 @@ I'll guide you through the whole process:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
 
-  // Run a new scan whenever inputs change
+  // Trigger a new scan when inputs change (projectName/xProfile/tokenAddress)
   useEffect(() => {
     if (!inputs) return;
     runScan(inputs);
@@ -68,12 +92,13 @@ I'll guide you through the whole process:
     };
   }, []);
 
+  // Utilities
   function timeStr() {
     return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
 
   function append(text: string) {
-    // adjacent de-dup
+    // Deduplicate adjacent identical lines
     setMessages((prev) => {
       const last = prev[prev.length - 1]?.text;
       if (last === text) return prev;
@@ -90,6 +115,7 @@ I'll guide you through the whole process:
     });
   }
 
+  // Make raw backend logs more user friendly
   const toFriendly = (line: string) => {
     if (line.includes("Scanning for keywords"))
       return "I’m looking through Twitter for mentions like: " + line.split(":")[1]?.trim();
@@ -100,14 +126,16 @@ I'll guide you through the whole process:
     return line;
   };
 
+  // Launch a scan flow
   async function runScan(input: AnalysisInput) {
     if (pollTimer.current) clearInterval(pollTimer.current);
 
     setStatus("scanning");
-    setMessages([]);                 // 清空欢迎语
+    setMessages([]); // clear welcome
     setJobId(null);
+    onJobIdChange?.(null);
     setTweetCount(0);
-    jobStartedRef.current = null;    // reset gates
+    jobStartedRef.current = null;
     analysisStartedRef.current = false;
 
     append("🔍 Starting analysis of your project…");
@@ -136,27 +164,31 @@ I'll guide you through the whole process:
         for (const raw of lines) {
           let line = raw;
 
-          // 忽略提交提示
+          // Ignore submission hint
           if (line.includes("Job submitted")) continue;
 
-          // 流式日志里的“Scanning in progress”在非 scanning 或已进入分析阶段时丢弃
-          if (line.includes("Scanning in progress") && (statusRef.current !== "scanning" || analysisStartedRef.current)) {
+          // Drop "Scanning in progress" when not scanning or after analysis started
+          if (
+            line.includes("Scanning in progress") &&
+            (statusRef.current !== "scanning" || analysisStartedRef.current)
+          ) {
             continue;
           }
 
-          // “Completed” 交给轮询统一写入，避免重复
+          // "Completed" is handled by poller to avoid duplicates
           if (line.includes("Completed")) continue;
 
-          // 其他日志做友好化显示
+          // Friendly display
           append(toFriendly(line));
 
-          // 只认第一次 Job started
+          // Only record the first "Job started"
           const m = line.match(/Job started:\s*(.+)/i);
           if (m) {
             const id = m[1].trim();
             if (!jobStartedRef.current) {
               jobStartedRef.current = id;
               setJobId(id);
+              onJobIdChange?.(id);
               startPolling(id);
             }
           }
@@ -168,6 +200,7 @@ I'll guide you through the whole process:
     }
   }
 
+  // Poll job status and then trigger AI analysis
   function startPolling(id: string) {
     if (pollTimer.current) clearInterval(pollTimer.current);
 
@@ -176,7 +209,7 @@ I'll guide you through the whole process:
         const r = await fetch(`/api/jobProxy?job_id=${encodeURIComponent(id)}`, { cache: "no-store" });
         const data = await r.json();
 
-        // 优先处理 completed，避免已完成后再写进度
+        // Completed first, to avoid writing progress after done
         if (data?.status === "completed") {
           if (pollTimer.current) {
             clearInterval(pollTimer.current);
@@ -188,7 +221,7 @@ I'll guide you through the whole process:
           setStatus("complete");
           append(toFriendly(`✅ Completed: ${data?.tweets_count || 0} tweets found.`));
 
-          // 占位“正在分析…”
+          // Placeholder while AI generates
           setMessages((prev) => {
             genMsgIndexRef.current = prev.length;
             return [
@@ -201,6 +234,7 @@ I'll guide you through the whole process:
           });
 
           try {
+            // Sanitize tweets for AI (text-only)
             const rawTweets = Array.isArray(data?.tweets) ? data.tweets : [];
             const safeTweets = rawTweets
               .map((t: any) => {
@@ -227,7 +261,9 @@ I'll guide you through the whole process:
               body: JSON.stringify({ tweets: safeTweets }),
               signal: controller.signal,
             }).catch((e) => {
-              throw new Error(e?.name === "AbortError" ? "AI request timeout (150s)" : e?.message || "Network error");
+              throw new Error(
+                e?.name === "AbortError" ? "AI request timeout (150s)" : e?.message || "Network error"
+              );
             });
             clearTimeout(timeout);
 
@@ -239,15 +275,15 @@ I'll guide you through the whole process:
             }
 
             onAnalysisResult?.({ summary: text });
-            replaceGenerating("📊 I’ve completed the analysis. Please check the full summary on the left side 👉");
+            replaceGenerating("📊 I’ve completed the analysis. Please check the full summary on the AI Understanding card.");
           } catch (e: any) {
             replaceGenerating(`❌ Gemini request failed: ${e?.message || "Unknown error"}`);
           }
 
-          return; // 已处理完成，直接返回，防止继续写进度
+          return;
         }
 
-        // 只有在 scanning 阶段才写进度；且没有进入分析阶段
+        // Progress while scanning (not yet analyzing)
         if (statusRef.current === "scanning" && !analysisStartedRef.current && typeof data?.tweets_count === "number") {
           setTweetCount(data.tweets_count);
           onTweetCountUpdate?.(data.tweets_count);
@@ -264,11 +300,12 @@ I'll guide you through the whole process:
           });
         }
       } catch {
-        // swallow transient poll errors
+        // Swallow transient poll errors silently
       }
     }, 3000);
   }
 
+  // Replace the temporary "generating" placeholder with final text
   function replaceGenerating(text: string) {
     const idx = genMsgIndexRef.current;
     if (typeof idx === "number") {
@@ -279,45 +316,166 @@ I'll guide you through the whole process:
     }
   }
 
+  // Toggle collapsed state (accessible + persisted)
+  function toggleCollapsed() {
+    setCollapsed((prev) => !prev);
+  }
+
   return (
     <div
       className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}
     >
-      <h2 className="text-xl font-bold mb-4 bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-        Analysis · Console
-      </h2>
-
-      {/* scrollable feed */}
-      <div
-        ref={containerRef}
-        className="px-4 py-3 space-y-4 text-sm h-[420px] overflow-y-auto border-t border-white/10"
+      {/* Header acts as the collapse/expand trigger */}
+      <button
+        type="button"
+        onClick={toggleCollapsed}
+        aria-expanded={!collapsed}
+        aria-controls="analysis-console-body"
+        className="
+          w-full flex items-center justify-between
+          text-left group outline-none
+          focus-visible:ring-2 focus-visible:ring-emerald-400/60 rounded-xl
+        "
+        title={collapsed ? "Expand Analysis Console" : "Collapse Analysis Console"}
       >
-        {messages.map((m, i) => (
-          <div key={i} className="flex items-start gap-3">
-            <Image src={polinaIcon} alt="Polina" width={28} height={28} className="rounded-full" />
+        <span className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+          Analysis · Console
+        </span>
+        <span
+          className={`
+            ml-3 inline-flex h-6 w-6 items-center justify-center rounded-md border border-white/10 bg-white/5
+            text-white/80 transition-transform duration-200
+            ${collapsed ? "" : "rotate-180"}
+            group-hover:bg-white/10
+          `}
+          aria-hidden
+        >
+          ▾
+        </span>
+      </button>
+
+      {/* Body (hidden when collapsed). Keep logic running; just don't render the UI. */}
+      {!collapsed && (
+        <>
+          {/* Scrollable feed */}
+          <div
+            id="analysis-console-body"
+            ref={containerRef}
+            className="px-4 py-3 space-y-4 text-sm h-[420px] overflow-y-auto border-t border-white/10 mt-3"
+          >
+            {messages.map((m, i) => {
+              // Detect special lines to replace their leading emoji with a lotus icon
+              const isScanningLine = m.text.startsWith("⌛ Scanning in progress");
+              const isCompletedLine = m.text.startsWith("📊 I’ve completed the analysis");
+              const isAnalyzingLine = m.text.startsWith("🧠 Let me analyze");
+
+              // Normalize text by stripping the leading emoji when we render a lotus
+              const textNormalized = isScanningLine
+                ? m.text.replace(/^⌛\s*/, "")
+                : isCompletedLine
+                ? m.text.replace(/^📊\s*/, "")
+                : isAnalyzingLine
+                ? m.text.replace(/^🧠\s*/, "")
+                : m.text;
+
+              return (
+                <div key={i} className="flex items-start gap-3">
+                  <Image src={polinaIcon} alt="Polina" width={28} height={28} className="rounded-full" />
+                  <div>
+                    <div className="text-xs text-gray-400 mb-1">Polina{m.time ? ` · ${m.time}` : ""}</div>
+
+                    <div className="text-gray-200 font-mono leading-snug whitespace-pre-wrap">
+                      {isScanningLine || isCompletedLine || isAnalyzingLine ? (
+                        <span className="inline-flex items-center gap-2">
+                          {/* Rotating lotus while scanning & analyzing; static lotus after completion */}
+                          <LotusIcon
+                            className={`w-12 h-12 shrink-0 ${
+                              (isScanningLine && status === "scanning") || isAnalyzingLine
+                                ? "animate-spin motion-reduce:animate-none"
+                                : ""
+                            }`}
+                            style={
+                              (isScanningLine && status === "scanning") || isAnalyzingLine
+                                ? { animationDuration: "2.2s" }
+                                : undefined
+                            }
+                            title={
+                              isAnalyzingLine ? "Analyzing" : isScanningLine ? "Scanning" : "Completed"
+                            }
+                          />
+                          <span>{textNormalized}</span>
+                        </span>
+                      ) : (
+                        textNormalized
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Meta info */}
+          <div className="mt-4 text-xs text-gray-400 space-y-1">
+            <div className="truncate">
+              <span className="text-gray-400">Job ID: </span>
+              <span className="text-gray-200 break-all">{jobId || "-"}</span>
+            </div>
             <div>
-              <div className="text-xs text-gray-400 mb-1">Polina{m.time ? ` · ${m.time}` : ""}</div>
-              <div className="text-gray-200 font-mono leading-snug whitespace-pre-wrap">{m.text}</div>
+              <span className="text-gray-400">Tweets: </span>
+              <span className="text-gray-200">{tweetCount}</span>
+            </div>
+            <div>
+              <span className="text-gray-400">Status: </span>
+              <span className="text-gray-200">{status}</span>
             </div>
           </div>
-        ))}
-      </div>
-
-      {/* meta (vertical) */}
-      <div className="mt-4 text-xs text-gray-400 space-y-1">
-        <div className="truncate">
-          <span className="text-gray-400">Job ID: </span>
-          <span className="text-gray-200 break-all">{jobId || "-"}</span>
-        </div>
-        <div>
-          <span className="text-gray-400">Tweets: </span>
-          <span className="text-gray-200">{tweetCount}</span>
-        </div>
-        <div>
-          <span className="text-gray-400">Status: </span>
-          <span className="text-gray-200">{status}</span>
-        </div>
-      </div>
+        </>
+      )}
     </div>
+  );
+}
+
+/** Top-view lotus icon: symmetric petals so rotation looks centered & balanced. */
+function LotusIcon({
+  className,
+  style,
+  title,
+}: {
+  className?: string;
+  style?: React.CSSProperties;
+  title?: string;
+}) {
+  // Petal is drawn pointing up, then rotated around center for radial symmetry
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      style={style}
+      role="img"
+      aria-hidden={title ? undefined : true}
+    >
+      {title ? <title>{title}</title> : null}
+      <defs>
+        {/* Soft green gradient to match Polina's accent */}
+        <linearGradient id="lotusGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#3ef2ac" />
+          <stop offset="100%" stopColor="#27a567" />
+        </linearGradient>
+      </defs>
+
+      {/* Center circle */}
+      <circle cx="12" cy="12" r="2" fill="url(#lotusGrad)" opacity="0.95" />
+
+      {/* Single petal path (top), then replicated by rotation for symmetry */}
+      {/* The curve creates a petal-like teardrop. Adjusted for balanced spin */}
+      <g fill="url(#lotusGrad)" opacity="0.95">
+        {Array.from({ length: 8 }).map((_, idx) => (
+          <g key={idx} transform={`rotate(${idx * 45} 12 12)`}>
+            <path d="M12 4 C 13.8 6.8, 14.2 9.2, 12 11 C 9.8 9.2, 10.2 6.8, 12 4 Z" />
+          </g>
+        ))}
+      </g>
+    </svg>
   );
 }

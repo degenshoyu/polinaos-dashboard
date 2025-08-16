@@ -1,0 +1,126 @@
+"use client";
+
+import React, { useEffect, useMemo, useState } from "react";
+import type { AnalysisInput } from "./types";
+
+const ensureString = (v: unknown): string | undefined => {
+  if (typeof v === "string") {
+    const s = v.trim();
+    return s.length ? s : undefined;
+  }
+  return undefined;
+};
+
+const handleFromUrlOrAt = (s?: string): string | undefined => {
+  if (!s) return undefined;
+  const raw = s.trim();
+  if (!raw) return undefined;
+  if (!raw.includes("://")) return raw.replace(/^@/, "");
+  try {
+    const u = new URL(raw);
+    const seg = u.pathname.split("/").filter(Boolean)[0] || "";
+    return seg.replace(/^@/, "") || raw.replace(/^@/, "");
+  } catch {
+    return raw.replace(/^@/, "");
+  }
+};
+
+const parseSafe = (key: string) => {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+export const InputCard: React.FC<{
+  onRun: (input: AnalysisInput) => void;
+}> = ({ onRun }) => {
+  const [form, setForm] = useState<AnalysisInput>({
+    projectName: "",
+    website: "",
+    xProfile: "",
+    xCommunity: "",
+    telegram: "",
+    tokenAddress: "",
+  });
+
+  // merge URL params + localStorage
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const qp: AnalysisInput = {
+      projectName: ensureString(url.searchParams.get("projectName")),
+      website: ensureString(url.searchParams.get("website")),
+      xProfile: handleFromUrlOrAt(ensureString(url.searchParams.get("xProfile"))),
+      xCommunity: ensureString(url.searchParams.get("xCommunity")),
+      telegram: ensureString(url.searchParams.get("telegram")),
+      tokenAddress: ensureString(url.searchParams.get("tokenAddress")),
+    } as any;
+
+    const stored = (parseSafe("campaignDraft") ?? {}) as Partial<AnalysisInput>;
+    const merged: AnalysisInput = {
+      projectName: qp.projectName ?? ensureString(stored.projectName),
+      website: qp.website ?? ensureString(stored.website),
+      xProfile: qp.xProfile ?? handleFromUrlOrAt(ensureString(stored.xProfile)),
+      xCommunity: qp.xCommunity ?? ensureString(stored.xCommunity),
+      telegram: qp.telegram ?? ensureString(stored.telegram),
+      tokenAddress: qp.tokenAddress ?? ensureString(stored.tokenAddress),
+    } as any;
+
+    setForm((f) => ({ ...f, ...merged }));
+  }, []);
+
+  // autosave
+  useEffect(() => {
+    localStorage.setItem("campaignDraft", JSON.stringify(form));
+  }, [form]);
+
+  const canAnalyze = useMemo(() => {
+    return Boolean(
+      (form.projectName && form.projectName.trim()) ||
+        (form.xProfile && form.xProfile.trim()) ||
+        (form.tokenAddress && form.tokenAddress.trim())
+    );
+  }, [form]);
+
+  return (
+    <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
+      <h2 className="text-xl font-bold mb-4 bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+        Campaign · Input
+      </h2>
+
+      <div className="space-y-3">
+        <input
+          className="w-full px-3 py-2 bg-[#0d0d0d] border border-[#333] focus:ring-2 focus:ring-[#64e3a1] rounded-md text-white placeholder:text-gray-500 text-sm"
+          placeholder="Project name (e.g. PolinaOS)"
+          value={form.projectName || ""}
+          onChange={(e) => setForm({ ...form, projectName: e.target.value })}
+        />
+        <input
+          className="w-full px-3 py-2 bg-[#0d0d0d] border border-[#333] focus:ring-2 focus:ring-[#64e3a1] rounded-md text-white placeholder:text-gray-500 text-sm"
+          placeholder="X profile (e.g. @PolinaAIOS or https://x.com/PolinaAIOS)"
+          value={form.xProfile || ""}
+          onChange={(e) =>
+            setForm({ ...form, xProfile: handleFromUrlOrAt(e.target.value) || "" })
+          }
+        />
+        <input
+          className="w-full px-3 py-2 bg-[#0d0d0d] border border-[#333] focus:ring-2 focus:ring-[#64e3a1] rounded-md text-white placeholder:text-gray-500 text-sm"
+          placeholder="Token contract address"
+          value={form.tokenAddress || ""}
+          onChange={(e) => setForm({ ...form, tokenAddress: e.target.value })}
+        />
+      </div>
+
+      <button
+        onClick={() => onRun(form)}
+        disabled={!canAnalyze}
+        className="mt-4 w-full flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-[#27a567] to-[#2fd480] hover:from-[#239e5d] hover:to-[#38ec9c] text-white rounded-md text-sm font-semibold transition shadow disabled:opacity-50"
+      >
+        {canAnalyze ? "✨ Analyze" : "Fill one of: Project / X / Token"}
+      </button>
+    </div>
+  );
+};

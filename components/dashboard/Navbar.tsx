@@ -6,12 +6,28 @@ import { usePathname } from "next/navigation";
 import dynamic from "next/dynamic";
 import NavLinks from "./NavLinks";
 import MobileMenu from "./MobileMenu";
+import { useSession, signOut } from "next-auth/react";
 
-// 钱包登录按钮
 const WalletButton = dynamic(() => import("../SignInWithSolana"), { ssr: false });
+
+function pickWalletFromSession(session: any): string {
+  const u = session?.user || {};
+  // 兼容多种后端写法：id / address / name
+  return String(u.id || u.address || u.name || "");
+}
+
+function shorten(addr?: string) {
+  if (!addr) return "";
+  if (addr.length <= 10) return addr;
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
 
 export default function Navbar() {
   const pathname = usePathname();
+  const { data: session } = useSession();
+
+  const sessionWallet = pickWalletFromSession(session);
+  const isLoggedIn = !!sessionWallet;
 
   return (
     <header className="sticky top-0 z-50 flex justify-center px-3 py-4 md:px-4">
@@ -44,14 +60,48 @@ export default function Navbar() {
           <NavLinks active={pathname || ""} />
         </nav>
 
-        {/* Right actions (desktop)：仅钱包 */}
-        <div className="hidden md:flex items-center gap-3">
-          <WalletButton />
+        {/* Right actions (desktop) */}
+        <div className="hidden md:flex items-center gap-2">
+          {isLoggedIn ? (
+            <>
+              <span
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium"
+                title={sessionWallet}
+              >
+                {shorten(sessionWallet)}
+              </span>
+              <button
+                onClick={() => signOut()}
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <WalletButton />
+          )}
         </div>
 
-        {/* Mobile：汉堡 + 钱包 */}
+        {/* Mobile */}
         <div className="md:hidden flex items-center gap-2">
-          <WalletButton />
+          {isLoggedIn ? (
+            <>
+              <span
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium"
+                title={sessionWallet}
+              >
+                {shorten(sessionWallet)}
+              </span>
+              <button
+                onClick={() => signOut()}
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <WalletButton />
+          )}
           <MobileMenu active={pathname || ""} />
         </div>
       </div>
