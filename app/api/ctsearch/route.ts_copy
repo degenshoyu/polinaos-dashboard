@@ -1,43 +1,21 @@
 // app/api/ctsearch/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 import { getErrorMessage } from "@/lib/errors";
+import { ensureAnonSessionOn } from "@/lib/cookies/anonSession";
 import { db } from "@/lib/db/client";
 import { searches } from "@/lib/db/schema";
-import { ensureAnonSessionOn } from "@/lib/cookies/anonSession";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 
 const BASE_URL = process.env.TWITTER_SCANNER_API_URL!;
 const BEARER = process.env.TWITTER_SCANNER_SECRET!;
 
-const BodySchema = z
-  .object({
-    projectName: z.string().optional(),
-    twitterHandle: z.string().optional(),
-    contractAddress: z.string().optional(),
-  })
-  .passthrough();
-
 export async function POST(req: NextRequest) {
+  const anonId = await ensureAnonSessionOn();
+
   if (req.method !== "POST") {
     return new NextResponse(null, { status: 405 });
   }
 
-  const raw = await req.json().catch(() => ({}));
-  const parsed = BodySchema.safeParse(raw);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { ok: false, error: "Invalid request body", issues: parsed.error.issues },
-      { status: 400 },
-    );
-  }
-  const { projectName, twitterHandle, contractAddress } = parsed.data;
-
-  const session = await getServerSession(authOptions);
-  const userId: string | null = (session?.user as any)?.id ?? null;
-
-  let anonSessionId: string | null = null;
+  const { projectName, twitterHandle, contractAddress } = await req.json();
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -84,34 +62,8 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        const jobId: string | undefined = data?.job_id;
-        if (!jobId) {
-          write("❌ Scanner returned no job_id");
-          controller.close();
-          return;
-        }
-
-        write(`✅ Job started: ${jobId}`);
+        write(`✅ Job started: ${data.job_id}`);
         write(`📦 Job submitted. You can now begin AI analysis.`);
-
-        try {
-          const queryJson = {
-            input: { projectName, twitterHandle, contractAddress },
-            scannerRequest: body,
-          };
-
-          await db.insert(searches).values({
-            userId: userId ?? null,
-            anonSessionId: anonSessionId ?? null,
-            jobId,
-            queryJson,
-            source: "ctsearch",
-          });
-
-          write("🗂️ Persisted search record.");
-        } catch (persistErr) {
-          write(`⚠️ Persist failed: ${getErrorMessage(persistErr)}`);
-        }
       } catch (err: unknown) {
         const msg = getErrorMessage(err);
         write(`❌ Error: ${msg || "Unknown error"}`);
@@ -121,7 +73,7 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const res = new NextResponse(stream, {
+  return new NextResponse(stream, {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-cache",
@@ -129,10 +81,4 @@ export async function POST(req: NextRequest) {
       Connection: "keep-alive",
     },
   });
-
-  if (!userId) {
-    anonSessionId = await ensureAnonSessionOn(res);
-  }
-
-  return res;
 }
