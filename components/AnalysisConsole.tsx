@@ -258,7 +258,7 @@ I'll guide you through the whole process:
             const aiRes = await fetch("/api/analyzeWithGemini", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tweets: safeTweets }),
+              body: JSON.stringify({ tweets: safeTweets, jobId }),
               signal: controller.signal,
             }).catch((e) => {
               throw new Error(

@@ -1,101 +1,164 @@
-import { NextRequest, NextResponse } from "next/server";
-import { buildAnalyzeWithGeminiPrompt } from "@/lib/prompts/analyzeWithGeminiPrompt";
-import { getErrorMessage } from "@/lib/errors";
+// app/api/analyzeWithGemini/route.ts
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { db } from "@/lib/db/client";
+import { searches, aiUnderstandings } from "@/lib/db/schema";
+import { eq, and, desc } from "drizzle-orm";
+import {
+  buildAnalyzePrompt,
+  buildSynthesisPrompt,
+  type TweetLite,
+} from "@/lib/prompts/analyzeWithGeminiPrompt";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-type InTweet = {
-  textContent?: string;
-  text?: string;
-  full_text?: string;
-  content?: string;
-};
-
-function normalizeTweets(raw: unknown): { textContent: string }[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((t: any) => {
-      const textContent =
-        (typeof t?.textContent === "string" && t.textContent) ||
-        (typeof t?.text === "string" && t.text) ||
-        (typeof t?.full_text === "string" && t.full_text) ||
-        (typeof t?.content === "string" && t.content) ||
-        "";
-      return textContent ? { textContent } : null;
-    })
-    .filter(Boolean) as { textContent: string }[];
+/** ===================== Safe env parsing helpers ===================== **/
+function parseDuration(input: string | undefined, fallbackMs: number): number {
+  if (!input) return fallbackMs;
+  const s = input.trim().toLowerCase();
+  if (/^\d+$/.test(s)) return Number(s);
+  const m = s.match(/^(\d+)\s*(ms|s|m)$/);
+  if (!m) return fallbackMs;
+  const v = Number(m[1]);
+  if (!Number.isFinite(v)) return fallbackMs;
+  switch (m[2]) {
+    case "ms":
+      return v;
+    case "s":
+      return v * 1000;
+    case "m":
+      return v * 60_000;
+    default:
+      return fallbackMs;
+  }
+}
+function parseIntSafe(input: string | undefined, fallback: number): number {
+  if (!input) return fallback;
+  const n = Number(input);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function pickGeminiText(json: any): string | undefined {
-  return (
-    json?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    json?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n")
+/** ===================== Config ===================== **/
+const MODEL_NAME = process.env.GEMINI_MODEL_NAME?.trim() || "gemini-2.5-flash";
+
+const MAX_TWEETS_PER_BATCH = parseIntSafe(process.env.AI_BATCH_SIZE, 60);
+const MAX_WORDS_PER_BATCH = parseIntSafe(process.env.AI_BATCH_WORDS, 320);
+const MAX_WORDS_FINAL = parseIntSafe(process.env.AI_FINAL_WORDS, 450);
+const LLM_TIMEOUT_MS = parseDuration(process.env.AI_LLM_TIMEOUT_MS, 300_000);
+
+/** ===================== Zod ===================== **/
+const Body = z.object({
+  tweets: z.array(z.object({ textContent: z.string().min(1) })).min(1),
+  jobId: z.string().optional(),
+  searchId: z.string().uuid().optional(),
+  projectName: z.string().optional(),
+});
+
+/** ===================== Helpers ===================== **/
+function cleanupTweets(tweets: TweetLite[]): TweetLite[] {
+  const seen = new Set<string>();
+  const out: TweetLite[] = [];
+  for (const t of tweets) {
+    const text = (t.textContent || "").trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ textContent: text });
+  }
+  return out;
+}
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+async function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  msg = "LLM request timeout",
+): Promise<T> {
+  const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 300_000;
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(msg)), safeMs),
+    ),
+  ]) as Promise<T>;
+}
+async function callGemini(
+  prompt: string,
+  modelName = MODEL_NAME,
+): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("Missing GEMINI_API_KEY");
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: modelName });
+
+  const result = await withTimeout(
+    model.generateContent(prompt),
+    LLM_TIMEOUT_MS,
   );
+  const text = result.response?.text?.() ?? result.response?.text();
+  if (!text) throw new Error("Empty response from Gemini");
+  return text;
 }
 
-export async function POST(req: NextRequest) {
+/** ===================== Route ===================== **/
+export async function POST(req: Request) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "Missing GEMINI_API_KEY in environment." },
-        { status: 500 }
-      );
-    }
-
-    const body = await req.json().catch(() => ({}));
-    const safeTweets = normalizeTweets((body as { tweets?: InTweet[] }).tweets);
-
-    if (safeTweets.length === 0) {
-      return NextResponse.json(
-        { error: "No parsable tweets (need textContent/text/full_text/content)." },
-        { status: 400 }
-      );
-    }
-
-    const prompt = buildAnalyzeWithGeminiPrompt(safeTweets);
-
-    const gRes = await fetch(
-      "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" +
-        apiKey,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-        }),
-      }
+    const { tweets, jobId, searchId, projectName } = Body.parse(
+      await req.json(),
     );
 
-    const gJson = await gRes.json().catch(() => ({}));
+    const clean = cleanupTweets(tweets);
 
-    if (!gRes.ok) {
-      const msg =
-        gJson?.error?.message ||
-        gJson?.error ||
-        gRes.statusText ||
-        "Gemini HTTP error";
-      return NextResponse.json({ error: msg }, { status: gRes.status || 500 });
+    const batches = chunkArray(clean, MAX_TWEETS_PER_BATCH);
+
+    const batchSummaries: string[] = [];
+    for (const batch of batches) {
+      const prompt = buildAnalyzePrompt(batch, {
+        projectName,
+        maxWords: MAX_WORDS_PER_BATCH,
+      });
+      const summary = await callGemini(prompt);
+      batchSummaries.push(summary);
     }
 
-    const text = pickGeminiText(gJson);
-    if (!text) {
-      return NextResponse.json(
-        {
-          error:
-            "Gemini returned no text. Check model/quota/payload.",
-          raw: gJson,
+    const synthesisPrompt = buildSynthesisPrompt(batchSummaries, {
+      projectName,
+      maxWords: MAX_WORDS_FINAL,
+    });
+    const finalMarkdown = await callGemini(synthesisPrompt);
+
+    let resolvedSearchId: string | undefined = searchId;
+    if (!resolvedSearchId && jobId) {
+      const row = await db.query.searches.findFirst({
+        where: eq(searches.jobId, jobId),
+        columns: { id: true },
+      });
+      resolvedSearchId = row?.id;
+    }
+
+    if (resolvedSearchId) {
+      await db.insert(aiUnderstandings).values({
+        searchId: resolvedSearchId,
+        model: MODEL_NAME,
+        resultJson: {
+          promptVersion: "v2-map-reduce-2.5-5min-2025-08-18",
+          batches: batchSummaries.map((text, i) => ({ index: i + 1, text })),
+          final: { text: finalMarkdown },
         },
-        { status: 502 }
-      );
+        summaryText: finalMarkdown,
+      });
     }
 
-    return NextResponse.json({ text }, { status: 200 });
-  } catch (e) {
-    const msg = getErrorMessage?.(e) ??
-      (e instanceof Error ? e.message : "Unknown error");
-    console.error("[/api/analyzeWithGemini] Fatal:", e);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ text: finalMarkdown });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "AI error" },
+      { status: 400 },
+    );
   }
 }

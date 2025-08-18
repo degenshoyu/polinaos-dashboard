@@ -1,253 +1,195 @@
 // app/api/analyzeWithGemini/route.ts
+
 import { NextResponse } from "next/server";
-import { buildAnalyzeWithGeminiPrompt } from "@/lib/prompts/analyzeWithGeminiPrompt";
-import { getErrorMessage } from "@/lib/errors";
+import { cookies } from "next/headers";
+import { z } from "zod";
+import { db } from "@/lib/db/client";
+import { searches, aiUnderstandings } from "@/lib/db/schema";
+import { eq, desc } from "drizzle-orm";
+import {
+  buildAnalyzePrompt,
+  buildSynthesisPrompt,
+  type TweetLite,
+} from "@/lib/prompts/analyzeWithGeminiPrompt";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 
-/** ===================== Config & Tunables ===================== */
-const MODEL = process.env.GEMINI_MODEL || "gemini-1.5-pro";
-const API_KEY = process.env.GEMINI_API_KEY!;
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+export const maxDuration = 300;
 
-const MAX_TWEETS_PER_BATCH = toNum(process.env.MAX_TWEETS_PER_BATCH, 25);
-const MAX_BATCHES = toNum(process.env.MAX_BATCHES, 10);
-const BATCH_OUTPUT_HINT_TOKENS = toNum(
-  process.env.BATCH_OUTPUT_HINT_TOKENS,
-  500,
-);
-const FINAL_OUTPUT_HINT_TOKENS = toNum(
-  process.env.FINAL_OUTPUT_HINT_TOKENS,
-  1000,
-);
-const TIMEOUT_MS = toNum(process.env.GEMINI_TIMEOUT_MS, 60_000);
-
-/** ===================== Route Handler ===================== */
-export async function POST(req: Request) {
-  try {
-    if (!API_KEY) {
-      return NextResponse.json(
-        { error: "GEMINI_API_KEY is missing" },
-        { status: 500 },
-      );
-    }
-
-    const body = await req.json().catch(() => ({}));
-    const tweets = (body?.tweets ?? []) as Array<Record<string, unknown>>;
-
-    if (!Array.isArray(tweets) || tweets.length === 0) {
-      return NextResponse.json(
-        { error: "Expected body: { tweets: Array<{ textContent?: string }>" },
-        { status: 400 },
-      );
-    }
-
-    const texts = tweets
-      .map((t) => {
-        const s =
-          (typeof t["textContent"] === "string" &&
-            (t["textContent"] as string)) ||
-          (typeof t["text"] === "string" && (t["text"] as string)) ||
-          (typeof t["full_text"] === "string" && (t["full_text"] as string)) ||
-          (typeof t["content"] === "string" && (t["content"] as string)) ||
-          "";
-        return s.replace(/\s+/g, " ").trim();
-      })
-      .filter(Boolean);
-
-    if (texts.length === 0) {
-      return NextResponse.json(
-        { error: "No usable tweet text" },
-        { status: 400 },
-      );
-    }
-
-    const batches = chunk(texts, MAX_TWEETS_PER_BATCH).slice(0, MAX_BATCHES);
-    const batchSummaries: string[] = [];
-
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-
-      const batchContents =
-        (await buildPromptSafe("batch", {
-          tweets: batch,
-          index: i + 1,
-          total: batches.length,
-        })) ?? makeBatchPrompt(batch, i + 1, batches.length);
-
-      const summary = await callGemini(batchContents, BATCH_OUTPUT_HINT_TOKENS);
-      batchSummaries.push(
-        summary?.trim() ||
-          `Batch ${i + 1}: (no summary due to token constraints)`,
-      );
-    }
-
-    const reduceContents =
-      (await buildPromptSafe("reduce", { summaries: batchSummaries })) ??
-      makeReducePrompt(batchSummaries);
-
-    const finalText = await callGemini(
-      reduceContents,
-      FINAL_OUTPUT_HINT_TOKENS,
-    );
-
-    if (!finalText?.trim()) {
-      return NextResponse.json({
-        text: "",
-        warning:
-          "Gemini returned no text in the final synthesis. Try lowering MAX_TWEETS_PER_BATCH / MAX_BATCHES.",
-      });
-    }
-
-    return NextResponse.json({ text: finalText });
-  } catch (err) {
-    const message = safeError(err);
-    const status = /timeout/i.test(message) ? 504 : 500;
-    return NextResponse.json({ error: message }, { status });
+/** ===================== Safe env parsing helpers ===================== **/
+function parseDuration(input: string | undefined, fallbackMs: number): number {
+  if (!input) return fallbackMs;
+  const s = input.trim().toLowerCase();
+  if (/^\d+$/.test(s)) return Number(s);
+  const m = s.match(/^(\d+)\s*(ms|s|m)$/); // 300s / 5m / 500ms
+  if (!m) return fallbackMs;
+  const v = Number(m[1]);
+  if (!Number.isFinite(v)) return fallbackMs;
+  switch (m[2]) {
+    case "ms":
+      return v;
+    case "s":
+      return v * 1000;
+    case "m":
+      return v * 60_000;
+    default:
+      return fallbackMs;
   }
 }
-
-/** ===================== Helpers ===================== */
-
-function toNum(v: string | undefined, def: number) {
-  const n = v ? Number(v) : NaN;
-  return Number.isFinite(n) ? n : def;
+function parseIntSafe(input: string | undefined, fallback: number): number {
+  if (!input) return fallback;
+  const n = Number(input);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function chunk<T>(arr: T[], size: number) {
+/** ===================== Config ===================== **/
+const MODEL_NAME = process.env.GEMINI_MODEL_NAME?.trim() || "gemini-2.5-flash";
+const MAX_TWEETS_PER_BATCH = parseIntSafe(process.env.AI_BATCH_SIZE, 60);
+const MAX_WORDS_PER_BATCH = parseIntSafe(process.env.AI_BATCH_WORDS, 320);
+const MAX_WORDS_FINAL = parseIntSafe(process.env.AI_FINAL_WORDS, 450);
+const LLM_TIMEOUT_MS = parseDuration(process.env.AI_LLM_TIMEOUT_MS, 300_000);
+
+/** ===================== Zod ===================== **/
+const Body = z.object({
+  tweets: z.array(z.object({ textContent: z.string().min(1) })).min(1),
+  jobId: z.string().optional(),
+  searchId: z.string().uuid().optional(),
+  projectName: z.string().optional(),
+});
+
+/** ===================== Helpers ===================== **/
+function cleanupTweets(tweets: TweetLite[]): TweetLite[] {
+  const seen = new Set<string>();
+  const out: TweetLite[] = [];
+  for (const t of tweets) {
+    const text = (t.textContent || "").trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ textContent: text });
+  }
+  return out;
+}
+function chunkArray<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
-
-async function buildPromptSafe(
-  phase: "batch" | "reduce",
-  payload:
-    | { tweets: string[]; index: number; total: number }
-    | { summaries: string[] },
-) {
-  try {
-    const contents =
-      phase === "batch"
-        ? await buildAnalyzeWithGeminiPrompt({
-            phase: "batch",
-            ...(payload as {
-              tweets: string[];
-              index: number;
-              total: number;
-            }),
-          })
-        : await buildAnalyzeWithGeminiPrompt({
-            phase: "reduce",
-            ...(payload as {
-              summaries: string[];
-            }),
-          });
-
-    if (Array.isArray(contents) && contents.length > 0) return contents;
-    return null;
-  } catch {
-    return null;
-  }
+async function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  msg = "LLM request timeout",
+): Promise<T> {
+  const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 300_000;
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(msg)), safeMs),
+    ),
+  ]) as Promise<T>;
 }
+async function callGemini(
+  prompt: string,
+  modelName = MODEL_NAME,
+): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error("Missing GEMINI_API_KEY / GOOGLE_API_KEY");
 
-function makeBatchPrompt(tweets: string[], idx: number, total: number) {
-  const joined = tweets.map((t) => `- ${t}`).join("\n");
-  return [
-    {
-      role: "user",
-      parts: [
-        {
-          text: `You are Polina, an AI analyst for crypto/community growth.
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: modelName });
 
-You will receive a batch of tweets (${idx}/${total}). Your task:
-1) Extract key entities (project names, tokens, tags, KOLs).
-2) Identify themes (sentiment, engagement drivers, concerns).
-3) Summarize concrete signals (potential shillers, collab hints, campaign ideas).
-4) Be concise and structured in markdown.
-
-Tweets (batch ${idx}/${total}):
-${joined}
-
-Return a short markdown section with "### Findings (Batch ${idx})" and bullet points.`,
-        },
-      ],
-    },
-  ];
-}
-
-function makeReducePrompt(batchSummaries: string[]) {
-  const joined = batchSummaries
-    .map((s, i) => `### Batch ${i + 1}\n${s}`)
-    .join("\n\n");
-  return [
-    {
-      role: "user",
-      parts: [
-        {
-          text: `You are Polina, an AI analyst for community growth.
-
-Below are per-batch findings from multiple summarization calls. Synthesize them into ONE cohesive report:
-- Merge duplicates, remove noise.
-- Provide 5–8 crisp insights.
-- Give 3–5 actionable campaign ideas (bullet list).
-- If token/contract or X handles appear, include them once in a "References" section.
-- Keep it under ~700 words.
-- Use clean markdown with "### Insights", "### Campaign Ideas", "### References" sections.
-
-Per-batch findings:
-${joined}`,
-        },
-      ],
-    },
-  ];
-}
-
-async function callGemini(contents: any, maxOutputTokens: number) {
-  const controller = new AbortController();
-  const to = setTimeout(
-    () => controller.abort(new Error("Gemini request timeout")),
-    TIMEOUT_MS,
+  const result = await withTimeout(
+    model.generateContent(prompt),
+    LLM_TIMEOUT_MS,
   );
+  const text = result.response?.text?.() ?? result.response?.text();
+  if (!text) throw new Error("Empty response from Gemini");
+  return text;
+}
 
+/** ===================== Route ===================== **/
+export async function POST(req: Request) {
   try {
-    const resp = await fetch(`${ENDPOINT}?key=${API_KEY}`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents,
-        generationConfig: {
-          temperature: 0.4,
-          topP: 0.9,
-          topK: 40,
-          maxOutputTokens,
-        },
-      }),
-    });
+    const { tweets, jobId, searchId, projectName } = Body.parse(
+      await req.json(),
+    );
 
-    const json = await resp.json().catch(() => ({}) as any);
-    if (!resp.ok) {
-      const reason =
-        json?.error?.message ||
-        json?.error?.status ||
-        json?.candidates?.[0]?.finishReason ||
-        resp.statusText;
-      throw new Error(`Gemini error: ${reason}`);
+    const clean = cleanupTweets(tweets);
+
+    const batches = chunkArray(clean, MAX_TWEETS_PER_BATCH);
+
+    const batchSummaries: string[] = [];
+    for (const batch of batches) {
+      const prompt = buildAnalyzePrompt(batch, {
+        projectName,
+        maxWords: MAX_WORDS_PER_BATCH,
+      });
+      const summary = await callGemini(prompt);
+      batchSummaries.push(summary);
     }
 
-    const text =
-      json?.candidates?.[0]?.content?.parts
-        ?.map((p: any) => p?.text)
-        .join("") || "";
-    return text;
-  } finally {
-    clearTimeout(to);
-  }
-}
+    const synthesisPrompt = buildSynthesisPrompt(batchSummaries, {
+      projectName,
+      maxWords: MAX_WORDS_FINAL,
+    });
+    const finalMarkdown = await callGemini(synthesisPrompt);
 
-function safeError(err: unknown) {
-  try {
-    return getErrorMessage(err);
-  } catch {
-    return (err as any)?.message || String(err);
+    let resolvedSearchId: string | undefined = searchId;
+
+    if (!resolvedSearchId && jobId) {
+      const row = await db.query.searches.findFirst({
+        where: eq(searches.jobId, jobId),
+        columns: { id: true },
+      });
+      resolvedSearchId = row?.id;
+    }
+
+    if (!resolvedSearchId) {
+      const session = await getServerSession(authOptions);
+      const userId: string | null = (session?.user as any)?.id ?? null;
+      const cookieStore = await cookies();
+      const anonSessionId: string | null =
+        cookieStore.get("anon_session_id")?.value ?? null;
+
+      if (userId) {
+        const rows = await db
+          .select({ id: searches.id })
+          .from(searches)
+          .where(eq(searches.userId, userId))
+          .orderBy(desc(searches.createdAt))
+          .limit(1);
+        resolvedSearchId = rows[0]?.id;
+      } else if (anonSessionId) {
+        const rows = await db
+          .select({ id: searches.id })
+          .from(searches)
+          .where(eq(searches.anonSessionId, anonSessionId))
+          .orderBy(desc(searches.createdAt))
+          .limit(1);
+        resolvedSearchId = rows[0]?.id;
+      }
+    }
+
+    if (resolvedSearchId) {
+      await db.insert(aiUnderstandings).values({
+        searchId: resolvedSearchId,
+        model: MODEL_NAME,
+        resultJson: {
+          promptVersion: "v2-map-reduce-2.5-5min-2025-08-18",
+          batches: batchSummaries.map((text, i) => ({ index: i + 1, text })),
+          final: { text: finalMarkdown },
+        },
+        summaryText: finalMarkdown,
+      });
+    }
+
+    return NextResponse.json({ text: finalMarkdown });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "AI error" },
+      { status: 400 },
+    );
   }
 }
