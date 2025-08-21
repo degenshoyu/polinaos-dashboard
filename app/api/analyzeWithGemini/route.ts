@@ -53,8 +53,8 @@ const LLM_TIMEOUT_MS = parseDuration(process.env.AI_LLM_TIMEOUT_MS, 300_000);
 /** ===================== Zod ===================== **/
 const Body = z.object({
   tweets: z.array(z.object({ textContent: z.string().min(1) })).min(1),
-  jobId: z.string().optional(),
-  searchId: z.string().uuid().optional(),
+  jobId: z.string().nullable().optional(),
+  searchId: z.string().uuid().nullable().optional(),
   projectName: z.string().optional(),
 });
 
@@ -112,11 +112,19 @@ async function callGemini(
 /** ===================== Route ===================== **/
 export async function POST(req: Request) {
   try {
-    const { tweets, jobId, searchId, projectName } = Body.parse(
-      await req.json(),
-    );
+    const parsed = Body.parse(await req.json());
+    const tweets = parsed.tweets;
+    const jobId = parsed.jobId ?? undefined;
+    const searchId = parsed.searchId ?? undefined;
+    const projectName = parsed.projectName;
 
     const clean = cleanupTweets(tweets);
+    if (clean.length === 0) {
+      return NextResponse.json(
+        { error: "No valid tweets to analyze after normalization." },
+        { status: 400 },
+      );
+    }
 
     const batches = chunkArray(clean, MAX_TWEETS_PER_BATCH);
 

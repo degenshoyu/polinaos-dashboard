@@ -254,7 +254,7 @@ I'll guide you through the whole process:
             }
 
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 150_000);
+            const timeout = setTimeout(() => controller.abort(), 300_000);
             const aiRes = await fetch("/api/analyzeWithGemini", {
               method: "POST",
               headers: { "Content-Type": "application/json" },

@@ -1,7 +1,7 @@
 "use client";
 
 import type { AnalysisInput } from "./types";
-import { InputCard } from "./InputCard";
+import InputCard from "./InputCard";
 import { AiUnderstanding } from "./AiUnderstanding";
 
 export default function CampaignLeftPane({
