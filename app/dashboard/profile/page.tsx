@@ -17,7 +17,7 @@ export default function ProfilePage() {
   const { data: session, status } = useSession();
   const wallet = useMemo(() => {
     const u: any = session?.user || {};
-    return String(u?.id || u?.address || u?.name || "");
+    return String(u?.address);
   }, [session]);
 
   const [rows, setRows] = useState<Row[] | null>(null);

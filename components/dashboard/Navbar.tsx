@@ -12,7 +12,8 @@ const WalletButton = dynamic(() => import("../SignInWithSolana"), { ssr: false }
 
 function pickWalletFromSession(session: any): string {
   const u = session?.user || {};
-  return String(u.id || u.address || u.name || "");
+  return String(u.address);
+  // return String(u.id || u.address || u.name || "");
 }
 
 function shorten(addr?: string) {
