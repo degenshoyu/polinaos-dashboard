@@ -356,18 +356,8 @@ export default function TweeterShareCard({
               ))}
             </tbody>
           </table>
-
-          {/* Tiny note for clarity */}
-          <div className="mt-2 text-[11px] text-gray-500">
-            Table shows the same Top {topN} tweeters as the pie (ordered by the selected metric).
-          </div>
         </div>
       )}
-
-      {/* Footnote about interactions */}
-      <div className="mt-2 text-[11px] text-gray-500">
-        Tip: use mouse wheel or swipe up/down on the “Top N” pill to adjust the number.
-      </div>
     </div>
   );
 }
