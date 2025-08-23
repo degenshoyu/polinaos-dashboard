@@ -77,10 +77,6 @@ export default function InputCard({
 
   return (
     <div className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}>
-      <h2 className="text-xl font-bold mb-4 bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-        Campaign · Input
-      </h2>
-
       {mode === "editing" ? (
         <div className="relative">
           <input
