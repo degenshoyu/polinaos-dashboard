@@ -12,7 +12,6 @@ const WalletButton = dynamic(() => import("../SignInWithSolana"), { ssr: false }
 
 function pickWalletFromSession(session: any): string {
   const u = session?.user || {};
-  // 兼容多种后端写法：id / address / name
   return String(u.id || u.address || u.name || "");
 }
 
@@ -28,6 +27,18 @@ export default function Navbar() {
 
   const sessionWallet = pickWalletFromSession(session);
   const isLoggedIn = !!sessionWallet;
+
+  const WalletPill = (
+    <Link
+      href="/dashboard/profile"
+      className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium hover:bg-white/10 transition-colors"
+      title={sessionWallet}
+      aria-label="Open profile"
+      prefetch={false}
+    >
+      {shorten(sessionWallet)}
+    </Link>
+  );
 
   return (
     <header className="sticky top-0 z-50 flex justify-center px-3 py-4 md:px-4">
@@ -64,12 +75,7 @@ export default function Navbar() {
         <div className="hidden md:flex items-center gap-2">
           {isLoggedIn ? (
             <>
-              <span
-                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium"
-                title={sessionWallet}
-              >
-                {shorten(sessionWallet)}
-              </span>
+              {WalletPill}
               <button
                 onClick={() => signOut()}
                 className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
@@ -86,12 +92,7 @@ export default function Navbar() {
         <div className="md:hidden flex items-center gap-2">
           {isLoggedIn ? (
             <>
-              <span
-                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium"
-                title={sessionWallet}
-              >
-                {shorten(sessionWallet)}
-              </span>
+              {WalletPill}
               <button
                 onClick={() => signOut()}
                 className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"

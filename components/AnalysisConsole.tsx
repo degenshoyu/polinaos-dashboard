@@ -208,6 +208,22 @@ I'll guide you through the whole process:
               setJobId(id);
               onJobIdChange?.(id);
               startPolling(id);
+              // ✍️ Persist "scanning" row to DB
+              try {
+                await fetch("/api/campaigns", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                  jobId: id,
+                  queryJson: {
+                    projectName: input.projectName || input.xProfile || input.tokenAddress || "Untitled",
+                    twitterHandle: input.xProfile || "",
+                    contractAddress: input.tokenAddress || "",
+                  },
+                  source: "ctsearch"
+                  }),
+                });
+              } catch {/* ignore */}
             }
           }
         }
@@ -260,6 +276,19 @@ I'll guide you through the whole process:
 
           setStatus("complete");
           append(toFriendly(`✅ Completed: ${data?.tweets_count || 0} tweets found.`));
+          // ✍️ Update DB to "completed" with final count
+          try {
+            await fetch("/api/campaigns", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jobId: id,
+                queryJson: {},
+                source: "ctsearch",
+                tweetsCount: typeof data?.tweets_count === "number" ? data.tweets_count : 0,
+              }),
+            });
+          } catch {/* ignore */}
 
           // Placeholder while AI generates
           setMessages((prev) => {
@@ -305,7 +334,7 @@ I'll guide you through the whole process:
             }
 
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 300_000);
+            const timeout = setTimeout(() => controller.abort(), 600_000);
             const aiRes = await fetch("/api/analyzeWithGemini", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -313,7 +342,7 @@ I'll guide you through the whole process:
               signal: controller.signal,
             }).catch((e) => {
               throw new Error(
-                e?.name === "AbortError" ? "AI request timeout (150s)" : e?.message || "Network error"
+                e?.name === "AbortError" ? "AI request timeout (600s)" : e?.message || "Network error"
               );
             });
             clearTimeout(timeout);
