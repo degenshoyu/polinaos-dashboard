@@ -5,29 +5,18 @@ import React, { useMemo, useRef, useState } from "react";
 import type { AnalysisInput } from "./types";
 import { useGeckoSearch, type TokenOption } from "@/hooks/useGeckoSearch";
 
-/**
- * InputCard (single-field, dexscreener-like)
- *
- * - One combobox accepts ticker or contract address.
- * - Uses the NEW useGeckoSearch() signature:
- *     const { query, setQuery, results, loading, error } = useGeckoSearch(...)
- * - Dropdown shows rich rows (liquidity / 24h vol / market cap).
- * - On selection:
- *     projectName <- option.symbol
- *     tokenAddress <- option.tokenAddress
- *   then immediately calls onRun(...) and flips into a frozen (display-only) view.
- */
 export default function InputCard({
   onRun,
+  deepLinkUrl,
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;
+  deepLinkUrl?: string;
   className?: string;
 }) {
   type Mode = "editing" | "frozen";
   const [mode, setMode] = useState<Mode>("editing");
 
-  // Minimal payload your pipeline needs
   const [form, setForm] = useState<AnalysisInput>({
     projectName: "",
     website: "",
@@ -37,57 +26,36 @@ export default function InputCard({
     tokenAddress: "",
   });
 
-  // Hook: client-side GeckoTerminal search (debounced inside the hook)
   const preferredChains = useMemo(() => ["solana", "ethereum"], []);
-  const {
-    query: hookQuery,
-    setQuery: setHookQuery,
-    results,
-    loading,
-    error,
-  } = useGeckoSearch({
-    preferredChains,
-    debounceMs: 300,
-    limit: 10,
-  });
+  const { query: hookQuery, setQuery: setHookQuery, results, loading, error } =
+    useGeckoSearch({ preferredChains, debounceMs: 300, limit: 10 });
 
-  // Local input text simply proxies hookQuery to make controlled input straightforward
   const [localQuery, setLocalQuery] = useState(hookQuery ?? "");
   const listRef = useRef<HTMLDivElement | null>(null);
   const [activeIdx, setActiveIdx] = useState(0);
 
-  // Whether there is enough info to run (kept for clarity; select will always run)
   const canRun = useMemo(() => Boolean(form.tokenAddress?.trim()), [form.tokenAddress]);
 
-  /** Select a suggestion (TokenOption) → map → run → freeze UI */
   const applySelection = (opt: TokenOption | null) => {
     if (!opt) return;
-
     const next: AnalysisInput = {
       ...form,
       projectName: opt.symbol || "",
       tokenAddress: opt.tokenAddress || "",
-      // Clear irrelevant fields to avoid stale context
       website: "",
       xProfile: "",
       xCommunity: "",
       telegram: "",
     };
-
     setForm(next);
-    // Freeze the visible text for readability
     setLocalQuery(`${opt.symbol} · ${shortAddr(opt.tokenAddress)}`);
-
-    // Run immediately and flip
     onRun(next);
     setMode("frozen");
   };
 
-  // Keyboard navigation for the dropdown
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     const len = results?.length ?? 0;
     if (len === 0) return;
-
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIdx((i) => Math.min(i + 1, len - 1));
@@ -103,22 +71,17 @@ export default function InputCard({
   };
 
   const scrollToIdx = (idx: number) => {
-    const el = listRef.current?.querySelectorAll('[role="option"]')?.[idx] as
-      | HTMLElement
-      | undefined;
+    const el = listRef.current?.querySelectorAll('[role="option"]')?.[idx] as HTMLElement | undefined;
     el?.scrollIntoView({ block: "nearest" });
   };
 
   return (
-    <div
-      className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}
-    >
+    <div className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}>
       <h2 className="text-xl font-bold mb-4 bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
         Campaign · Input
       </h2>
 
       {mode === "editing" ? (
-        /* ====== EDITING: combobox + dropdown ====== */
         <div className="relative">
           <input
             className="w-full px-3 py-2 bg-[#0d0d0d] border border-[#333] focus:ring-2 focus:ring-[#64e3a1] rounded-md text-white placeholder:text-gray-500 text-sm"
@@ -128,11 +91,8 @@ export default function InputCard({
               const v = e.target.value;
               setLocalQuery(v);
               setActiveIdx(0);
-              setHookQuery(v); // the hook will debounce & fetch
-              if (!v.trim()) {
-                // If cleared, also drop the previous selection in form
-                setForm((f) => ({ ...f, projectName: "", tokenAddress: "" }));
-              }
+              setHookQuery(v);
+              if (!v.trim()) setForm((f) => ({ ...f, projectName: "", tokenAddress: "" }));
             }}
             onKeyDown={onKeyDown}
             aria-expanded={(results?.length ?? 0) > 0}
@@ -148,29 +108,18 @@ export default function InputCard({
               role="listbox"
               className="absolute z-20 mt-1 w-full max-h-96 overflow-y-auto rounded-xl border border-white/10 bg-[#0c1111]/95 backdrop-blur-xl shadow-2xl"
             >
-              {loading && (
-                <div className="px-3 py-2 text-xs text-gray-400">Loading…</div>
-              )}
-              {error && !loading && (
-                <div className="px-3 py-2 text-xs text-red-400">
-                  Error: {error}
-                </div>
-              )}
+              {loading && <div className="px-3 py-2 text-xs text-gray-400">Loading…</div>}
+              {error && !loading && <div className="px-3 py-2 text-xs text-red-400">Error: {error}</div>}
               {!loading && !error && (results?.length ?? 0) === 0 && localQuery.trim() && (
-                <div className="px-3 py-2 text-xs text-gray-400">
-                  No results. Try pasting a contract address.
-                </div>
+                <div className="px-3 py-2 text-xs text-gray-400">No results. Try pasting a contract address.</div>
               )}
-
-              {!loading &&
-                !error &&
+              {!loading && !error &&
                 (results ?? []).map((it, i) => (
                   <ResultCard
                     key={`${it.chain}:${it.tokenAddress || it.baseTokenId}`}
                     active={i === activeIdx}
                     onMouseEnter={() => setActiveIdx(i)}
                     onClick={() => applySelection(it)}
-                    // Map TokenOption → ResultCard props
                     networkId={it.chain}
                     symbol={it.symbol}
                     name={it.name}
@@ -193,14 +142,12 @@ export default function InputCard({
           projectName={form.projectName}
           tokenAddress={form.tokenAddress}
           frozenText={localQuery || `${form.projectName} · ${shortAddr(form.tokenAddress)}`}
-          onChange={() => {
-            setMode("editing");
-            // Keep the last typed value in input; users can tweak and search again
-          }}
+          deepLinkUrl={deepLinkUrl}
+          onChange={() => setMode("editing")}
         />
       )}
 
-      {/* Read-only summary (handy for debugging / clarity) */}
+      {/* Read-only summary */}
       <div className="mt-4 text-xs text-gray-400 space-y-1">
         <div className="truncate">
           <span className="text-gray-400">Project: </span>
@@ -210,29 +157,35 @@ export default function InputCard({
           <span className="text-gray-400">Token: </span>
           <span className="text-gray-200">{form.tokenAddress || "-"}</span>
         </div>
-        {!canRun && (
-          <div className="text-[11px] text-amber-400/80">
-            Tip: Select a token from the list to start analysis automatically.
-          </div>
-        )}
+        {!canRun && <div className="text-[11px] text-amber-400/80">Tip: Select a token from the list to start analysis automatically.</div>}
       </div>
     </div>
   );
 }
 
 /* ----------------- Frozen (display) view ----------------- */
-
 function FrozenView({
   projectName,
   tokenAddress,
   frozenText,
+  deepLinkUrl,
   onChange,
 }: {
   projectName?: string;
   tokenAddress?: string;
   frozenText?: string;
+  deepLinkUrl?: string;
   onChange?: () => void;
 }) {
+  const copy = async () => {
+    try {
+      if (!deepLinkUrl) return;
+      await navigator.clipboard.writeText(deepLinkUrl);
+    } catch {
+      window.prompt("Copy this link:", deepLinkUrl || "");
+    }
+  };
+
   return (
     <div className="w-full rounded-xl border border-white/10 bg-white/[0.04] p-3 flex items-center justify-between">
       <div className="min-w-0">
@@ -241,31 +194,44 @@ function FrozenView({
           {frozenText || shortAddr(tokenAddress)}
         </div>
       </div>
-      <button
-        type="button"
-        onClick={onChange}
-        className="ml-3 px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-xs font-medium text-gray-100"
-        title="Change token"
-      >
-        Change
-      </button>
+
+      <div className="ml-3 flex items-center gap-2">
+        {deepLinkUrl && (
+          <button
+            type="button"
+            onClick={copy}
+            className="px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-xs font-medium text-emerald-300"
+            title="Copy sharable link"
+            aria-label="Copy sharable link"
+          >
+            Copy link
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onChange}
+          className="px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-xs font-medium text-gray-100"
+          title="Change token"
+        >
+          Change
+        </button>
+      </div>
     </div>
   );
 }
 
 /* ----------------- Result Card (dropdown row) ----------------- */
-
 type ResultCardProps = {
-  networkId: string; // e.g. "solana", "ethereum", "base"
+  networkId: string;
   symbol: string;
   name?: string;
   imageUrl?: string;
   tokenAddress: string;
   dex?: string;
   priceUsd?: number;
-  marketCapUsd?: number;     // NEW: show Market Cap (or FDV fallback)
-  reserveUsd?: number;       // Liquidity
-  volume24hUsd?: number;     // 24h Volume
+  marketCapUsd?: number;
+  reserveUsd?: number;
+  volume24hUsd?: number;
   createdAt?: string;
   active?: boolean;
   onClick?: () => void;
@@ -307,22 +273,7 @@ function ResultCard({
     </span>
   );
 
-  const moneyShort = (n?: number) => {
-    if (typeof n !== "number" || !isFinite(n)) return "-";
-    if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
-    if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
-    if (n >= 1_000) return `$${(n / 1_000).toFixed(2)}K`;
-    return `$${n.toFixed(2)}`;
-  };
-
-  const short = (addr?: string) =>
-    !addr ? "-" : addr.length <= 14 ? addr : `${addr.slice(0, 8)}…${addr.slice(-6)}`;
-
-  const chainPill = (
-    <span className="inline-flex items-center px-1.5 py-0.5 rounded-md border border-white/10 bg-white/10 text-[10px] uppercase tracking-wide">
-      {networkId}
-    </span>
-  );
+  const short = (addr?: string) => (!addr ? "-" : addr.length <= 14 ? addr : `${addr.slice(0, 8)}…${addr.slice(-6)}`);
 
   return (
     <button
@@ -331,22 +282,14 @@ function ResultCard({
       aria-selected={active}
       onClick={onClick}
       onMouseEnter={onMouseEnter}
-      className={`w-full text-left px-3 py-2 border-b border-white/5 last:border-0 transition rounded-lg ${
-        active ? "bg-white/10" : "hover:bg-white/5"
-      }`}
+      className={`w-full text-left px-3 py-2 border-b border-white/5 last:border-0 transition rounded-lg ${active ? "bg-white/10" : "hover:bg-white/5"}`}
     >
-      {/* Top row: avatar + symbol/name + price */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0">
           <div className="relative h-7 w-7 rounded-full overflow-hidden bg-white/10 shrink-0">
             {imageUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={imageUrl}
-                alt={symbol}
-                className="h-full w-full object-cover"
-                loading="lazy"
-              />
+              <img src={imageUrl} alt={symbol} className="h-full w-full object-cover" loading="lazy" />
             ) : (
               <div className="h-full w-full flex items-center justify-center text-[10px] text-gray-300">
                 {symbol?.slice(0, 2) || "?"}
@@ -356,7 +299,9 @@ function ResultCard({
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm text-white/90 truncate">
               <span className="font-semibold">{symbol || "-"}</span>
-              {chainPill}
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded-md border border-white/10 bg-white/10 text-[10px] uppercase tracking-wide">
+                {networkId}
+              </span>
             </div>
             <div className="text-xs text-gray-400 truncate">{name || "-"}</div>
           </div>
@@ -367,7 +312,6 @@ function ResultCard({
         </div>
       </div>
 
-      {/* Metrics row */}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {chip("MktCap", moneyShort(marketCapUsd))}
         {chip("Liq", moneyShort(reserveUsd))}
@@ -376,7 +320,6 @@ function ResultCard({
         {chip("DEX", dex || "-")}
       </div>
 
-      {/* Footer: addresses */}
       <div className="mt-1 text-[11px] text-gray-500 truncate">
         TOKEN: {short(tokenAddress)}
       </div>
@@ -385,9 +328,17 @@ function ResultCard({
 }
 
 /* ----------------- helpers ----------------- */
-
 function shortAddr(addr?: string) {
   if (!addr) return "-";
   if (addr.length <= 14) return addr;
   return `${addr.slice(0, 8)}…${addr.slice(-6)}`;
+}
+
+function moneyShort(v?: number) {
+  if (typeof v !== "number" || !isFinite(v)) return "-";
+  const abs = Math.abs(v);
+  if (abs >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${(v / 1_000).toFixed(2)}K`;
+  return v.toFixed(2);
 }

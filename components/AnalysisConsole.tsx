@@ -40,6 +40,7 @@ export default function AnalysisConsole({
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+  const deepLinkJobRef = useRef<string | null>(null);
 
   // Restore collapsed preference on mount
   useEffect(() => {
@@ -78,9 +79,26 @@ I'll guide you through the whole process:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
 
-  // Trigger a new scan when inputs change (projectName/xProfile/tokenAddress)
+  // ---------- NEW: Deeplink intake ----------
+   useEffect(() => {
+     const u = typeof window !== "undefined" ? new URL(window.location.href) : null;
+     const deepJob = u?.searchParams.get("job");
+     if (!deepJob) return;
+     deepLinkJobRef.current = deepJob;
+     if (pollTimer.current) clearInterval(pollTimer.current);
+     setStatus("scanning");
+     setMessages([]);
+     setJobId(deepJob);
+     onJobIdChange?.(deepJob);
+     append("🔗 Shared link detected. Resuming job status…");
+     startPolling(deepJob);
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
+
+  // Trigger a new scan when inputs change (projectName/xProfile/tokenAddress) — only if NOT deeplink mode
   useEffect(() => {
     if (!inputs) return;
+    if (deepLinkJobRef.current) return;
     runScan(inputs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputs?.projectName, inputs?.xProfile, inputs?.tokenAddress]);
@@ -200,6 +218,28 @@ I'll guide you through the whole process:
     }
   }
 
+  // ---------- Helper: resolve jobId from a searchId ----------
+  async function resolveJobIdBySearch(searchId: string): Promise<string | null> {
+    // Try /api/searches?id=... first
+    const tryFetch = async (path: string) => {
+      const r = await fetch(path, { cache: "no-store" });
+      if (!r.ok) return null;
+      const j = await r.json().catch(() => ({}));
+      const id = (j?.jobId || j?.job_id || j?.search?.jobId || j?.search?.job_id) as string | undefined;
+      return (typeof id === "string" && id.trim()) ? id.trim() : null;
+    };
+
+    // 1) /api/searches?id=<uuid>
+    const a = await tryFetch(`/api/searches?id=${encodeURIComponent(searchId)}`);
+    if (a) return a;
+
+    // 2) /api/searches/<uuid>
+    const b = await tryFetch(`/api/searches/${encodeURIComponent(searchId)}`);
+    if (b) return b;
+
+    return null;
+  }
+
   // Poll job status and then trigger AI analysis
   function startPolling(id: string) {
     if (pollTimer.current) clearInterval(pollTimer.current);
@@ -234,6 +274,17 @@ I'll guide you through the whole process:
           });
 
           try {
+            const hit = await fetch(`/api/ai-understanding?job_id=${encodeURIComponent(id)}`, { cache: "no-store" });
+            const hitJson = await hit.json().catch(() => ({}));
+            if (hit.ok && hitJson?.found && (hitJson.summaryText || hitJson.resultJson)) {
+              const summary = String(hitJson.summaryText || "");
+              onAnalysisResult?.({ summary });
+              replaceGenerating("📊 Loaded existing AI understanding from database.");
+              return;
+            }
+          } catch { /* ignore and fallback to AI */ }
+
+          try {
             // Sanitize tweets for AI (text-only)
             const rawTweets = Array.isArray(data?.tweets) ? data.tweets : [];
             const safeTweets = rawTweets
@@ -258,7 +309,7 @@ I'll guide you through the whole process:
             const aiRes = await fetch("/api/analyzeWithGemini", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tweets: safeTweets, jobId }),
+              body: JSON.stringify({ tweets: safeTweets, jobId: id }),
               signal: controller.signal,
             }).catch((e) => {
               throw new Error(
@@ -280,6 +331,17 @@ I'll guide you through the whole process:
             replaceGenerating(`❌ Gemini request failed: ${e?.message || "Unknown error"}`);
           }
 
+          return;
+        }
+
+        // Fail → show invalid link / failed job
+        if (data?.status === "fail" || data?.status === "failed" || data?.error) {
+          if (pollTimer.current) {
+            clearInterval(pollTimer.current);
+            pollTimer.current = null;
+          }
+          setStatus("error");
+          append(`❌ This link is not available (job failed).`);
           return;
         }
 
@@ -364,12 +426,10 @@ I'll guide you through the whole process:
             className="px-4 py-3 space-y-4 text-sm h-[420px] overflow-y-auto border-t border-white/10 mt-3"
           >
             {messages.map((m, i) => {
-              // Detect special lines to replace their leading emoji with a lotus icon
               const isScanningLine = m.text.startsWith("⌛ Scanning in progress");
               const isCompletedLine = m.text.startsWith("📊 I’ve completed the analysis");
               const isAnalyzingLine = m.text.startsWith("🧠 Let me analyze");
 
-              // Normalize text by stripping the leading emoji when we render a lotus
               const textNormalized = isScanningLine
                 ? m.text.replace(/^⌛\s*/, "")
                 : isCompletedLine
@@ -387,7 +447,6 @@ I'll guide you through the whole process:
                     <div className="text-gray-200 font-mono leading-snug whitespace-pre-wrap">
                       {isScanningLine || isCompletedLine || isAnalyzingLine ? (
                         <span className="inline-flex items-center gap-2">
-                          {/* Rotating lotus while scanning & analyzing; static lotus after completion */}
                           <LotusIcon
                             className={`w-12 h-12 shrink-0 ${
                               (isScanningLine && status === "scanning") || isAnalyzingLine
@@ -446,7 +505,6 @@ function LotusIcon({
   style?: React.CSSProperties;
   title?: string;
 }) {
-  // Petal is drawn pointing up, then rotated around center for radial symmetry
   return (
     <svg
       viewBox="0 0 24 24"
@@ -457,18 +515,13 @@ function LotusIcon({
     >
       {title ? <title>{title}</title> : null}
       <defs>
-        {/* Soft green gradient to match Polina's accent */}
         <linearGradient id="lotusGrad" x1="0%" y1="0%" x2="0%" y2="100%">
           <stop offset="0%" stopColor="#3ef2ac" />
           <stop offset="100%" stopColor="#27a567" />
         </linearGradient>
       </defs>
 
-      {/* Center circle */}
       <circle cx="12" cy="12" r="2" fill="url(#lotusGrad)" opacity="0.95" />
-
-      {/* Single petal path (top), then replicated by rotation for symmetry */}
-      {/* The curve creates a petal-like teardrop. Adjusted for balanced spin */}
       <g fill="url(#lotusGrad)" opacity="0.95">
         {Array.from({ length: 8 }).map((_, idx) => (
           <g key={idx} transform={`rotate(${idx * 45} 12 12)`}>

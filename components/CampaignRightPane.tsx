@@ -12,20 +12,26 @@ import type { AnalysisInput } from "@/components/types";
 export default function CampaignRightPane({
   inputs,
   onAnalysisResult,
+  onJobIdChange,
   className = "",
 }: {
   inputs?: AnalysisInput | null;
   onAnalysisResult?: (res: { summary: string }) => void;
+  onJobIdChange?: (id: string | null) => void;
   className?: string;
 }) {
   const [jobId, setJobId] = useState<string | null>(null);
+  const handleJobId = (id: string | null) => {
+    setJobId(id);
+    onJobIdChange?.(id);
+  };
 
   return (
     <div className={`flex flex-col gap-6 ${className}`}>
       <AnalysisConsole
         inputs={inputs}
         onAnalysisResult={onAnalysisResult}
-        onJobIdChange={setJobId} // <-- new bridge for StatisticSummary
+        onJobIdChange={handleJobId}
       />
 
       {/* Statistic Summary card will visualize the tweets of the latest job */}
@@ -33,4 +39,3 @@ export default function CampaignRightPane({
     </div>
   );
 }
-
