@@ -1,10 +1,12 @@
+// components/StatisticSummary.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recharts";
+import { useEffect, useMemo, useState, useRef } from "react";
+import TweeterShareCard, { MinimalTweet } from "@/components/TweeterShareCard";
+import html2canvas from "html2canvas";
 
 /** Minimal Tweet type extracted from jobProxy payload */
-type TweetRow = {
+type TweetRow = MinimalTweet & {
   tweetId: string;
   tweeter?: string;
   textContent?: string;
@@ -38,6 +40,20 @@ export default function StatisticSummary({
   const [data, setData] = useState<JobPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  async function handleSaveScreenshot() {
+    if (!cardRef.current) return;
+    const canvas = await html2canvas(cardRef.current, {
+      backgroundColor: "#0a0f0e",
+      scale: 2,
+    });
+    const link = document.createElement("a");
+    link.download = `statistic-summary-${jobId ?? "nojob"}.png`;
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  }
 
   // Auto-fetch when jobId changes
   useEffect(() => {
@@ -98,36 +114,6 @@ export default function StatisticSummary({
     return { tweets, views, engagements, er };
   }, [rowsVerified]);
 
-  /** Pie — top 5 tweeters by views; others merged into "Rest" */
-  const pieTweeter = useMemo(() => {
-    const totalViews = rowsAll.reduce((s, t) => s + n(t.views), 0);
-    if (totalViews <= 0) return [] as { name: string; value: number; share: number }[];
-    const map: Record<string, number> = {};
-    for (const t of rowsAll) {
-      const name = t.tweeter || "unknown";
-      map[name] = (map[name] || 0) + n(t.views);
-    }
-    const entries = Object.entries(map)
-      .map(([name, value]) => ({ name, value, share: value / totalViews }))
-      .sort((a, b) => b.value - a.value);
-
-    const top5 = entries.slice(0, 5);
-    const restVal = entries.slice(5).reduce((s, e) => s + e.value, 0);
-    if (restVal > 0) top5.push({ name: "Rest", value: restVal, share: restVal / totalViews });
-    return top5;
-  }, [rowsAll]);
-
-  /** Top tweets by views */
-  const topTweets = useMemo(() => {
-    const rows = rowsAll.slice();
-    rows.sort((a, b) => n(b.views) - n(a.views));
-    return rows.slice(0, 8);
-  }, [rowsAll]);
-
-  // Colors
-  const COLORS = ["#3ef2ac", "#27a567", "#7dd3fc", "#fca5a5", "#fcd34d", "#d8b4fe", "#f9a8d4", "#93c5fd"];
-  const REST_COLOR = "#475569"; // slate-600
-
   // Header
   const header = (
     <div className="flex items-center justify-between mb-4">
@@ -143,6 +129,14 @@ export default function StatisticSummary({
           title="Refresh"
         >
           ↻ Refresh
+        </button>
+        <button
+          onClick={handleSaveScreenshot}
+          disabled={!jobId}
+          className="px-2.5 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80 disabled:opacity-50"
+          title="Save as PNG"
+        >
+          📸 Save
         </button>
       </div>
     </div>
@@ -168,7 +162,6 @@ export default function StatisticSummary({
         <p className="text-sm text-gray-400">Job status: {data?.status ?? "unknown"} — stats will populate after completion.</p>
       )}
 
-      {/* Render only with data */}
       {!loading && !err && rowsAll.length > 0 && (
         <div className="grid grid-cols-1 gap-6">
           {/* --- Search summary (separate card) --- */}
@@ -216,78 +209,40 @@ export default function StatisticSummary({
             </div>
           </div>
 
-          {/* --- Chart 3: Pie — top 5 tweeters by views; others merged as Rest --- */}
-          <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
-            <div className="text-xs text-gray-400 mb-2">Views share by tweeter (Top 5; others merged)</div>
-            <div className="h-64">
-              <ResponsiveContainer>
-                <PieChart>
-                  <Pie
-                    data={pieTweeter}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    outerRadius="75%"
-                    // Smaller, cleaner labels; hide tiny slices; no label line to reduce clutter
-                    labelLine={false}
-                    label={(props: any) => renderPieLabel(props)}
-                  >
-                    {pieTweeter.map((entry, idx) => (
-                      <Cell
-                        key={`slice-${entry.name}-${idx}`}
-                        fill={entry.name === "Rest" ? REST_COLOR : COLORS[idx % COLORS.length]}
-                        stroke="#0f1413"
-                        strokeWidth={1}
-                      />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    // Make tooltip readable on dark background
-                    contentStyle={{ background: "#0f1413", border: "1px solid #222", color: "#e5e7eb" }}
-                    labelStyle={{ color: "#e5e7eb" }}
-                    itemStyle={{ color: "#e5e7eb" }}
-                    formatter={(val: any, _name, item: any) => [
-                      compact(val as number),
-                      `${item?.payload?.name} (${pctText(item?.payload?.share)})`,
-                    ]}
-                  />
-                  <Legend wrapperStyle={{ color: "#cbd5e1" }} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          {/* --- Chart 3: Tweeter share (metric & TopN configurable) --- */}
+          <TweeterShareCard tweets={rowsAll} />
 
           {/* --- Chart 4: Top tweets by views (list) --- */}
           <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
             <div className="text-xs text-gray-400 mb-3">Top tweets by views</div>
             <ul className="space-y-3">
-              {topTweets.map((t, i) => (
-                <li
-                  key={t.tweetId ?? `${i}`}
-                  className="p-3 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition"
-                >
-                  <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
-                    <span>#{i + 1} · {t.tweeter ?? "unknown"} {t.isVerified ? "✓" : ""}</span>
-                    <span className="text-white/80">
-                      👁 {compact(n(t.views))} · ❤ {compact(n(t.likes))}
-                      {" · "}🔁 {compact(n(t.retweets))}
-                      {" · "}💬 {compact(n(t.replies))}
-                    </span>
-                  </div>
-                  <div className="text-sm text-gray-200 line-clamp-3">{t.textContent || "(no text)"}</div>
-                  {t.statusLink && (
-                    <a
-                      href={t.statusLink}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-emerald-300 hover:text-emerald-200 underline underline-offset-2 text-xs mt-1 inline-block break-all"
-                    >
-                      Open on X
-                    </a>
-                  )}
-                </li>
-              ))}
+              {rowsAll
+                .slice()
+                .sort((a, b) => (n(b.views) - n(a.views)))
+                .slice(0, 8)
+                .map((t, i) => (
+                  <li key={(t as any).tweetId ?? `${i}`} className="p-3 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition">
+                    <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                      <span>#{i + 1} · {t.tweeter ?? "unknown"} {(t as any).isVerified ? "✓" : ""}</span>
+                      <span className="text-white/80">
+                        👁 {compact(n(t.views))} · ❤ {compact(n((t as any).likes))}
+                        {" · "}🔁 {compact(n((t as any).retweets))}
+                        {" · "}💬 {compact(n((t as any).replies))}
+                      </span>
+                    </div>
+                    <div className="text-sm text-gray-200 line-clamp-3">{(t as any).textContent || "(no text)"}</div>
+                    {(t as any).statusLink && (
+                      <a
+                        href={(t as any).statusLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-emerald-300 hover:text-emerald-200 underline underline-offset-2 text-xs mt-1 inline-block break-all"
+                      >
+                        Open on X
+                      </a>
+                    )}
+                  </li>
+                ))}
             </ul>
           </div>
         </div>
@@ -296,7 +251,7 @@ export default function StatisticSummary({
   );
 }
 
-/** Small tile with a colored square, label, and value */
+/** Small KPI tile */
 function Tile({ color, label, value }: { color: string; label: string; value: string | number }) {
   return (
     <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
@@ -308,31 +263,3 @@ function Tile({ color, label, value }: { color: string; label: string; value: st
     </div>
   );
 }
-
-/** Custom pie label: smaller font, only show when slice >= 4% to reduce clutter */
-function renderPieLabel(props: any) {
-  const { cx, cy, midAngle, outerRadius, percent, name, payload } = props;
-  if (percent < 0.04) return null; // hide tiny slices
-
-  const RADIAN = Math.PI / 180;
-  const r = outerRadius + 10; // move label slightly outside the pie
-  const x = cx + r * Math.cos(-midAngle * RADIAN);
-  const y = cy + r * Math.sin(-midAngle * RADIAN);
-
-  const color = payload?.name === "Rest" ? "#94a3b8" : "#34d399"; // slate-300 vs. emerald-300
-  const text = `${name} ${(percent * 100).toFixed(1)}%`;
-
-  return (
-    <text
-      x={x}
-      y={y}
-      fill={color}
-      fontSize={12}
-      textAnchor={x > cx ? "start" : "end"}
-      dominantBaseline="central"
-    >
-      {text}
-    </text>
-  );
-}
-

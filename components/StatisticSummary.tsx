@@ -1,8 +1,9 @@
 // components/StatisticSummary.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import TweeterShareCard, { MinimalTweet } from "@/components/TweeterShareCard";
+import html2canvas from "html2canvas";
 
 /** Minimal Tweet type extracted from jobProxy payload */
 type TweetRow = MinimalTweet & {
@@ -39,6 +40,13 @@ export default function StatisticSummary({
   const [data, setData] = useState<JobPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Screenshot UI state
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  // Wrap the entire card for html2canvas
+  const cardRef = useRef<HTMLDivElement>(null);
 
   // Auto-fetch when jobId changes
   useEffect(() => {
@@ -99,6 +107,48 @@ export default function StatisticSummary({
     return { tweets, views, engagements, er };
   }, [rowsVerified]);
 
+  async function handleSaveScreenshot() {
+    if (!cardRef.current) return;
+    try {
+      setSaving(true);
+      setSaveMsg("Rendering…");
+      // 等待布局稳定（可选）
+      await new Promise((r) => setTimeout(r, 50));
+
+      const canvas = await html2canvas(cardRef.current, {
+        backgroundColor: "#0a0f0e",
+        scale: window.devicePixelRatio > 1 ? 2 : 1,
+        useCORS: true,
+        allowTaint: false,
+        logging: false,
+        ignoreElements: (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          if (el.tagName === "IMG") {
+            const src = (el as HTMLImageElement).getAttribute("src") || "";
+            if (src.startsWith("http") && !src.includes(location.hostname)) return true; // 忽略外链图
+          }
+          if (el.tagName === "IFRAME" || el.tagName === "VIDEO") return true;
+          return false;
+        },
+        windowWidth: document.documentElement.scrollWidth,
+        windowHeight: document.documentElement.scrollHeight,
+      });
+
+      const link = document.createElement("a");
+      link.download = `statistic-summary-${jobId ?? "snapshot"}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+
+      setSaveMsg("Saved ✅");
+      setTimeout(() => setSaveMsg(null), 1600);
+    } catch (e: any) {
+      console.error("[Save PNG] failed:", e);
+      setSaveMsg(`Failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   // Header
   const header = (
     <div className="flex items-center justify-between mb-4">
@@ -115,28 +165,45 @@ export default function StatisticSummary({
         >
           ↻ Refresh
         </button>
+        <button
+          onClick={handleSaveScreenshot}
+          disabled={!jobId || saving}
+          className="px-2.5 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80 disabled:opacity-50"
+          title="Save as PNG"
+        >
+          {saving ? "⏳ Saving…" : "📸 Save"}
+        </button>
       </div>
     </div>
   );
 
   if (!jobId) {
     return (
-      <div className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}>
+      <div
+        ref={cardRef}
+        className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}
+      >
         {header}
         <p className="text-sm text-gray-400">Run a scan to see statistics here.</p>
+        {saveMsg && <div className="mt-2 text-xs text-gray-300">{saveMsg}</div>}
       </div>
     );
   }
 
   return (
-    <div className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}>
+    <div
+      ref={cardRef}
+      className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}
+    >
       {header}
 
       {loading && <p className="text-sm text-gray-400">Loading job data…</p>}
       {err && <p className="text-sm text-rose-300">Error: {err}</p>}
 
       {!loading && !err && data?.status !== "completed" && (
-        <p className="text-sm text-gray-400">Job status: {data?.status ?? "unknown"} — stats will populate after completion.</p>
+        <p className="text-sm text-gray-400">
+          Job status: {data?.status ?? "unknown"} — stats will populate after completion.
+        </p>
       )}
 
       {!loading && !err && rowsAll.length > 0 && (
@@ -224,6 +291,8 @@ export default function StatisticSummary({
           </div>
         </div>
       )}
+
+      {saveMsg && <div className="mt-3 text-xs text-gray-300">{saveMsg}</div>}
     </div>
   );
 }
