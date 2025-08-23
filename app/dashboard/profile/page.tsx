@@ -58,7 +58,7 @@ export default function ProfilePage() {
     };
   }, [status]);
 
-  const title = "Profile · Recent Analysis";
+  const title = "Profile";
 
   return (
     <div className="container py-8">
