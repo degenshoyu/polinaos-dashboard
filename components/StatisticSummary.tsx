@@ -185,7 +185,6 @@ async function renderShareCardOffscreen(metric: ShareMetric): Promise<string> {
     backgroundColor: "#0a0f0e",
     cacheBust: true,
     pixelRatio: dpr,
-    foreignObjectRendering: true,
   });
 
   root.unmount();
