@@ -2,8 +2,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { toPng } from "html-to-image";
-import TweeterShareCard, { MinimalTweet } from "@/components/TweeterShareCard";
+import TweeterShareCard, { MinimalTweet, ShareMetric } from "@/components/TweeterShareCard";
 
 /** Minimal Tweet type extracted from jobProxy payload */
 type TweetRow = MinimalTweet & {
@@ -156,6 +157,52 @@ async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
   a.click();
 }
 
+async function renderShareCardOffscreen(metric: ShareMetric): Promise<string> {
+  const refW = tweeterShareRef.current?.clientWidth ?? 1024;
+  const host = document.createElement("div");
+  Object.assign(host.style, {
+    position: "fixed",
+    left: "0-10000px",
+    top: "0",
+    width: `${refW}px`,
+    pointerEvents: "none",
+    background: "#0a0f0e",
+    zIndex: "2147483647",
+    transform: "translateZ(0)",
+  } as Partial<CSSStyleDeclaration>);
+  document.body.appendChild(host);
+
+  const root = createRoot(host);
+  root.render(<TweeterShareCard tweets={rowsAll} metric={metric} />);
+
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  window.dispatchEvent(new Event("resize"));
+  await new Promise((r) => requestAnimationFrame(r));
+  if ((document as any).fonts?.ready) { try { await (document as any).fonts.ready; } catch {} }
+
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const png = await toPng(host, {
+    backgroundColor: "#0a0f0e",
+    cacheBust: true,
+    pixelRatio: dpr,
+    foreignObjectRendering: true,
+  });
+
+  root.unmount();
+  host.remove();
+  return png;
+}
+
+async function exportShareMetric(metric: ShareMetric, filename: string) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const base = await renderShareCardOffscreen(metric);
+  const final = await composeCanvasBrandFrame(base, dpr);
+  const a = document.createElement("a");
+  a.href = final;
+  a.download = filename;
+  a.click();
+}
+
 /** Draw a rounded border + footer (logo + 3 lines) around the base PNG without touching DOM */
 async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise<string> {
   const [img, logo] = await Promise.all([
@@ -169,8 +216,8 @@ async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise
   const W = img.width;
 
   const pad = clamp(Math.round(W * 0.045), 64, 128);            // ~3% width
-  const border = clamp(Math.round(W * 0.002), 3, 8);         // ~0.15% width
-  const radius = clamp(Math.round(W * 0.018), 18, 48);        // ~1.2% width
+  const border = 0;         // ~0.15% width
+  const radius = 0;        // ~1.2% width
 
   const logoSize = clamp(Math.round(W * 0.088), 112, 224);      // ~2.2% width
   const brandFont = clamp(Math.round(W * 0.048), 36, 96);    // ~0.75% width
@@ -313,21 +360,14 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     return saveNodeAsPng(summaryTotalsRef.current, `summary-totals-${jobId ?? "snapshot"}.png`);
   }
 
-  // (2/3/4) TweeterShareCard 内部三图：若你的组件根节点有 data-section（建议加），则更精准；否则退化为整卡
-  function pickShareSection(selector: string) {
-    const root = tweeterShareRef.current;
-    if (!root) return null;
-    const el = root.querySelector<HTMLElement>(selector);
-    return el || root;
-  }
   async function saveTweetsShare() {
-    return saveNodeAsPng(pickShareSection('[data-section="tweets-share"]'), `share-tweets-${jobId ?? "snapshot"}.png`);
+    return exportShareMetric("tweets", `share-tweets-${jobId ?? "snapshot"}.png`);
   }
   async function saveViewsShare() {
-    return saveNodeAsPng(pickShareSection('[data-section="views-share"]'), `share-views-${jobId ?? "snapshot"}.png`);
+    return exportShareMetric("views", `share-views-${jobId ?? "snapshot"}.png`);
   }
   async function saveEngShare() {
-    return saveNodeAsPng(pickShareSection('[data-section="engagements-share"]'), `share-engagements-${jobId ?? "snapshot"}.png`);
+    return exportShareMetric("engagements", `share-engagements-${jobId ?? "snapshot"}.png`);
   }
 
   async function saveAllFour() {

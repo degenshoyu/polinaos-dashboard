@@ -6,28 +6,41 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recha
 
 export type ShareMetric = "tweets" | "views" | "engagements" | "likes";
 
-/** Minimal fields we need from a tweet row */
+/** Fields we may receive for each tweet (superset to be flexible). */
 export type MinimalTweet = {
   tweeter?: string;
   views?: number;
   likes?: number;
   retweets?: number;
   replies?: number;
+  // Optional extras if available from payload:
+  tweetId?: string;
+  statusLink?: string;
+  textContent?: string;
+  isVerified?: boolean;
 };
 
 const COLORS = ["#3ef2ac", "#27a567", "#7dd3fc", "#fca5a5", "#fcd34d", "#d8b4fe", "#f9a8d4", "#93c5fd"];
 const REST_COLOR = "#475569"; // slate-600
 
-// Top-level helper so label renderer can use it
+// Top-level helpers (also used by custom label)
 const truncateName = (s: unknown, max = 14) => {
   const str = typeof s === "string" ? s : String(s ?? "");
   return str.length > max ? str.slice(0, max - 1) + "…" : str;
 };
-
 const clamp = (v: number, a: number, b: number) => Math.min(Math.max(v, a), b);
 const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
 const compact = (v: number) => new Intl.NumberFormat("en", { notation: "compact" }).format(v);
 const pctText = (v: number) => `${(v * 100).toFixed(1)}%`;
+
+/** Build a tweet URL if not provided by payload. */
+function buildStatusUrl(t: MinimalTweet): string | undefined {
+  const id = (t as any)?.tweetId as string | undefined;
+  const handle = t.tweeter;
+  if ((t as any)?.statusLink) return (t as any).statusLink as string;
+  if (id && handle) return `https://x.com/${handle}/status/${id}`;
+  return undefined;
+}
 
 export default function TweeterShareCard({
   tweets,
@@ -36,6 +49,7 @@ export default function TweeterShareCard({
   defaultTopN = 5,
   minTopN = 3,
   maxTopN = 12,
+  showTable = true,
 }: {
   tweets: MinimalTweet[];
   className?: string;
@@ -43,11 +57,12 @@ export default function TweeterShareCard({
   defaultTopN?: number;
   minTopN?: number;
   maxTopN?: number;
+  showTable?: boolean;
 }) {
   const [metric, setMetric] = useState<ShareMetric>(defaultMetric);
   const [topN, setTopN] = useState<number>(clamp(defaultTopN, minTopN, maxTopN));
 
-  // Optional: persist user preference per session
+  // Restore/save preferences (session-level)
   useEffect(() => {
     try {
       const m = sessionStorage.getItem("tweeterShare.metric");
@@ -55,8 +70,8 @@ export default function TweeterShareCard({
       if (m === "tweets" || m === "views" || m === "engagements" || m === "likes") setMetric(m);
       if (t) setTopN(clamp(parseInt(t, 10), minTopN, maxTopN));
     } catch {}
-  }, [minTopN, maxTopN]);
-
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     try {
       sessionStorage.setItem("tweeterShare.metric", metric);
@@ -64,50 +79,100 @@ export default function TweeterShareCard({
     } catch {}
   }, [metric, topN]);
 
-  /** Aggregate by tweeter for the selected metric */
-  const series = useMemo(() => {
-    const map: Record<string, number> = {};
+  /** Aggregate by tweeter for the selected metric + prepare table rows. */
+  type AggRow = {
+    name: string;
+    tweets: number;
+    views: number;
+    likes: number;
+    retweets: number;
+    replies: number;
+    engagements: number;
+    isVerified?: boolean;
+    topTweetLinks: string[]; // up to 3
+  };
+
+  const { pieData, tableRows } = useMemo(() => {
+    // 1) Group by tweeter (accumulate metrics + keep tweet list for top links)
+    const by: Record<string, AggRow & { _tweets: MinimalTweet[] }> = {};
     for (const t of tweets) {
       const name = t.tweeter || "unknown";
-      let value = 0;
-      switch (metric) {
-        case "tweets":
-          value = 1;
-          break;
-        case "views":
-          value = n(t.views);
-          break;
-        case "likes":
-          value = n(t.likes);
-          break;
-        case "engagements":
-          value = n(t.likes) + n(t.retweets) + n(t.replies);
-          break;
-      }
-      map[name] = (map[name] || 0) + value;
+      const row = (by[name] ||= {
+        name,
+        tweets: 0,
+        views: 0,
+        likes: 0,
+        retweets: 0,
+        replies: 0,
+        engagements: 0,
+        isVerified: t.isVerified, // if mixed, last one wins—OK for display
+        topTweetLinks: [],
+        _tweets: [],
+      });
+      row.tweets += 1;
+      row.views += n(t.views);
+      row.likes += n(t.likes);
+      row.retweets += n(t.retweets);
+      row.replies += n(t.replies);
+      row.engagements += n(t.likes) + n(t.retweets) + n(t.replies);
+      row._tweets.push(t);
     }
-    const entries = Object.entries(map)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value);
 
-    const total = entries.reduce((s, e) => s + e.value, 0);
-    const top = entries.slice(0, topN);
-    const restValue = entries.slice(topN).reduce((s, e) => s + e.value, 0);
-    const withShare = top.map((e) => ({ ...e, share: total > 0 ? e.value / total : 0 }));
-    if (restValue > 0) withShare.push({ name: "Rest", value: restValue, share: total > 0 ? restValue / total : 0 });
-    return { total, data: withShare };
+    // 2) Convert to array and compute value by current metric
+    const arr = Object.values(by).map((r) => ({
+      ...r,
+      value:
+        metric === "tweets"
+          ? r.tweets
+          : metric === "views"
+          ? r.views
+          : metric === "likes"
+          ? r.likes
+          : r.engagements,
+    }));
+
+    // 3) Sort by value desc; compute TopN + Rest for pie
+    arr.sort((a, b) => b.value - a.value);
+    const top = arr.slice(0, topN);
+    const restValue = arr.slice(topN).reduce((s, r) => s + r.value, 0);
+    const totalVal = arr.reduce((s, r) => s + r.value, 0);
+
+    const pieTop = top.map((r) => ({ name: r.name, value: r.value, share: totalVal ? r.value / totalVal : 0 }));
+    if (restValue > 0) pieTop.push({ name: "Rest", value: restValue, share: totalVal ? restValue / totalVal : 0 });
+
+    // 4) Prepare table rows for the same TopN (and keep per-user top tweet links)
+    const rowsForTable: AggRow[] = top.map((r) => {
+      // pick top 3 tweets by views for this tweeter
+      const links = r._tweets
+        .slice()
+        .sort((a, b) => n(b.views) - n(a.views))
+        .slice(0, 3)
+        .map((t) => buildStatusUrl(t))
+        .filter(Boolean) as string[];
+
+      return {
+        name: r.name,
+        tweets: r.tweets,
+        views: r.views,
+        likes: r.likes,
+        retweets: r.retweets,
+        replies: r.replies,
+        engagements: r.engagements,
+        isVerified: r.isVerified,
+        topTweetLinks: links,
+      };
+    });
+
+    return { pieData: pieTop, tableRows: rowsForTable };
   }, [tweets, metric, topN]);
 
   /** Wheel & touch handlers for TopN */
-  const numRef = useRef<HTMLButtonElement | null>(null);
   const touchY = useRef<number | null>(null);
-
   function onWheel(e: React.WheelEvent) {
     e.preventDefault();
     const dir = e.deltaY < 0 ? 1 : -1;
     setTopN((prev) => clamp(prev + dir, minTopN, maxTopN));
   }
-
   function onTouchStart(e: React.TouchEvent) {
     touchY.current = e.touches[0]?.clientY ?? null;
   }
@@ -162,7 +227,6 @@ export default function TweeterShareCard({
               –
             </button>
             <button
-              ref={numRef}
               onWheel={onWheel}
               onTouchStart={onTouchStart}
               onTouchMove={onTouchMove}
@@ -185,11 +249,12 @@ export default function TweeterShareCard({
         </div>
       </div>
 
+      {/* Pie chart */}
       <div className="h-64">
         <ResponsiveContainer>
           <PieChart>
             <Pie
-              data={series.data}
+              data={pieData}
               dataKey="value"
               nameKey="name"
               cx="50%"
@@ -199,7 +264,7 @@ export default function TweeterShareCard({
               isAnimationActive={false}
               label={(p: any) => renderNameOnlyLabel(p)}
             >
-              {series.data.map((entry, idx) => (
+              {pieData.map((entry, idx) => (
                 <Cell
                   key={`slice-${entry.name}-${idx}`}
                   fill={entry.name === "Rest" ? REST_COLOR : COLORS[idx % COLORS.length]}
@@ -222,15 +287,82 @@ export default function TweeterShareCard({
         </ResponsiveContainer>
       </div>
 
-      {/* Tiny footnote explaining interactions */}
-      <div className="mt-2 text-[11px] text-gray-500">
-        Tip: use mouse wheel or swipe up/down on the “Top N” pill to adjust the number.
-      </div>
+      {/* Table under the pie */}
+      {showTable && (
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-xs text-gray-400">
+              <tr className="[&>th]:py-2 [&>th]:px-2">
+                <th className="text-left">Tweeter</th>
+                <th className="text-right">Share</th>
+                <th className="text-right">Tweets</th>
+                <th className="text-right">Views</th>
+                <th className="text-right">Engs</th>
+                <th className="text-right">Likes</th>
+                <th className="text-left">Top tweets</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/10">
+              {tableRows.map((r) => (
+                <tr key={r.name} className="hover:bg-white/5">
+                  {/* Tweeter profile */}
+                  <td className="py-2 px-2">
+                    <a
+                      href={`https://x.com/${r.name}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-emerald-300 hover:text-emerald-200 underline underline-offset-2"
+                      title={`Open @${r.name} on X`}
+                    >
+                      @{r.name}
+                    </a>
+                    <span className="ml-1 text-xs text-gray-400">{r.isVerified ? "✓" : ""}</span>
+                  </td>
+
+                  {/* Share (for current metric) */}
+                  <td className="py-2 px-2 text-right">
+                    {pctText(
+                      (pieData.find((p: any) => p.name === r.name)?.share as number) ?? 0
+                    )}
+                  </td>
+
+                  <td className="py-2 px-2 text-right">{compact(r.tweets)}</td>
+                  <td className="py-2 px-2 text-right">{compact(r.views)}</td>
+                  <td className="py-2 px-2 text-right">{compact(r.engagements)}</td>
+                  <td className="py-2 px-2 text-right">{compact(r.likes)}</td>
+
+                  {/* Top tweets links */}
+                  <td className="py-2 px-2">
+                    <div className="flex flex-wrap gap-1">
+                      {r.topTweetLinks.length === 0 ? (
+                        <span className="text-xs text-gray-500">No links</span>
+                      ) : (
+                        r.topTweetLinks.map((url, idx) => (
+                          <a
+                            key={`${r.name}-tw-${idx}`}
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-1.5 py-0.5 rounded border border-white/10 bg-white/5 hover:bg-white/10 text-xs text-white/80"
+                            title={`Open tweet #${idx + 1}`}
+                          >
+                            #{idx + 1}
+                          </a>
+                        ))
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
 
-/** Render only the tweeter name as label (no %) with overlap mitigation */
+/** Name-only label with basic overlap mitigation (small font, hide tiny slices, offset small slices). */
 function renderNameOnlyLabel(props: any) {
   const { cx, cy, midAngle, outerRadius, percent, name, payload } = props;
   if (percent < 0.04) return null; // hide tiny slices

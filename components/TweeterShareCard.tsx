@@ -42,42 +42,49 @@ function buildStatusUrl(t: MinimalTweet): string | undefined {
   return undefined;
 }
 
-export default function TweeterShareCard({
-  tweets,
-  className = "",
-  defaultMetric = "views",
-  defaultTopN = 5,
-  minTopN = 3,
-  maxTopN = 12,
-  showTable = true,
-}: {
+export type TweeterShareCardProps = {
   tweets: MinimalTweet[];
   className?: string;
-  defaultMetric?: ShareMetric;
+  metric?: ShareMetric;
+  initialMetric?: ShareMetric;
   defaultTopN?: number;
   minTopN?: number;
   maxTopN?: number;
   showTable?: boolean;
-}) {
-  const [metric, setMetric] = useState<ShareMetric>(defaultMetric);
+};
+
+export default function TweeterShareCard({
+  tweets,
+  className = "",
+  metric,
+  initialMetric = "views",
+  defaultTopN = 5,
+  minTopN = 3,
+  maxTopN = 12,
+  showTable = true,
+}: TweeterShareCardProps) {
+  const [metricState, setMetricState] = useState<ShareMetric>(initialMetric);
+  const activeMetric: ShareMetric = metric ?? metricState;
   const [topN, setTopN] = useState<number>(clamp(defaultTopN, minTopN, maxTopN));
 
   // Restore/save preferences (session-level)
   useEffect(() => {
+    if (metric !== undefined) return; // 受控时跳过
     try {
       const m = sessionStorage.getItem("tweeterShare.metric");
       const t = sessionStorage.getItem("tweeterShare.topN");
-      if (m === "tweets" || m === "views" || m === "engagements" || m === "likes") setMetric(m);
+      if (m === "tweets" || m === "views" || m === "engagements" || m === "likes") setMetricState(m);
       if (t) setTopN(clamp(parseInt(t, 10), minTopN, maxTopN));
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [metric]);
   useEffect(() => {
+    if (metric !== undefined) return;
     try {
-      sessionStorage.setItem("tweeterShare.metric", metric);
+      sessionStorage.setItem("tweeterShare.metric", metricState);
       sessionStorage.setItem("tweeterShare.topN", String(topN));
     } catch {}
-  }, [metric, topN]);
+  }, [metricState, topN, metric]);
 
   /** Aggregate by tweeter for the selected metric + prepare table rows. */
   type AggRow = {
@@ -122,11 +129,11 @@ export default function TweeterShareCard({
     const arr = Object.values(by).map((r) => ({
       ...r,
       value:
-        metric === "tweets"
+        activeMetric === "tweets"
           ? r.tweets
-          : metric === "views"
+          : activeMetric === "views"
           ? r.views
-          : metric === "likes"
+          : activeMetric === "likes"
           ? r.likes
           : r.engagements,
     }));
@@ -164,7 +171,7 @@ export default function TweeterShareCard({
     });
 
     return { pieData: pieTop, tableRows: rowsForTable };
-  }, [tweets, metric, topN]);
+  }, [tweets, activeMetric, topN]);
 
   /** Wheel & touch handlers for TopN */
   const touchY = useRef<number | null>(null);
@@ -187,10 +194,13 @@ export default function TweeterShareCard({
   }
 
   return (
-    <div className={`rounded-2xl border border-white/10 bg-black/10 p-4 ${className}`}>
+    <div
+      className={`rounded-2xl border border-white/10 bg-black/10 p-4 ${className}`}
+      data-metric={activeMetric}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
         <div className="text-xs text-gray-400">
-          {labelForMetric(metric)} (Top {topN}; others merged)
+          {labelForMetric(activeMetric)} (Top {topN}; others merged)
         </div>
 
         {/* Controls */}
@@ -205,10 +215,10 @@ export default function TweeterShareCard({
               <button
                 key={m}
                 role="tab"
-                aria-selected={metric === m}
-                onClick={() => setMetric(m)}
+                aria-selected={activeMetric === m}
+                onClick={() => setMetricState(m)}
                 className={`px-2.5 py-1 text-xs transition
-                  ${metric === m ? "bg-emerald-500/20 text-emerald-200" : "text-white/80 hover:bg-white/10"}`}
+                  ${activeMetric === m ? "bg-emerald-500/20 text-emerald-200" : "text-white/80 hover:bg-white/10"}`}
                 title={labelForMetric(m)}
               >
                 {tabText(m)}
@@ -250,7 +260,7 @@ export default function TweeterShareCard({
       </div>
 
       {/* Pie chart */}
-      <div className="h-64">
+      <div className="h-64" data-section="share-pie">
         <ResponsiveContainer>
           <PieChart>
             <Pie
