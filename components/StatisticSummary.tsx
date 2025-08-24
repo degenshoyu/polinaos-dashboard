@@ -125,16 +125,23 @@ async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
 
   // 1) Snapshot ORIGINAL node (don’t move/clone DOM)
   const baseUrl = await toPng(node, {
-    backgroundColor: "#0a0f0e",
     cacheBust: true,
     pixelRatio: dpr,
-    foreignObjectRendering: true, // helps for SVG + CSS cases
+    // Ensure non-black export by forcing a white background:
+    backgroundColor: "#ffffff",
+    style: {
+      backgroundColor: "#ffffff",
+    },
+    // Keep your filter if you had one:
     filter: (domNode) => {
       if (!(domNode instanceof Element)) return true;
       const tag = domNode.tagName;
-      if (tag === "IFRAME" || tag === "VIDEO") return false;
-      const st = getComputedStyle(domNode);
-      if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") return false;
+      // skip <video> / <canvas> or anything you want to exclude
+      if (tag === "VIDEO" || tag === "CANVAS") return false;
+      // example: exclude elements with data-no-export
+      if (domNode instanceof Element && domNode.getAttribute("data-no-export") === "true") {
+        return false;
+      }
       return true;
     },
   });
