@@ -128,9 +128,9 @@ async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
     cacheBust: true,
     pixelRatio: dpr,
     // Ensure non-black export by forcing a white background:
-    backgroundColor: "#ffffff",
+    backgroundColor: "#0a0f0e",
     style: {
-      backgroundColor: "#ffffff",
+      backgroundColor: "#0a0f0e",
     },
     // Keep your filter if you had one:
     filter: (domNode) => {
