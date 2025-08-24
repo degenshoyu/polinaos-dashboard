@@ -163,7 +163,9 @@ I'll guide you through the whole process:
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          projectName: input.projectName || "",
+          projectName: input.projectName
+            ? (input.projectName.startsWith("$") ? input.projectName : `$${input.projectName}`)
+            : "",
           twitterHandle: input.xProfile || "",
           contractAddress: input.tokenAddress || "",
         }),
