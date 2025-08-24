@@ -1,9 +1,9 @@
 // components/StatisticSummary.tsx
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toPng } from "html-to-image";
 import TweeterShareCard, { MinimalTweet } from "@/components/TweeterShareCard";
-import html2canvas from "html2canvas";
 
 /** Minimal Tweet type extracted from jobProxy payload */
 type TweetRow = MinimalTweet & {
@@ -45,8 +45,11 @@ export default function StatisticSummary({
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
-  // Wrap the entire card for html2canvas
-  const cardRef = useRef<HTMLDivElement>(null);
+  // Refs（精准截图，不改原有视觉）
+  const cardRef = useRef<HTMLDivElement>(null);               // 整体卡片（备用）
+  const summaryTotalsRef = useRef<HTMLDivElement>(null);      // Search summary + All totals + Verified totals
+  const tweeterShareRef = useRef<HTMLDivElement>(null);       // TweeterShareCard 外层
+  const topListRef = useRef<HTMLDivElement>(null);            // Top tweets（不参与截图，仅保留）
 
   // Auto-fetch when jobId changes
   useEffect(() => {
@@ -107,56 +110,83 @@ export default function StatisticSummary({
     return { tweets, views, engagements, er };
   }, [rowsVerified]);
 
-  async function handleSaveScreenshot() {
-    if (!cardRef.current) return;
+  /** ============ html-to-image Helpers ============ */
+  async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
+    if (!node) throw new Error("Target element not found");
+    await new Promise((r) => setTimeout(r, 30)); // 等一小帧，避免布局未稳
+
+    const dataUrl = await toPng(node, {
+      backgroundColor: "#0a0f0e",
+      cacheBust: true,
+      pixelRatio: Math.min(2, window.devicePixelRatio || 1),
+      // 关键：filter 对 Node 做类型守卫，避免 "parameter 1 is not of type 'Element'"。
+      filter: (domNode) => {
+        if (!(domNode instanceof Element)) return true;
+        const tag = domNode.tagName;
+        if (tag === "IFRAME" || tag === "VIDEO") return false;
+        const st = getComputedStyle(domNode);
+        if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") return false;
+        return true;
+      },
+      style: {
+        transform: "scale(1)",
+        transformOrigin: "top left",
+      },
+    });
+
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = filename;
+    a.click();
+  }
+
+  // (1) Summary + Totals（一次性包含 Search summary + All totals + Verified totals）
+  async function saveSummaryTotals() {
+    return saveNodeAsPng(summaryTotalsRef.current, `summary-totals-${jobId ?? "snapshot"}.png`);
+  }
+
+  // (2/3/4) TweeterShareCard 内部三图：若你的组件根节点有 data-section（建议加），则更精准；否则退化为整卡
+  function pickShareSection(selector: string) {
+    const root = tweeterShareRef.current;
+    if (!root) return null;
+    const el = root.querySelector<HTMLElement>(selector);
+    return el || root;
+  }
+  async function saveTweetsShare() {
+    return saveNodeAsPng(pickShareSection('[data-section="tweets-share"]'), `share-tweets-${jobId ?? "snapshot"}.png`);
+  }
+  async function saveViewsShare() {
+    return saveNodeAsPng(pickShareSection('[data-section="views-share"]'), `share-views-${jobId ?? "snapshot"}.png`);
+  }
+  async function saveEngShare() {
+    return saveNodeAsPng(pickShareSection('[data-section="engagements-share"]'), `share-engagements-${jobId ?? "snapshot"}.png`);
+  }
+
+  async function saveAllFour() {
     try {
       setSaving(true);
       setSaveMsg("Rendering…");
-      // 等待布局稳定（可选）
-      await new Promise((r) => setTimeout(r, 50));
-
-      const canvas = await html2canvas(cardRef.current, {
-        backgroundColor: "#0a0f0e",
-        scale: window.devicePixelRatio > 1 ? 2 : 1,
-        useCORS: true,
-        allowTaint: false,
-        logging: false,
-        ignoreElements: (el) => {
-          if (!(el instanceof HTMLElement)) return false;
-          if (el.tagName === "IMG") {
-            const src = (el as HTMLImageElement).getAttribute("src") || "";
-            if (src.startsWith("http") && !src.includes(location.hostname)) return true; // 忽略外链图
-          }
-          if (el.tagName === "IFRAME" || el.tagName === "VIDEO") return true;
-          return false;
-        },
-        windowWidth: document.documentElement.scrollWidth,
-        windowHeight: document.documentElement.scrollHeight,
-      });
-
-      const link = document.createElement("a");
-      link.download = `statistic-summary-${jobId ?? "snapshot"}.png`;
-      link.href = canvas.toDataURL("image/png");
-      link.click();
-
-      setSaveMsg("Saved ✅");
+      await saveSummaryTotals();
+      await saveTweetsShare();
+      await saveViewsShare();
+      await saveEngShare();
+      setSaveMsg("Saved all ✅");
       setTimeout(() => setSaveMsg(null), 1600);
     } catch (e: any) {
-      console.error("[Save PNG] failed:", e);
       setSaveMsg(`Failed: ${e?.message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
   }
 
-  // Header
+  /** Header（主按钮 + 折叠菜单） */
   const header = (
     <div className="flex items-center justify-between mb-4">
       <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
         Statistic · Summary
       </h2>
       <div className="flex items-center gap-2 text-xs text-gray-400">
-        <span className="hidden sm:inline">{jobId ? `Job: ${jobId.slice(0, 10)}…` : "No job yet"}</span>
+
         <button
           onClick={fetchNow}
           disabled={!jobId || loading}
@@ -165,14 +195,47 @@ export default function StatisticSummary({
         >
           ↻ Refresh
         </button>
+
         <button
-          onClick={handleSaveScreenshot}
+          onClick={saveAllFour}
           disabled={!jobId || saving}
-          className="px-2.5 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80 disabled:opacity-50"
-          title="Save as PNG"
+          className="px-3 py-1.5 rounded-md bg-gradient-to-r from-[#27a567] to-[#2fd480] text-white/90 font-semibold shadow disabled:opacity-50"
+          title="Save all 4 images"
         >
-          {saving ? "⏳ Saving…" : "📸 Save"}
+          {saving ? "⏳ Saving…" : "📦 Save"}
         </button>
+
+        <details className="relative">
+          <summary className="list-none cursor-pointer px-2.5 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80">
+            ⋯
+          </summary>
+          <div className="absolute right-0 mt-2 w-60 rounded-lg border border-white/10 bg-[#0e1413] shadow-xl p-2 z-20">
+            <button
+              onClick={saveSummaryTotals}
+              className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200"
+            >
+              1 Save summary / totals
+            </button>
+            <button
+              onClick={saveTweetsShare}
+              className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200"
+            >
+              2 Save tweets share
+            </button>
+            <button
+              onClick={saveViewsShare}
+              className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200"
+            >
+              3 Save views share
+            </button>
+            <button
+              onClick={saveEngShare}
+              className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200"
+            >
+              4 Save engagements share
+            </button>
+          </div>
+        </details>
       </div>
     </div>
   );
@@ -208,56 +271,61 @@ export default function StatisticSummary({
 
       {!loading && !err && rowsAll.length > 0 && (
         <div className="grid grid-cols-1 gap-6">
-          {/* --- Search summary (separate card) --- */}
-          <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
-            <div className="text-xs text-gray-400 mb-2">Search summary</div>
-            <div className="space-y-1 text-sm">
-              <div>
-                <span className="text-gray-400">Search window: </span>
-                <span className="text-white/80">{fmtDate(data?.start_date)} → {fmtDate(data?.end_date)}</span>
+          {/* --- (1) Search summary + All totals + Verified totals：外层包一层，方便一起截图 --- */}
+          <div ref={summaryTotalsRef} className="grid grid-cols-1 gap-6">
+            {/* Search summary */}
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <div className="text-xs text-gray-400 mb-2">Search summary</div>
+              <div className="space-y-1 text-sm">
+                <div>
+                  <span className="text-gray-400">Search window: </span>
+                  <span className="text-white/80">{fmtDate(data?.start_date)} → {fmtDate(data?.end_date)}</span>
+                </div>
+                {Array.isArray(data?.keyword) && data!.keyword!.length > 0 && (
+                  <div>
+                    <span className="text-gray-400">Keywords: </span>
+                    <span className="text-white/80 break-all">{data!.keyword!.join(", ")}</span>
+                  </div>
+                )}
+                {typeof data?.tweets_count === "number" && (
+                  <div>
+                    <span className="text-gray-400">Tweets fetched: </span>
+                    <span className="text-white/80">{compact(data!.tweets_count!)}</span>
+                  </div>
+                )}
               </div>
-              {Array.isArray(data?.keyword) && data!.keyword!.length > 0 && (
-                <div>
-                  <span className="text-gray-400">Keywords: </span>
-                  <span className="text-white/80 break-all">{data!.keyword!.join(", ")}</span>
-                </div>
-              )}
-              {typeof data?.tweets_count === "number" && (
-                <div>
-                  <span className="text-gray-400">Tweets fetched: </span>
-                  <span className="text-white/80">{compact(data!.tweets_count!)}</span>
-                </div>
-              )}
+            </div>
+
+            {/* All tweets (tiles) */}
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <div className="text-xs text-gray-400 mb-2">All tweets — totals</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Tile color="#3ef2ac" label="Tweets" value={compact(aggAll.tweets)} />
+                <Tile color="#7dd3fc" label="Views" value={compact(aggAll.views)} />
+                <Tile color="#fcd34d" label="Engagements" value={compact(aggAll.engagements)} />
+                <Tile color="#d8b4fe" label="Engagement Rate" value={pctText(aggAll.er)} />
+              </div>
+            </div>
+
+            {/* Verified tweets (tiles) */}
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <div className="text-xs text-gray-400 mb-2">Verified tweets — totals</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Tile color="#3ef2ac" label="Tweets" value={compact(aggVer.tweets)} />
+                <Tile color="#7dd3fc" label="Views" value={compact(aggVer.views)} />
+                <Tile color="#fcd34d" label="Engagements" value={compact(aggVer.engagements)} />
+                <Tile color="#d8b4fe" label="Engagement Rate" value={pctText(aggVer.er)} />
+              </div>
             </div>
           </div>
 
-          {/* --- Chart 1: All tweets (tiles) --- */}
-          <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
-            <div className="text-xs text-gray-400 mb-2">All tweets — totals</div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Tile color="#3ef2ac" label="Tweets" value={compact(aggAll.tweets)} />
-              <Tile color="#7dd3fc" label="Views" value={compact(aggAll.views)} />
-              <Tile color="#fcd34d" label="Engagements" value={compact(aggAll.engagements)} />
-              <Tile color="#d8b4fe" label="Engagement Rate" value={pctText(aggAll.er)} />
-            </div>
+          {/* --- (2/3/4) Tweeter share：不改组件，只外层包 ref；如组件内部能加 data-section 更佳 --- */}
+          <div ref={tweeterShareRef}>
+            <TweeterShareCard tweets={rowsAll} />
           </div>
 
-          {/* --- Chart 2: Verified tweets (tiles) --- */}
-          <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
-            <div className="text-xs text-gray-400 mb-2">Verified tweets — totals</div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Tile color="#3ef2ac" label="Tweets" value={compact(aggVer.tweets)} />
-              <Tile color="#7dd3fc" label="Views" value={compact(aggVer.views)} />
-              <Tile color="#fcd34d" label="Engagements" value={compact(aggVer.engagements)} />
-              <Tile color="#d8b4fe" label="Engagement Rate" value={pctText(aggVer.er)} />
-            </div>
-          </div>
-
-          {/* --- Chart 3: Tweeter share (metric & TopN configurable) --- */}
-          <TweeterShareCard tweets={rowsAll} />
-
-          {/* --- Chart 4: Top tweets by views (list) --- */}
-          <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+          {/* --- Top tweets by views（页面展示保留；按你的要求不参与截图） --- */}
+          <div ref={topListRef} className="rounded-2xl border border-white/10 bg-black/10 p-4">
             <div className="text-xs text-gray-400 mb-3">Top tweets by views</div>
             <ul className="space-y-3">
               {rowsAll
@@ -309,4 +377,3 @@ function Tile({ color, label, value }: { color: string; label: string; value: st
     </div>
   );
 }
-

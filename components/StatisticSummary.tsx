@@ -45,11 +45,10 @@ export default function StatisticSummary({
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
-  // Refs（精准截图，不改原有视觉）
-  const cardRef = useRef<HTMLDivElement>(null);               // 整体卡片（备用）
-  const summaryTotalsRef = useRef<HTMLDivElement>(null);      // Search summary + All totals + Verified totals
-  const tweeterShareRef = useRef<HTMLDivElement>(null);       // TweeterShareCard 外层
-  const topListRef = useRef<HTMLDivElement>(null);            // Top tweets（不参与截图，仅保留）
+  const cardRef = useRef<HTMLDivElement>(null);
+  const summaryTotalsRef = useRef<HTMLDivElement>(null);
+  const tweeterShareRef = useRef<HTMLDivElement>(null);
+  const topListRef = useRef<HTMLDivElement>(null);
 
   // Auto-fetch when jobId changes
   useEffect(() => {
@@ -111,34 +110,196 @@ export default function StatisticSummary({
   }, [rowsVerified]);
 
   /** ============ html-to-image Helpers ============ */
-  async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
-    if (!node) throw new Error("Target element not found");
-    await new Promise((r) => setTimeout(r, 30)); // 等一小帧，避免布局未稳
+async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
+  if (!node) throw new Error("Target element not found");
 
-    const dataUrl = await toPng(node, {
-      backgroundColor: "#0a0f0e",
-      cacheBust: true,
-      pixelRatio: Math.min(2, window.devicePixelRatio || 1),
-      // 关键：filter 对 Node 做类型守卫，避免 "parameter 1 is not of type 'Element'"。
-      filter: (domNode) => {
-        if (!(domNode instanceof Element)) return true;
-        const tag = domNode.tagName;
-        if (tag === "IFRAME" || tag === "VIDEO") return false;
-        const st = getComputedStyle(domNode);
-        if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") return false;
-        return true;
-      },
-      style: {
-        transform: "scale(1)",
-        transformOrigin: "top left",
-      },
-    });
-
-    const a = document.createElement("a");
-    a.href = dataUrl;
-    a.download = filename;
-    a.click();
+  // Let layout/fonts settle (double rAF), then wait for fonts if available
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  if ((document as any).fonts?.ready) {
+    try {
+      await (document as any).fonts.ready;
+    } catch {}
   }
+
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+
+  // 1) Snapshot ORIGINAL node (don’t move/clone DOM)
+  const baseUrl = await toPng(node, {
+    backgroundColor: "#0a0f0e",
+    cacheBust: true,
+    pixelRatio: dpr,
+    foreignObjectRendering: true, // helps for SVG + CSS cases
+    filter: (domNode) => {
+      if (!(domNode instanceof Element)) return true;
+      const tag = domNode.tagName;
+      if (tag === "IFRAME" || tag === "VIDEO") return false;
+      const st = getComputedStyle(domNode);
+      if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") return false;
+      return true;
+    },
+  });
+
+  // 2) Compose border + footer (logo + 3 lines) on a canvas
+  const finalUrl = await composeCanvasBrandFrame(baseUrl, dpr);
+
+  // 3) Download
+  const a = document.createElement("a");
+  a.href = finalUrl;
+  a.download = filename;
+  a.click();
+}
+
+/** Draw a rounded border + footer (logo + 3 lines) around the base PNG without touching DOM */
+async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise<string> {
+  const [img, logo] = await Promise.all([
+    loadImage(basePngUrl),
+    // same-origin asset in /public
+    loadImage("/polina-icon.png").catch(() => null as any),
+  ]);
+
+  // --- Scale rules (relative to width) ---
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+  const W = img.width;
+
+  const pad = clamp(Math.round(W * 0.045), 64, 128);            // ~3% width
+  const border = clamp(Math.round(W * 0.002), 3, 8);         // ~0.15% width
+  const radius = clamp(Math.round(W * 0.018), 18, 48);        // ~1.2% width
+
+  const logoSize = clamp(Math.round(W * 0.088), 112, 224);      // ~2.2% width
+  const brandFont = clamp(Math.round(W * 0.048), 36, 96);    // ~0.75% width
+  const linkFont = clamp(Math.round(W * 0.018), 20, 44);     // ~0.65% width
+  const lineH = Math.round(linkFont * 1.45);                  // comfortable line height
+
+  const lines = [
+    "polinaos.com",
+    "x.com/PolinaAIOS",
+    "t.me/PolinaOSAI",
+  ];
+
+  const footerPadTop = Math.round(pad * 0.5);
+  const footerPadBottom = Math.round(pad * 0.5);
+  const footerContentH = Math.max(logoSize, lines.length * lineH);
+  const footerH = footerPadTop + footerContentH + footerPadBottom;
+
+  const width = img.width + pad * 2 + border * 2;
+  const height = img.height + pad * 2 + footerH + border * 2;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+
+  const ctx = canvas.getContext("2d")!;
+  ctx.scale(dpr, dpr);
+  ctx.imageSmoothingEnabled = true;
+
+  // Background panel
+  ctx.fillStyle = "#0a0f0e";
+  roundedRect(ctx, 0.5, 0.5, width - 1, height - 1, radius);
+  ctx.fill();
+
+  // Border (crisp stroke)
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = border;
+  roundedRect(
+    ctx,
+    border / 2 + 0.5,
+    border / 2 + 0.5,
+    width - border - 1,
+    height - border - 1,
+    radius
+  );
+  ctx.stroke();
+
+  // Main screenshot
+  const shotX = border + pad;
+  const shotY = border + pad;
+  ctx.drawImage(img, shotX, shotY);
+
+  // Footer separator
+  const footerTop = shotY + img.height + pad - 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.12)";
+  ctx.beginPath();
+  ctx.moveTo(border + pad, footerTop);
+  ctx.lineTo(width - border - pad, footerTop);
+  ctx.stroke();
+
+  // Footer content
+  const contentTop = footerTop + footerPadTop;
+
+  // Left: circular logo + brand text (vertically centered with logo)
+  const logoX = border + pad;
+  const logoY = contentTop;
+
+  if (logo) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(logo, logoX, logoY, logoSize, logoSize);
+    ctx.restore();
+  } else {
+    // fallback circle if logo asset missing
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.beginPath();
+    ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.font = `700 ${brandFont}px ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial`;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "start";
+  const brandTextX = logoX + logoSize + Math.round(pad * 0.5);
+  const brandTextY = logoY + logoSize / 2;
+  ctx.fillText("PolinaOS", brandTextX, brandTextY);
+
+  // Right: 3 lines, right-aligned
+ctx.font = `500 ${linkFont}px ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial`;
+ctx.fillStyle = "rgba(229,231,235,0.9)";
+ctx.textAlign = "right";
+ctx.textBaseline = "middle";
+
+const rightX = width - border - pad;
+const centerY = contentTop + footerContentH / 2;
+const startY  = centerY - ((lines.length - 1) * lineH) / 2;
+
+lines.forEach((t, i) => {
+  ctx.fillText(t, rightX, startY + i * lineH);
+});
+
+ctx.textAlign = "start"
+
+  return canvas.toDataURL("image/png");
+}
+
+function roundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    // data: URL 无需跨域；/logo-polina.png 同源也没问题
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = src;
+  });
+}
 
   // (1) Summary + Totals（一次性包含 Search summary + All totals + Verified totals）
   async function saveSummaryTotals() {
