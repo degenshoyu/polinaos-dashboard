@@ -1,4 +1,3 @@
-// components/dashboard/Navbar.tsx
 "use client";
 
 import Image from "next/image";
@@ -11,16 +10,10 @@ import { useSession, signOut } from "next-auth/react";
 
 const WalletButton = dynamic(() => import("../SignInWithSolana"), { ssr: false });
 
-/** Safely pick a wallet-like identifier from NextAuth session.
- *  Returns "" when absent, never the literal "undefined"/"null".
- */
 function pickWalletFromSession(session: any): string {
-  const u = (session && session.user) || {};
-  const raw = u.address || u.id || u.name || "";
-  const s = typeof raw === "string" ? raw.trim() : "";
-  if (!s) return "";
-  if (s === "undefined" || s === "null") return "";
-  return s;
+  const u = session?.user || {};
+  return String(u.address);
+  // return String(u.id || u.address || u.name || "");
 }
 
 function shorten(addr?: string) {
@@ -31,10 +24,22 @@ function shorten(addr?: string) {
 
 export default function Navbar() {
   const pathname = usePathname();
-  const { data: session, status } = useSession();
+  const { data: session } = useSession();
 
   const sessionWallet = pickWalletFromSession(session);
-  const isLoggedIn = status === "authenticated" && !!sessionWallet;
+  const isLoggedIn = !!sessionWallet;
+
+  const WalletPill = (
+    <Link
+      href="/dashboard/profile"
+      className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium hover:bg-white/10 transition-colors"
+      title={sessionWallet}
+      aria-label="Open profile"
+      prefetch={false}
+    >
+      {shorten(sessionWallet)}
+    </Link>
+  );
 
   return (
     <header className="sticky top-0 z-50 flex justify-center px-3 py-4 md:px-4">
@@ -71,15 +76,7 @@ export default function Navbar() {
         <div className="hidden md:flex items-center gap-2">
           {isLoggedIn ? (
             <>
-              <Link
-                href="/dashboard/profile"
-                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium hover:bg-white/10 transition-colors"
-                title={sessionWallet}
-                aria-label="Open profile"
-                prefetch={false}
-              >
-                {shorten(sessionWallet)}
-              </Link>
+              {WalletPill}
               <button
                 onClick={() => signOut()}
                 className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
@@ -87,9 +84,6 @@ export default function Navbar() {
                 Sign out
               </button>
             </>
-          ) : status === "loading" ? (
-            // tiny skeleton to avoid flicker
-            <div className="h-8 w-24 rounded-full bg-white/10 animate-pulse" aria-hidden />
           ) : (
             <WalletButton />
           )}
@@ -99,14 +93,7 @@ export default function Navbar() {
         <div className="md:hidden flex items-center gap-2">
           {isLoggedIn ? (
             <>
-              <Link
-                href="/dashboard/profile"
-                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium hover:bg-white/10 transition-colors"
-                title={sessionWallet}
-                prefetch={false}
-              >
-                {shorten(sessionWallet)}
-              </Link>
+              {WalletPill}
               <button
                 onClick={() => signOut()}
                 className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
@@ -114,8 +101,6 @@ export default function Navbar() {
                 Sign out
               </button>
             </>
-          ) : status === "loading" ? (
-            <div className="h-8 w-20 rounded-full bg-white/10 animate-pulse" aria-hidden />
           ) : (
             <WalletButton />
           )}
