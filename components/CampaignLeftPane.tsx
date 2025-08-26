@@ -7,6 +7,7 @@ import InputCard from "@/components/InputCard";
 import type { AnalysisInput } from "@/components/types";
 import EmotionalLandscapeCard from "@/components/EmotionalLandscapeCard";
 import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
+import type { AnalysisResult } from "@/components/types";
 
 export default function CampaignLeftPane({
   onRun,

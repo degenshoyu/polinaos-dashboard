@@ -4,6 +4,7 @@ import { useState } from "react";
 import AnalysisConsole from "@/components/AnalysisConsole";
 import StatisticSummary from "@/components/StatisticSummary";
 import type { AnalysisInput } from "@/components/types";
+import type { AnalysisResult } from "@/components/types";
 
 /**
  * Right pane wrapper that stacks AnalysisConsole and StatisticSummary.
@@ -16,7 +17,7 @@ export default function CampaignRightPane({
   className = "",
 }: {
   inputs?: AnalysisInput | null;
-  onAnalysisResult?: (res: { summary: string; emotions?: import("@/lib/analysis/emotionalLandscape").EmotionalLandscape }) => void;
+  onAnalysisResult?: (res: AnalysisResult) => void;
   onJobIdChange?: (id: string | null) => void;
   className?: string;
 }) {

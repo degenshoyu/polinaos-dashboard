@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import polinaIcon from "@/public/polina-icon.png";
 import type { AnalysisInput } from "./types";
+import type { AnalysisResult } from "@/components/types";
 
 export default function AnalysisConsole({
   inputs,
@@ -15,7 +16,7 @@ export default function AnalysisConsole({
 }: {
   inputs?: AnalysisInput | null;
   onTweetCountUpdate?: (n: number) => void;
-  onAnalysisResult?: (res: { summary: string; metrics?: import("./MetricsCard").AnalysisMetrics; metricsInsight?: string }) => void;
+  onAnalysisResult?: (res: AnalysisResult) => void;
   onJobIdChange?: (id: string | null) => void;
   className?: string;
 }) {
@@ -343,7 +344,7 @@ I'll guide you through the whole process:
             const json = await aiRes.json().catch(() => ({}));
             const text: string = json?.text || json?.error || "";
             const emotions = json?.emotions;
-            const emotionsInsight = json?.emotionsInsight;
+            const emotionsInsight: string | null | undefined = json?.emotionsInsight;
             if (!aiRes.ok) {
               replaceGenerating(`❌ Gemini error: ${text || aiRes.statusText}`);
               return;
