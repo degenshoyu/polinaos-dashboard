@@ -192,17 +192,6 @@ function FrozenView({
       </div>
 
       <div className="ml-3 flex items-center gap-2">
-        {deepLinkUrl && (
-          <button
-            type="button"
-            onClick={copy}
-            className="px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-xs font-medium text-emerald-300"
-            title="Copy sharable link"
-            aria-label="Copy sharable link"
-          >
-            Copy link
-          </button>
-        )}
         <button
           type="button"
           onClick={onChange}
