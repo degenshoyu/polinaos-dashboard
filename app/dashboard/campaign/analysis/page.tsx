@@ -1,37 +1,138 @@
 // app/dashboard/campaign/analysis/page.tsx
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import CampaignLeftPane from "@/components/CampaignLeftPane";
 import CampaignRightPane from "@/components/CampaignRightPane";
 import type { AnalysisInput } from "@/components/types";
-import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
+import {
+  computeEmotionalLandscape,
+  type TweetForEmotion,
+} from "@/lib/analysis/emotionalLandscape";
+
+type JobTweet = Partial<TweetForEmotion> & {
+  tweetId?: string;
+  tweeter?: string;
+  textContent?: string;
+  datetime?: string;
+  statusLink?: string;
+  views?: number;
+  likes?: number;
+  retweets?: number;
+  replies?: number;
+  isVerified?: boolean;
+};
+
+type JobPayload = {
+  job_id: string;
+  status: string;
+  start_date?: string;
+  end_date?: string;
+  keyword?: string[];
+  tweets_count?: number;
+  tweets?: JobTweet[];
+};
 
 export default function AnalysisPage() {
+  const searchParams = useSearchParams();
+  const deeplinkJob = searchParams.get("job");
+
   const [summary, setSummary] = useState<string | null>(null);
-  const [emotions, setEmotions] = useState<EmotionalLandscape | null>(null);
-  const [emotionsInsight, setEmotionsInsight] = useState<string | null>(null);
   const [lastInput, setLastInput] = useState<AnalysisInput | null>(null);
   const [deepLinkUrl, setDeepLinkUrl] = useState<string | undefined>(undefined);
 
+  // Emotional Landscape（用于左侧渲染；deeplink 时我们在客户端即时计算）
+  const [emotions, setEmotions] = useState<ReturnType<typeof computeEmotionalLandscape> | null>(null);
+  const [emotionsInsight, setEmotionsInsight] = useState<string | null>(null);
+
+  // ticker / contract（显示在 Buckets 卡片头部，如果能从关键词里推断）
+  const [ticker, setTicker] = useState<string | null>(null);
+  const [contractAddress, setContractAddress] = useState<string | null>(null);
+
+  // 统一设置 deeplink 显示的 URL（右侧在启动/切换 job 时也会回调设置）
   async function handleJobIdChange(jobId: string | null) {
     if (!jobId) {
       setDeepLinkUrl(undefined);
       return;
     }
-  const base = window.location.origin;
-  setDeepLinkUrl(`${base}/dashboard/campaign/analysis?job=${encodeURIComponent(jobId)}`);
+    const base = window.location.origin;
+    setDeepLinkUrl(`${base}/dashboard/campaign/analysis?job=${encodeURIComponent(jobId)}`);
   }
+
+  // ===== Deeplink 进来时：直接拉取 job 数据并客户端计算 Emotional Landscape =====
+  useEffect(() => {
+    if (!deeplinkJob) return;
+
+    handleJobIdChange(deeplinkJob);
+
+    (async () => {
+      try {
+        const r = await fetch(`/api/jobProxy?job_id=${encodeURIComponent(deeplinkJob)}`, { cache: "no-store" });
+        const j = (await r.json()) as JobPayload;
+        if (!r.ok) throw new Error((j as any)?.error || r.statusText);
+
+        const rows = Array.isArray(j.tweets) ? j.tweets : [];
+
+        // 组装为 TweetForEmotion（尽量容错）
+        const norm: TweetForEmotion[] = rows
+          .map((t) => ({
+            textContent:
+              (typeof t.textContent === "string" && t.textContent) ||
+              (typeof (t as any).text === "string" && (t as any).text) ||
+              (typeof (t as any).full_text === "string" && (t as any).full_text) ||
+              (typeof (t as any).content === "string" && (t as any).content) ||
+              "",
+            tweetId: t.tweetId || (t as any).id_str || (t as any).id,
+            tweeter: t.tweeter || (t as any).user?.screen_name || (t as any).user?.name,
+            datetime: t.datetime || (t as any).created_at,
+            isVerified: Boolean(t.isVerified || (t as any).user?.verified),
+            views: toNum((t as any).views),
+            likes: toNum((t as any).likes ?? (t as any).favorite_count),
+            replies: toNum((t as any).replies),
+            retweets: toNum((t as any).retweets ?? (t as any).retweet_count),
+            statusLink: t.statusLink,
+          }))
+          .filter((t) => typeof t.textContent === "string" && t.textContent.trim().length > 0);
+
+        if (norm.length) {
+          const emo = computeEmotionalLandscape(norm);
+          setEmotions(emo);
+        } else {
+          setEmotions(null);
+        }
+
+        // 依据 keyword 猜测 ticker / contract（可选）
+        const kw = Array.isArray(j.keyword) ? j.keyword.filter((s): s is string => typeof s === "string") : [];
+        const guessTicker = kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || null;
+        const guessContract =
+          kw.find((k) => /^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(k)) || null; // 粗略匹配 base58/较长地址
+        setTicker(guessTicker);
+        setContractAddress(guessContract);
+
+        // deeplink 初次加载没有 AI 总结/情感洞察时，保持 null；当用户点击分析时会再被覆盖
+        setSummary((prev) => prev ?? null);
+        setEmotionsInsight((prev) => prev ?? null);
+      } catch (e) {
+        // 静默失败：不阻塞页面（用户仍可点击右侧运行分析）
+        console.warn("[deeplink hydrate failed]", (e as any)?.message || e);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deeplinkJob]);
 
   return (
     <div className="grid grid-cols-12 gap-6 items-start">
-      {/* Left column: Input + AI Understanding + Metrics */}
+      {/* Left column: Input + AI Understanding + Emotional Landscape */}
       <div className="col-span-12 md:col-span-6">
         <CampaignLeftPane
           aiSummary={summary}
-          emotions={emotions ?? undefined}
-          emotionsInsight={emotionsInsight ?? undefined}
           deepLinkUrl={deepLinkUrl}
+          // 将 deeplink 计算出来的情感图 & meta 透传给左侧卡片
+          emotions={emotions}
+          emotionsInsight={emotionsInsight}
+          ticker={ticker}
+          contractAddress={contractAddress}
           onRun={(input) => {
             setSummary(null);
             setEmotions(null);
@@ -47,12 +148,22 @@ export default function AnalysisPage() {
           inputs={lastInput}
           onAnalysisResult={(res) => {
             setSummary(res.summary);
-            setEmotions(res.emotions ?? null);
-            setEmotionsInsight(res.emotionsInsight ?? null);
+            setEmotions((prev) =>
+              res.emotions !== undefined ? (res.emotions ?? null) : prev
+            );
+            setEmotionsInsight((prev) =>
+              res.emotionsInsight !== undefined ? (res.emotionsInsight ?? null) : prev
+            );
           }}
           onJobIdChange={handleJobIdChange}
         />
       </div>
     </div>
   );
+}
+
+/** ===== helpers ===== */
+function toNum(n: any): number | undefined {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : undefined;
 }
