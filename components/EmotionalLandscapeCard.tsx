@@ -1,68 +1,244 @@
 // components/EmotionalLandscapeCard.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { toPng } from "html-to-image";
 import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
 
-const card = "p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5";
+/** ========= Styles (与 AiUnderstanding / InputCard 一致) ========= */
+const card =
+  "p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5";
+const panel = "rounded-2xl border border-white/10 bg-white/5";
 
+/** ========= Props ========= */
 type Props = {
   data: EmotionalLandscape;
   insight?: string | null;
   className?: string;
+  /** 可选：用于在 Buckets & Evidence 顶部展示 */
+  ticker?: string | null;
+  contractAddress?: string | null;
 };
 
-export default function EmotionalLandscapeCard({ data, insight, className }: Props) {
+export default function EmotionalLandscapeCard({
+  data,
+  insight,
+  className,
+  ticker,
+  contractAddress,
+}: Props) {
+  // UI & state
   const [openBuckets, setOpenBuckets] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [copied, setCopied] = useState<"ticker" | "contract" | null>(null);
+
+  // Refs for screenshot sections
+  const wholeRef = useRef<HTMLDivElement>(null);
+  // combined wrapper for spectrum + insight
+  const heroRef = useRef<HTMLDivElement>(null);
+  const bucketsRef = useRef<HTMLDivElement>(null);
+
   const toggle = (key: string) => setOpenBuckets((s) => ({ ...s, [key]: !s[key] }));
 
-  const ordered = data.buckets; // 后端已排好顺序：bullish → optimistic → neutral → concerned → bearish
+  const ordered = data.buckets; // 已经按照 bullish → optimistic → neutral → concerned → bearish 排序
   const totalPct = Math.max(1, ordered.reduce((s, b) => s + (b.sharePct || 0), 0));
 
+  /** ========= Screenshot helpers ========= */
+  async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
+    if (!node) throw new Error("Target element not found");
+
+    // 让布局与字体稳定（双 rAF + fonts.ready）
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    if ((document as any).fonts?.ready) {
+      try {
+        await (document as any).fonts.ready;
+      } catch {}
+    }
+
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+
+    const baseUrl = await toPng(node, {
+      cacheBust: true,
+      pixelRatio: dpr,
+      backgroundColor: "#0a0f0e",
+      style: { backgroundColor: "#0a0f0e" },
+      filter: (domNode) => {
+        if (!(domNode instanceof Element)) return true;
+        const tag = domNode.tagName;
+        if (tag === "VIDEO" || tag === "CANVAS") return false;
+        if (domNode instanceof Element && domNode.getAttribute("data-no-export") === "true") {
+          return false;
+        }
+        return true;
+      },
+    });
+
+    const finalUrl = await composeCanvasBrandFrame(baseUrl, dpr);
+    const a = document.createElement("a");
+    a.href = finalUrl;
+    a.download = filename;
+    a.click();
+  }
+
+  async function saveFull() {
+    return saveNodeAsPng(wholeRef.current, "emotional-landscape-full.png");
+  }
+  async function saveSpectrumInsight() {
+    return saveNodeAsPng(heroRef.current, "emotional-spectrum-insight.png");
+  }
+  async function saveBuckets() {
+    return saveNodeAsPng(bucketsRef.current, "emotional-buckets.png");
+  }
+  async function saveAll() {
+    try {
+      setSaving(true);
+      setSaveMsg("Rendering…");
+      await saveFull();
+      await saveSpectrumInsight();
+      await saveBuckets();
+      setSaveMsg("Saved all ✅");
+      setTimeout(() => setSaveMsg(null), 1600);
+    } catch (e: any) {
+      setSaveMsg(`Failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function copyText(s: string, which: "ticker" | "contract") {
+    try {
+      await navigator.clipboard.writeText(s);
+      setCopied(which);
+      setTimeout(() => setCopied(null), 1400);
+    } catch {
+      window.prompt("Copy this:", s);
+    }
+  }
+
+  /** ========= Header ========= */
+  const header = (
+    <div className="flex items-center justify-between mb-4">
+      <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+        Emotional · Landscape
+      </h2>
+      <div className="flex items-center gap-2 text-xs text-gray-400">
+        <button
+          onClick={saveAll}
+          disabled={saving}
+          className="px-3 py-1.5 rounded-md bg-gradient-to-r from-[#27a567] to-[#2fd480] text-white/90 font-semibold shadow disabled:opacity-50"
+          title="Save all sections"
+        >
+          {saving ? "⏳ Saving…" : "📦 Save"}
+        </button>
+
+        <details className="relative" data-no-export="true">
+          <summary className="list-none cursor-pointer px-2.5 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80">
+            ⋯
+          </summary>
+          <div className="absolute right-0 mt-2 w-60 rounded-lg border border-white/10 bg-[#0e1413] shadow-xl p-2 z-20">
+            <button onClick={saveFull} className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200">
+              1 Save full card
+            </button>
+            <button onClick={saveSpectrumInsight} className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200">
+              2 Save spectrum + insight
+            </button>
+            <button onClick={saveBuckets} className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/5 text-gray-200">
+              3 Save buckets
+            </button>
+          </div>
+        </details>
+      </div>
+    </div>
+  );
+
   return (
-    <div className={`flex flex-col gap-6 ${className || ""}`}>
-      {/* ===== Card: Header + Insight ===== */}
+    <div ref={wholeRef} className={`flex flex-col gap-6 ${className || ""}`}>
+      {/* ===== Card: Header + Spectrum + Insight ===== */}
       <div className={card}>
-        <div className="flex items-start justify-between mb-4">
-          <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-            Emotional Landscape
-          </h2>
-          <span className="text-[11px] text-white/50">Weighted by views & engagements</span>
+        {header}
+
+        {/* Combined wrapper: Spectrum + Insight */}
+        <div ref={heroRef}>
+          {/* Spectrum */}
+          <div className="mb-3">
+            <div className="h-3 rounded-full bg-white/10 overflow-hidden flex">
+              {ordered.map((b) => (
+                <div
+                  key={b.label}
+                  className={`h-full ${colorFor(b.label)} transition-all`}
+                  style={{ width: `${Math.max(0, Math.min(100, (b.sharePct / totalPct) * 100))}%` }}
+                  title={`${titleFor(b.label)} · ${b.sharePct}%`}
+                />
+              ))}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {ordered.map((b) => (
+                <LegendPill key={b.label} label={b.label} pct={b.sharePct} />
+              ))}
+            </div>
+          </div>
+
+          {/* Insight */}
+          {insight ? (
+            <InsightCallout markdown={insight} />
+          ) : (
+            <p className="text-sm text-gray-400">
+              No AI insight yet. The spectrum above reflects aggregate emotion; open a bucket below for details.
+            </p>
+          )}
         </div>
 
-        {/* Spectrum */}
-        <div className="mb-3">
-          <div className="h-3 rounded-full bg-white/10 overflow-hidden flex">
-            {ordered.map((b) => (
-              <div
-                key={b.label}
-                className={`h-full ${colorFor(b.label)} transition-all`}
-                style={{ width: `${Math.max(0, Math.min(100, (b.sharePct / totalPct) * 100))}%` }}
-                title={`${titleFor(b.label)} · ${b.sharePct}%`}
-              />
-            ))}
-          </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {ordered.map((b) => (
-              <LegendPill key={b.label} label={b.label} pct={b.sharePct} />
-            ))}
-          </div>
-        </div>
-
-        {/* Insight */}
-        {insight ? (
-          <InsightCallout markdown={insight} />
-        ) : (
-          <p className="text-sm text-gray-400">
-            No AI insight yet. The spectrum above reflects aggregate emotion; open a bucket below for details.
-          </p>
-        )}
+        {saveMsg && <div className="mt-3 text-xs text-gray-300">{saveMsg}</div>}
       </div>
 
       {/* ===== Card: Buckets ===== */}
-      <div className={card}>
-        <h3 className="text-lg font-semibold mb-3">Buckets & Evidence</h3>
+      <div ref={bucketsRef} className={card}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Buckets & Evidence</h3>
+          {/* 右上角轻量说明 */}
+          <span className="text-[11px] text-white/50">Weighted by views & engagements</span>
+        </div>
+
+        {/* Meta: ticker + contract（可选显示） */}
+        {(ticker || contractAddress) && (
+          <div className={`${panel} p-3 mb-4 grid grid-cols-1 md:grid-cols-2 gap-3`}>
+            {ticker && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400">Ticker</span>
+                <span className="px-2 py-0.5 text-sm rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono">
+                  {ticker}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyText(ticker, "ticker")}
+                  className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80"
+                  title="Copy ticker"
+                >
+                  {copied === "ticker" ? "Copied ✓" : "Copy"}
+                </button>
+              </div>
+            )}
+            {contractAddress && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-400">Contract</span>
+                <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
+                  {contractAddress}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyText(contractAddress, "contract")}
+                  className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80"
+                  title="Copy contract"
+                >
+                  {copied === "contract" ? "Copied ✓" : "Copy"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="grid md:grid-cols-2 gap-4">
           {ordered.map((b) => {
             const k = b.label;
@@ -70,7 +246,7 @@ export default function EmotionalLandscapeCard({ data, insight, className }: Pro
             return (
               <div
                 key={k}
-                className="rounded-xl border border-white/10 bg-white/5 hover:bg-white/[0.07] transition overflow-hidden"
+                className={`${panel} rounded-xl hover:bg-white/[0.07] transition overflow-hidden`}
               >
                 <button
                   className="w-full text-left p-4 flex items-center justify-between"
@@ -151,12 +327,10 @@ export default function EmotionalLandscapeCard({ data, insight, className }: Pro
   );
 }
 
-/* ===== UI subcomponents ===== */
+/** ========= Subcomponents ========= */
 function LegendPill({ label, pct }: { label: string; pct: number }) {
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border ${borderFor(label)} text-[11px]`}
-    >
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border ${borderFor(label)} text-[11px]`}>
       <span className={`inline-block w-2 h-2 rounded-full ${dotFor(label)}`} />
       <span className="capitalize text-gray-200">{titleFor(label)}</span>
       <span className="text-white/60">{pct}%</span>
@@ -165,8 +339,7 @@ function LegendPill({ label, pct }: { label: string; pct: number }) {
 }
 
 function IntensityCell({ n, label }: { n: number; label: "low" | "mid" | "high" }) {
-  const bg =
-    label === "low" ? "bg-white/12" : label === "mid" ? "bg-white/20" : "bg-white/30";
+  const bg = label === "low" ? "bg-white/12" : label === "mid" ? "bg-white/20" : "bg-white/30";
   return (
     <span className={`ml-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded ${bg} text-white/80`}>
       <span className="text-[11px]">{label}</span>
@@ -199,7 +372,7 @@ function InsightCallout({ markdown }: { markdown: string }) {
   );
 }
 
-/* ===== style helpers ===== */
+/** ========= Style helpers ========= */
 function iconFor(label: string) {
   switch (label) {
     case "bullish":
@@ -275,4 +448,133 @@ function borderFor(label: string) {
     default:
       return "border-white/10 bg-white/5";
   }
+}
+
+/** ========= Canvas Brand Frame（与 StatisticSummary 相同风格） ========= */
+async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise<string> {
+  const [img, logo] = await Promise.all([
+    loadImage(basePngUrl),
+    loadImage("/polina-icon.png").catch(() => null as any),
+  ]);
+
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+  const W = img.width;
+
+  const pad = clamp(Math.round(W * 0.045), 64, 128);
+  const border = 0;
+  const radius = 0;
+
+  const logoSize = clamp(Math.round(W * 0.088), 112, 224);
+  const brandFont = clamp(Math.round(W * 0.048), 36, 96);
+  const linkFont = clamp(Math.round(W * 0.018), 20, 44);
+  const lineH = Math.round(linkFont * 1.45);
+
+  const links = ["polinaos.com", "x.com/PolinaAIOS", "t.me/PolinaOSAI"];
+
+  const footerPadTop = Math.round(pad * 0.5);
+  const footerPadBottom = Math.round(pad * 0.5);
+  const footerContentH = Math.max(logoSize, links.length * lineH);
+  const footerH = footerPadTop + footerContentH + footerPadBottom;
+
+  const width = img.width + pad * 2 + border * 2;
+  const height = img.height + pad * 2 + footerH + border * 2;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+
+  const ctx = canvas.getContext("2d")!;
+  ctx.scale(dpr, dpr);
+  ctx.imageSmoothingEnabled = true;
+
+  // 背景面板
+  ctx.fillStyle = "#0a0f0e";
+  roundedRect(ctx, 0.5, 0.5, width - 1, height - 1, radius);
+  ctx.fill();
+
+  // 边框
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = border;
+  roundedRect(ctx, border / 2 + 0.5, border / 2 + 0.5, width - border - 1, height - border - 1, radius);
+  ctx.stroke();
+
+  // 主截图
+  const shotX = border + pad;
+  const shotY = border + pad;
+  ctx.drawImage(img, shotX, shotY);
+
+  // Footer 分隔线
+  const footerTop = shotY + img.height + pad - 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.12)";
+  ctx.beginPath();
+  ctx.moveTo(border + pad, footerTop);
+  ctx.lineTo(width - border - pad, footerTop);
+  ctx.stroke();
+
+  const contentTop = footerTop + footerPadTop;
+  const logoX = border + pad;
+  const logoY = contentTop;
+
+  if (logo) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(logo, logoX, logoY, logoSize, logoSize);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.beginPath();
+    ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 左：品牌
+  ctx.font = `700 ${brandFont}px ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial`;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "start";
+  const brandTextX = logoX + logoSize + Math.round(pad * 0.5);
+  const brandTextY = logoY + logoSize / 2;
+  ctx.fillText("PolinaOS", brandTextX, brandTextY);
+
+  // 右：三行链接
+  ctx.font = `500 ${linkFont}px ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial`;
+  ctx.fillStyle = "rgba(229,231,235,0.9)";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+
+  const rightX = width - border - pad;
+  const firstY = contentTop + (footerContentH - links.length * lineH) / 2;
+  links.forEach((t, i) => ctx.fillText(t, rightX, firstY + i * lineH));
+
+  return canvas.toDataURL("image/png");
+}
+
+function roundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = src;
+  });
 }
