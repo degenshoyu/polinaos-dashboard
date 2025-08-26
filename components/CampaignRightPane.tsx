@@ -16,7 +16,7 @@ export default function CampaignRightPane({
   className = "",
 }: {
   inputs?: AnalysisInput | null;
-  onAnalysisResult?: (res: { summary: string }) => void;
+  onAnalysisResult?: (res: { summary: string; emotions?: import("@/lib/analysis/emotionalLandscape").EmotionalLandscape }) => void;
   onJobIdChange?: (id: string | null) => void;
   className?: string;
 }) {

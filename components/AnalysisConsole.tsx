@@ -15,7 +15,7 @@ export default function AnalysisConsole({
 }: {
   inputs?: AnalysisInput | null;
   onTweetCountUpdate?: (n: number) => void;
-  onAnalysisResult?: (res: { summary: string }) => void;
+  onAnalysisResult?: (res: { summary: string; metrics?: import("./MetricsCard").AnalysisMetrics; metricsInsight?: string }) => void;
   onJobIdChange?: (id: string | null) => void;
   className?: string;
 }) {
@@ -342,12 +342,14 @@ I'll guide you through the whole process:
 
             const json = await aiRes.json().catch(() => ({}));
             const text: string = json?.text || json?.error || "";
+            const emotions = json?.emotions;
+            const emotionsInsight = json?.emotionsInsight;
             if (!aiRes.ok) {
               replaceGenerating(`❌ Gemini error: ${text || aiRes.statusText}`);
               return;
             }
 
-            onAnalysisResult?.({ summary: text });
+            onAnalysisResult?.({ summary: text, emotions, emotionsInsight });
             replaceGenerating("📊 I’ve completed the analysis. Please check the full summary on the AI Understanding card.");
           } catch (e: any) {
             replaceGenerating(`❌ Gemini request failed: ${e?.message || "Unknown error"}`);

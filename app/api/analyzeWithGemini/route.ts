@@ -14,6 +14,11 @@ import {
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import {
+  computeEmotionalLandscape,
+  type TweetForEmotion,
+} from "@/lib/analysis/emotionalLandscape";
+import { buildEmotionsInsightPrompt } from "@/lib/prompts/emotionsInsightPrompt";
 
 export const maxDuration = 300;
 
@@ -60,19 +65,6 @@ const Body = z.object({
 });
 
 /** ===================== Helpers ===================== **/
-type TweetForAI = {
-  textContent: string;
-  tweetId?: string;
-  tweeter?: string;
-  datetime?: string; // ISO
-  isVerified?: boolean;
-  views?: number;
-  likes?: number;
-  replies?: number;
-  retweets?: number;
-  statusLink?: string;
-};
-
 function cleanupTweets(tweets: TweetLite[]): TweetLite[] {
   const seen = new Set<string>();
   const out: TweetLite[] = [];
@@ -118,6 +110,7 @@ async function withTimeout<T>(
 async function callGemini(
   prompt: string,
   modelName = MODEL_NAME,
+  ctx?: { stage: "batch" | "synthesis"; batchIndex?: number; retry?: boolean },
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY / GOOGLE_API_KEY");
@@ -125,13 +118,46 @@ async function callGemini(
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: modelName });
 
-  const result = await withTimeout(
-    model.generateContent(prompt),
-    LLM_TIMEOUT_MS,
-  );
-  const text = result.response?.text?.() ?? result.response?.text();
-  if (!text) throw new Error("Empty response from Gemini");
-  return text;
+  try {
+    const result: any = await withTimeout(
+      model.generateContent(prompt),
+      LLM_TIMEOUT_MS,
+    );
+    const resp = result?.response;
+    const text =
+      (typeof resp?.text === "function" ? resp.text() : resp?.text) ||
+      (resp?.candidates?.[0]?.content?.parts
+        ?.map((p: any) => p?.text)
+        .filter(Boolean)
+        .join("\n") ??
+        "");
+    if (text && String(text).trim()) return String(text);
+
+    const debug = {
+      stage: ctx?.stage,
+      batchIndex: ctx?.batchIndex,
+      model: modelName,
+      candidates: resp?.candidates?.length ?? 0,
+      promptFeedback: resp?.promptFeedback ?? null,
+      safetyRatings: resp?.candidates?.[0]?.safetyRatings ?? null,
+    };
+    throw new Error("Empty response from Gemini: " + JSON.stringify(debug));
+  } catch (err: any) {
+    if (!ctx?.retry) {
+      const FALLBACK_MODEL =
+        process.env.GEMINI_FALLBACK_MODEL?.trim() || "gemini-1.5-flash";
+      const shortPrompt = prompt.slice(0, 12_000);
+      console.warn("[GeminiRetry]", {
+        stage: ctx?.stage,
+        batchIndex: ctx?.batchIndex,
+        use: FALLBACK_MODEL,
+        short: prompt.length > 12000,
+      });
+      return callGemini(shortPrompt, FALLBACK_MODEL, { ...ctx, retry: true });
+    }
+    console.error("[GeminiFail]", ctx, err?.message || err);
+    throw err;
+  }
 }
 
 /** ===================== Metrics (deterministic) ===================== **/
@@ -139,225 +165,27 @@ function safeNum(n: any): number | undefined {
   const x = Number(n);
   return Number.isFinite(x) ? x : undefined;
 }
-function ymd(d?: string) {
-  if (!d) return undefined;
-  const t = new Date(d);
-  if (isNaN(+t)) return undefined;
-  const mm = String(t.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(t.getUTCDate()).padStart(2, "0");
-  return `${t.getUTCFullYear()}-${mm}-${dd}`;
+
+// ---------- Prompt hygiene & caps ----------
+function stripUrls(s: string) {
+  return s.replace(/https?:\/\/\S+/gi, "");
 }
-function topN<T>(arr: T[], key: (t: T) => number, n: number) {
-  return [...arr].sort((a, b) => key(b) - key(a)).slice(0, n);
+function stripAtMentions(s: string) {
+  return s.replace(/(^|\s)@\w+/g, " ");
 }
-const TOKEN_RX = /\$[a-z0-9_]+/gi;
-const HASH_RX = /#[a-z0-9_]+/gi;
-
-function deriveMetrics(rows: TweetForAI[]) {
-  const total = rows.length;
-  const byUser = new Map<
-    string,
-    {
-      user: string;
-      count: number;
-      likes: number;
-      retweets: number;
-      replies: number;
-      views: number;
-    }
-  >();
-  let sumLikes = 0,
-    sumRT = 0,
-    sumRep = 0,
-    sumViews = 0,
-    verified = 0;
-  const byDay = new Map<
-    string,
-    {
-      date: string;
-      count: number;
-      likes: number;
-      retweets: number;
-      replies: number;
-      views: number;
-    }
-  >();
-  const tokenFreq = new Map<string, number>();
-  const hashFreq = new Map<string, number>();
-
-  let firstAt: Date | null = null,
-    lastAt: Date | null = null;
-
-  for (const t of rows) {
-    const u = (t.tweeter || "").toLowerCase();
-    const likes = safeNum(t.likes) || 0;
-    const rts = safeNum(t.retweets) || 0;
-    const reps = safeNum(t.replies) || 0;
-    const views = safeNum(t.views) || 0;
-
-    sumLikes += likes;
-    sumRT += rts;
-    sumRep += reps;
-    sumViews += views;
-    if (t.isVerified) verified++;
-
-    if (u) {
-      const cur = byUser.get(u) || {
-        user: u,
-        count: 0,
-        likes: 0,
-        retweets: 0,
-        replies: 0,
-        views: 0,
-      };
-      cur.count += 1;
-      cur.likes += likes;
-      cur.retweets += rts;
-      cur.replies += reps;
-      cur.views += views;
-      byUser.set(u, cur);
-    }
-
-    const day = ymd(t.datetime) || "unknown";
-    const curDay = byDay.get(day) || {
-      date: day,
-      count: 0,
-      likes: 0,
-      retweets: 0,
-      replies: 0,
-      views: 0,
-    };
-    curDay.count += 1;
-    curDay.likes += likes;
-    curDay.retweets += rts;
-    curDay.replies += reps;
-    curDay.views += views;
-    byDay.set(day, curDay);
-
-    // tokens / hashtags from text
-    const txt = t.textContent || "";
-    for (const m of txt.match(TOKEN_RX) || [])
-      tokenFreq.set(m.toUpperCase(), (tokenFreq.get(m.toUpperCase()) || 0) + 1);
-    for (const m of txt.match(HASH_RX) || [])
-      hashFreq.set(m.toLowerCase(), (hashFreq.get(m.toLowerCase()) || 0) + 1);
-
-    // recency
-    if (t.datetime) {
-      const dt = new Date(t.datetime);
-      if (!isNaN(+dt)) {
-        if (!firstAt || dt < firstAt) firstAt = dt;
-        if (!lastAt || dt > lastAt) lastAt = dt;
-      }
-    }
-  }
-
-  const uniqueTweeters = byUser.size;
-  const engagementAvg =
-    total > 0
-      ? {
-          likes: +(sumLikes / total).toFixed(2),
-          retweets: +(sumRT / total).toFixed(2),
-          replies: +(sumRep / total).toFixed(2),
-          views: +(sumViews / total).toFixed(2),
-        }
-      : { likes: 0, retweets: 0, replies: 0, views: 0 };
-
-  const usersArr = [...byUser.values()];
-  const topTweetersByCount = topN(usersArr, (u) => u.count, 10);
-  const topTweetersByEng = topN(
-    usersArr,
-    (u) => u.likes + u.retweets * 2 + u.replies,
-    10,
-  );
-
-  const topTweetsByEngagement = topN(
-    rows,
-    (t) =>
-      (safeNum(t.likes) || 0) +
-      (safeNum(t.retweets) || 0) * 2 +
-      (safeNum(t.replies) || 0),
-    15,
-  ).map((t) => ({
-    tweetId: t.tweetId,
-    tweeter: t.tweeter,
-    datetime: t.datetime,
-    likes: safeNum(t.likes) || 0,
-    retweets: safeNum(t.retweets) || 0,
-    replies: safeNum(t.replies) || 0,
-    views: safeNum(t.views) || 0,
-    statusLink: t.statusLink,
-    textPreview: (t.textContent || "").slice(0, 160),
-  }));
-
-  const daySeries = [...byDay.values()].sort((a, b) =>
-    a.date.localeCompare(b.date),
-  );
-  const tokens = topN(
-    [...tokenFreq.entries()].map(([k, v]) => ({ token: k, count: v })),
-    (x) => x.count,
-    20,
-  );
-  const hashtags = topN(
-    [...hashFreq.entries()].map(([k, v]) => ({ hashtag: k, count: v })),
-    (x) => x.count,
-    20,
-  );
-
-  const windowDays =
-    firstAt && lastAt
-      ? Math.max(1, Math.round((+lastAt - +firstAt) / 86400000) + 1)
-      : null;
-
-  return {
-    totals: {
-      tweets: total,
-      uniqueTweeters,
-      verifiedTweets: verified,
-      verifiedShare: total ? +((verified / total) * 100).toFixed(2) : 0,
-      window:
-        firstAt && lastAt
-          ? {
-              start: firstAt.toISOString(),
-              end: lastAt.toISOString(),
-              days: windowDays,
-            }
-          : null,
-    },
-    engagement: {
-      sum: {
-        likes: sumLikes,
-        retweets: sumRT,
-        replies: sumRep,
-        views: sumViews,
-      },
-      avg: engagementAvg,
-    },
-    topTweetersByCount,
-    topTweetersByEngagement: topTweetersByEng,
-    topTweetsByEngagement,
-    timeSeriesDaily: daySeries,
-    tokens,
-    hashtags,
-  };
+function collapseSpaces(s: string) {
+  return s.replace(/\s+/g, " ").trim();
 }
-
-function buildMetricsInsightPrompt(
-  projectName: string | undefined,
-  metricsJson: unknown,
-  sampleTweets: TweetForAI[],
-) {
-  const header = `You are a crypto/Twitter growth analyst. I will give you (1) aggregated numeric metrics and (2) a tiny sample of tweets (metadata + text preview).`;
-  const task = `Your job: write a **short, actionable Markdown** insight (<= 180 words) with:
-- 3–5 bullets interpreting the metrics (momentum, concentration风险, verified占比、互动质量等)
-- 2 concrete growth ideas based on data (e.g., activate specific tweeters/time windows/hashtags)
-Rules: do **not** redo any arithmetic; reason only from the metrics JSON. Use concise English.`;
-  const ctx = {
-    projectName: projectName || null,
-    metrics: metricsJson,
-    sample: sampleTweets.slice(0, 8),
-  };
-  return `${header}\n\n${task}\n\nDATA (JSON):\n${JSON.stringify(ctx, null, 2)}\n\nReturn Markdown only.`;
+function capText(s: string, max = 320) {
+  const t = collapseSpaces(stripAtMentions(stripUrls(s)));
+  return t.length <= max ? t : t.slice(0, max) + "…";
 }
+function promptLen(s: string) {
+  return s.length;
+} // 粗略用字符数
+const BATCH_MAX = parseIntSafe(process.env.AI_BATCH_PROMPT_MAX_CHARS, 12000);
+const SYNTH_MAX = parseIntSafe(process.env.AI_SYNTH_PROMPT_MAX_CHARS, 8000);
+const TWEET_CAP0 = parseIntSafe(process.env.AI_TWEET_CHAR_CAP, 320);
 
 /** ===================== Route ===================== **/
 export async function POST(req: Request) {
@@ -372,7 +200,7 @@ export async function POST(req: Request) {
         ? String(parsed.job.keyword[0] || "")
         : undefined);
 
-    const full: TweetForAI[] = (Array.isArray(tweetsRaw) ? tweetsRaw : [])
+    const full: TweetForEmotion[] = (Array.isArray(tweetsRaw) ? tweetsRaw : [])
       .map((t: any) => ({
         textContent: extractTextFromTweet(t),
         tweetId: t?.tweetId || t?.id_str || t?.id,
@@ -402,25 +230,110 @@ export async function POST(req: Request) {
     const batches = chunkArray(clean, MAX_TWEETS_PER_BATCH);
 
     const batchSummaries: string[] = [];
-    for (const batch of batches) {
-      const prompt = buildAnalyzePrompt(batch, {
-        projectName,
-        maxWords: MAX_WORDS_PER_BATCH,
-      });
-      const summary = await callGemini(prompt);
-      batchSummaries.push(summary);
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      // 逐级收缩：320 → 160 → 100 字；仍超则丢尾
+      const tryCaps = [TWEET_CAP0, 160, 100];
+      let prompt: string | null = null;
+      for (const cap of tryCaps) {
+        const compact = batch.map((t) => ({
+          textContent: capText(t.textContent, cap),
+        }));
+        const p = buildAnalyzePrompt(compact, {
+          projectName,
+          maxWords: MAX_WORDS_PER_BATCH,
+        });
+        if (promptLen(p) <= BATCH_MAX) {
+          prompt = p;
+          break;
+        }
+      }
+      if (!prompt) {
+        let cap = 100;
+        let cur = batch.map((t) => ({
+          textContent: capText(t.textContent, cap),
+        }));
+        while (cur.length > 0) {
+          const p = buildAnalyzePrompt(cur, {
+            projectName,
+            maxWords: MAX_WORDS_PER_BATCH,
+          });
+          if (promptLen(p) <= BATCH_MAX) {
+            prompt = p;
+            break;
+          }
+          cur = cur.slice(0, cur.length - 3); // 每次去掉 3 条，加快收敛
+        }
+      }
+      if (!prompt) {
+        console.warn("[BatchDrop] prompt too long after trimming", {
+          i,
+          size: batches[i].length,
+        });
+        continue;
+      }
+      try {
+        const summary = await callGemini(prompt, MODEL_NAME, {
+          stage: "batch",
+          batchIndex: i,
+        });
+        batchSummaries.push(summary);
+      } catch (e: any) {
+        console.warn("[BatchSkip]", i, e?.message || e);
+      }
+    }
+    if (batchSummaries.length === 0) {
+      return NextResponse.json(
+        { error: "All batches failed (Gemini empty responses or oversized)." },
+        { status: 400 },
+      );
     }
 
-    const synthesisPrompt = buildSynthesisPrompt(batchSummaries, {
+    let synthesisPrompt = buildSynthesisPrompt(batchSummaries, {
       projectName,
       maxWords: MAX_WORDS_FINAL,
     });
-    const finalMarkdown = await callGemini(synthesisPrompt);
 
-    const metrics = deriveMetrics(full);
-    const metricsInsight = await callGemini(
-      buildMetricsInsightPrompt(projectName, metrics, full),
-    ).catch(() => "");
+    if (promptLen(synthesisPrompt) > SYNTH_MAX) {
+      const trimmed = batchSummaries.map((s) =>
+        s.length > 500 ? s.slice(0, 500) + "…" : s,
+      );
+      synthesisPrompt = buildSynthesisPrompt(trimmed, {
+        projectName,
+        maxWords: Math.min(MAX_WORDS_FINAL, 380),
+      });
+      if (promptLen(synthesisPrompt) > SYNTH_MAX) {
+        let arr = [...trimmed];
+        while (
+          arr.length > 3 &&
+          promptLen(buildSynthesisPrompt(arr, { projectName, maxWords: 360 })) >
+            SYNTH_MAX
+        ) {
+          arr = arr.slice(1);
+        }
+        synthesisPrompt = buildSynthesisPrompt(arr, {
+          projectName,
+          maxWords: Math.min(MAX_WORDS_FINAL, 360),
+        });
+      }
+    }
+    const finalMarkdown = await callGemini(synthesisPrompt, MODEL_NAME, {
+      stage: "synthesis",
+    });
+
+    const emotions = computeEmotionalLandscape(full);
+
+    let emotionsInsight: string | null = null;
+    try {
+      const emoPrompt = buildEmotionsInsightPrompt(emotions, {
+        projectName,
+        maxWords: 160,
+      });
+      emotionsInsight = await callGemini(emoPrompt);
+      // emotionsInsight = await callGemini(emoPrompt, MODEL_NAME, { stage: "emotions" });
+    } catch {
+      emotionsInsight = null;
+    }
 
     let resolvedSearchId: string | undefined = searchId;
 
@@ -471,18 +384,22 @@ export async function POST(req: Request) {
             text,
           })),
           final: { text: finalMarkdown },
-          metrics,
-          metricsInsight: metricsInsight || null,
+          emotions,
+          emotionsInsight,
         },
         summaryText: finalMarkdown,
       });
     }
 
-    return NextResponse.json({ text: finalMarkdown, metrics, metricsInsight });
+    return NextResponse.json({
+      text: finalMarkdown,
+      emotions,
+      emotionsInsight,
+    });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "AI error" },
-      { status: 400 },
-    );
+    const payload = process.env.DEBUG_GEMINI
+      ? { error: e?.message || "AI error", stack: e?.stack }
+      : { error: e?.message || "AI error" };
+    return NextResponse.json({ status: 400 });
   }
 }

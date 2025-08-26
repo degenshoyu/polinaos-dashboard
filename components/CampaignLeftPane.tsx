@@ -5,21 +5,26 @@ import { useState } from "react";
 import { AiUnderstanding } from "@/components/AiUnderstanding";
 import InputCard from "@/components/InputCard";
 import type { AnalysisInput } from "@/components/types";
+import EmotionalLandscapeCard from "@/components/EmotionalLandscapeCard";
+import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
 
 export default function CampaignLeftPane({
   onRun,
   aiSummary,
+  emotions,
+  emotionsInsight,
   deepLinkUrl,
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;
   aiSummary?: string | null;
+  emotions?: EmotionalLandscape | null;
+  emotionsInsight?: string | null;
   deepLinkUrl?: string;
   className?: string;
 }) {
   return (
     <div className={`flex flex-col gap-6 w-full ${className}`}>
-      {/* === Card 1: Campaign · Input === */}
       <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
@@ -32,6 +37,12 @@ export default function CampaignLeftPane({
       </div>
 
       <AiUnderstanding aiSummary={aiSummary} />
+
+      {emotions ? (
+        <div className="p-0">
+          <EmotionalLandscapeCard data={emotions} insight={emotionsInsight ?? undefined} />
+        </div>
+      ) : null}
     </div>
   );
 }

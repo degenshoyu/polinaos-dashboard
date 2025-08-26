@@ -316,35 +316,26 @@ I'll guide you through the whole process:
           } catch { /* ignore and fallback to AI */ }
 
           try {
-            // Sanitize tweets for AI (text-only)
             const rawTweets = Array.isArray(data?.tweets) ? data.tweets : [];
-            const safeTweets = rawTweets
-              .map((t: any) => {
-                const textContent =
-                  (typeof t?.textContent === "string" && t.textContent) ||
-                  (typeof t?.text === "string" && t.text) ||
-                  (typeof t?.full_text === "string" && t.full_text) ||
-                  (typeof t?.content === "string" && t.content) ||
-                  "";
-                return textContent ? { textContent } : null;
-              })
-              .filter(Boolean);
-
-            if (safeTweets.length === 0) {
-              replaceGenerating("❌ No parsable tweets for AI (missing text).");
+            if (rawTweets.length === 0) {
+              replaceGenerating("❌ No tweets returned for AI.");
               return;
             }
 
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 600_000);
+            const timeout = setTimeout(() => controller.abort(), 1_200_000);
             const aiRes = await fetch("/api/analyzeWithGemini", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tweets: safeTweets, jobId: id }),
+              body: JSON.stringify({
+                job: { job_id: id, ...data },
+                tweets: rawTweets,
+                jobId: id,
+              }),
               signal: controller.signal,
             }).catch((e) => {
               throw new Error(
-                e?.name === "AbortError" ? "AI request timeout (600s)" : e?.message || "Network error"
+                e?.name === "AbortError" ? "AI request timeout (1200s)" : e?.message || "Network error"
               );
             });
             clearTimeout(timeout);
