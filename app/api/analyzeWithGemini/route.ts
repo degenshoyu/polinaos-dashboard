@@ -107,10 +107,17 @@ async function withTimeout<T>(
     ),
   ]) as Promise<T>;
 }
+
+type CallCtx = {
+  stage?: "batch" | "synthesis" | "emotions";
+  batchIndex?: number;
+  retry?: boolean;
+};
+
 async function callGemini(
   prompt: string,
   modelName = MODEL_NAME,
-  ctx?: { stage: "batch" | "synthesis"; batchIndex?: number; retry?: boolean },
+  ctx?: CallCtx,
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY / GOOGLE_API_KEY");
