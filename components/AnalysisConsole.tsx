@@ -6,6 +6,7 @@ import Image from "next/image";
 import polinaIcon from "@/public/polina-icon.png";
 import type { AnalysisInput } from "./types";
 import type { AnalysisResult } from "@/components/types";
+import ReportModal from "@/components/ReportModal";
 
 export default function AnalysisConsole({
   inputs,
@@ -25,6 +26,10 @@ export default function AnalysisConsole({
   const [messages, setMessages] = useState<{ text: string; time?: string }[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [tweetCount, setTweetCount] = useState<number>(0);
+
+  // Report modal states
+  const [reportJobId, setReportJobId] = useState<string | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
 
   // Collapsible card state (persisted)
   const [collapsed, setCollapsed] = useState<boolean>(false);
@@ -144,6 +149,11 @@ I'll guide you through the whole process:
       return "All done! I found " + (line.match(/\d+/)?.[0] ?? "?") + " relevant tweets for you 💫";
     return line;
   };
+
+  // Mark a job as ready for "View report" button
+  function markReport(id: string | null) {
+    if (id && id.trim()) setReportJobId(id.trim());
+  }
 
   // Launch a scan flow
   async function runScan(input: AnalysisInput) {
@@ -279,6 +289,7 @@ I'll guide you through the whole process:
 
           setStatus("complete");
           append(toFriendly(`✅ Completed: ${data?.tweets_count || 0} tweets found.`));
+          markReport(id);
           // ✍️ Update DB to "completed" with final count
           try {
             await fetch("/api/campaigns", {
@@ -319,6 +330,7 @@ I'll guide you through the whole process:
               const emotionsInsight = hitJson?.resultJson?.emotionsInsight ?? null;
               onAnalysisResult?.({ summary, emotions, emotionsInsight });
               replaceGenerating("📊 Loaded existing AI understanding from database.");
+              markReport(id);
               return;
             }
           } catch { /* ignore and fallback to AI */ }
@@ -359,6 +371,7 @@ I'll guide you through the whole process:
 
             onAnalysisResult?.({ summary: text, emotions, emotionsInsight });
             replaceGenerating("📊 I’ve completed the analysis. Please check the full summary on the AI Understanding card.");
+            markReport(id);
           } catch (e: any) {
             replaceGenerating(`❌ Gemini request failed: ${e?.message || "Unknown error"}`);
           }
@@ -520,7 +533,27 @@ I'll guide you through the whole process:
               <span className="text-gray-400">Status: </span>
               <span className="text-gray-200">{status}</span>
             </div>
+            {/* View report CTA */}
+            {reportJobId && (
+              <div className="pt-2 flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => setReportOpen(true)}
+                  className="px-3 py-1.5 rounded-md bg-gradient-to-r from-[#27a567] to-[#2fd480] text-white/90 text-xs font-semibold shadow hover:brightness-110"
+                >
+                  📄 View report
+                </button>
+              </div>
+            )}
           </div>
+          {/* Modal */}
+          {reportJobId && (
+            <ReportModal
+              open={reportOpen}
+              onClose={() => setReportOpen(false)}
+              jobId={reportJobId}
+            />
+          )}
         </>
       )}
     </div>
