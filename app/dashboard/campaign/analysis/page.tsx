@@ -35,7 +35,7 @@ type JobPayload = {
   tweets?: JobTweet[];
 };
 
-/** ===== Outer wrapper: provides Suspense boundary (does NOT call useSearchParams) ===== */
+/** ===== Outer wrapper: Suspense boundary (does NOT call useSearchParams) ===== */
 export default function AnalysisPage() {
   return (
     <Suspense
@@ -59,13 +59,16 @@ function AnalysisClient() {
   const [lastInput, setLastInput] = useState<AnalysisInput | null>(null);
   const [deepLinkUrl, setDeepLinkUrl] = useState<string | undefined>(undefined);
 
+  // Emotional Landscape（用于左侧渲染；deeplink 时我们在客户端即时计算）
   const [emotions, setEmotions] =
     useState<ReturnType<typeof computeEmotionalLandscape> | null>(null);
   const [emotionsInsight, setEmotionsInsight] = useState<string | null>(null);
 
+  // ticker / contract（显示在 Buckets 卡片头部，如果能从关键词里推断）
   const [ticker, setTicker] = useState<string | null>(null);
   const [contractAddress, setContractAddress] = useState<string | null>(null);
 
+  // 统一设置 deeplink 显示的 URL（右侧在启动/切换 job 时也会回调设置）
   async function handleJobIdChange(jobId: string | null) {
     if (!jobId) {
       setDeepLinkUrl(undefined);
@@ -77,6 +80,7 @@ function AnalysisClient() {
     );
   }
 
+  // ===== Deeplink 进来时：直接拉取 job 数据并客户端计算 Emotional Landscape =====
   useEffect(() => {
     if (!deeplinkJob) return;
 
@@ -93,6 +97,7 @@ function AnalysisClient() {
 
         const rows = Array.isArray(j.tweets) ? j.tweets : [];
 
+        // 组装为 TweetForEmotion（尽量容错）
         const norm: TweetForEmotion[] = rows
           .map((t) => ({
             textContent:
@@ -126,6 +131,7 @@ function AnalysisClient() {
           setEmotions(null);
         }
 
+        // 依据 keyword 猜测 ticker / contract（可选）
         const kw = Array.isArray(j.keyword)
           ? j.keyword.filter(
               (s): s is string => typeof s === "string"
@@ -134,13 +140,15 @@ function AnalysisClient() {
         const guessTicker =
           kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || null;
         const guessContract =
-          kw.find((k) => /^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(k)) || null; 
+          kw.find((k) => /^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(k)) || null; // 粗略匹配 base58/较长地址
         setTicker(guessTicker);
         setContractAddress(guessContract);
 
+        // deeplink 初次加载没有 AI 总结/情感洞察时，保持 null；当用户点击分析时会再被覆盖
         setSummary((prev) => prev ?? null);
         setEmotionsInsight((prev) => prev ?? null);
       } catch (e) {
+        // 静默失败：不阻塞页面（用户仍可点击右侧运行分析）
         console.warn("[deeplink hydrate failed]", (e as any)?.message || e);
       }
     })();
@@ -154,6 +162,7 @@ function AnalysisClient() {
         <CampaignLeftPane
           aiSummary={summary}
           deepLinkUrl={deepLinkUrl}
+          // 将 deeplink 计算出来的情感图 & meta 透传给左侧卡片
           emotions={emotions}
           emotionsInsight={emotionsInsight}
           ticker={ticker}
@@ -171,14 +180,18 @@ function AnalysisClient() {
       <div className="col-span-12 md:col-span-6 md:sticky md:top-20 self-start">
         <CampaignRightPane
           inputs={lastInput}
-          onAnalysisResult={(res) => {
+          onAnalysisResult={(
+            res: {
+              summary: string;
+              emotions?: ReturnType<typeof computeEmotionalLandscape> | null;
+              emotionsInsight?: string | null;
+            }
+          ) => {
             setSummary(res.summary);
             setEmotions((prev) =>
-              // @ts-expect-error allow partial result shape
               res.emotions !== undefined ? (res.emotions ?? null) : prev
             );
             setEmotionsInsight((prev) =>
-              // @ts-expect-error allow partial result shape
               res.emotionsInsight !== undefined
                 ? (res.emotionsInsight ?? null)
                 : prev
