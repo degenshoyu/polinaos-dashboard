@@ -15,6 +15,8 @@ export default function CampaignLeftPane({
   emotions,
   emotionsInsight,
   deepLinkUrl,
+  ticker,
+  contractAddress,
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;
@@ -22,6 +24,8 @@ export default function CampaignLeftPane({
   emotions?: EmotionalLandscape | null;
   emotionsInsight?: string | null;
   deepLinkUrl?: string;
+  ticker?: string | null;
+  contractAddress?: string | null;
   className?: string;
 }) {
   return (
