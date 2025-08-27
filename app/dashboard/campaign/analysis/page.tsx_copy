@@ -1,7 +1,7 @@
 // app/dashboard/campaign/analysis/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState, Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import CampaignLeftPane from "@/components/CampaignLeftPane";
 import CampaignRightPane from "@/components/CampaignRightPane";
@@ -11,6 +11,7 @@ import {
   type TweetForEmotion,
 } from "@/lib/analysis/emotionalLandscape";
 
+/** ===== types ===== */
 type JobTweet = Partial<TweetForEmotion> & {
   tweetId?: string;
   tweeter?: string;
@@ -34,7 +35,23 @@ type JobPayload = {
   tweets?: JobTweet[];
 };
 
+/** ===== Outer wrapper: Suspense boundary (does NOT call useSearchParams) ===== */
 export default function AnalysisPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-[50vh] flex items-center justify-center text-sm text-muted-foreground">
+          Loading analysis…
+        </div>
+      }
+    >
+      <AnalysisClient />
+    </Suspense>
+  );
+}
+
+/** ===== Inner client that reads search params ===== */
+function AnalysisClient() {
   const searchParams = useSearchParams();
   const deeplinkJob = searchParams.get("job");
 
@@ -43,7 +60,8 @@ export default function AnalysisPage() {
   const [deepLinkUrl, setDeepLinkUrl] = useState<string | undefined>(undefined);
 
   // Emotional Landscape（用于左侧渲染；deeplink 时我们在客户端即时计算）
-  const [emotions, setEmotions] = useState<ReturnType<typeof computeEmotionalLandscape> | null>(null);
+  const [emotions, setEmotions] =
+    useState<ReturnType<typeof computeEmotionalLandscape> | null>(null);
   const [emotionsInsight, setEmotionsInsight] = useState<string | null>(null);
 
   // ticker / contract（显示在 Buckets 卡片头部，如果能从关键词里推断）
@@ -57,7 +75,9 @@ export default function AnalysisPage() {
       return;
     }
     const base = window.location.origin;
-    setDeepLinkUrl(`${base}/dashboard/campaign/analysis?job=${encodeURIComponent(jobId)}`);
+    setDeepLinkUrl(
+      `${base}/dashboard/campaign/analysis?job=${encodeURIComponent(jobId)}`
+    );
   }
 
   // ===== Deeplink 进来时：直接拉取 job 数据并客户端计算 Emotional Landscape =====
@@ -68,7 +88,10 @@ export default function AnalysisPage() {
 
     (async () => {
       try {
-        const r = await fetch(`/api/jobProxy?job_id=${encodeURIComponent(deeplinkJob)}`, { cache: "no-store" });
+        const r = await fetch(
+          `/api/jobProxy?job_id=${encodeURIComponent(deeplinkJob)}`,
+          { cache: "no-store" }
+        );
         const j = (await r.json()) as JobPayload;
         if (!r.ok) throw new Error((j as any)?.error || r.statusText);
 
@@ -80,11 +103,15 @@ export default function AnalysisPage() {
             textContent:
               (typeof t.textContent === "string" && t.textContent) ||
               (typeof (t as any).text === "string" && (t as any).text) ||
-              (typeof (t as any).full_text === "string" && (t as any).full_text) ||
+              (typeof (t as any).full_text === "string" &&
+                (t as any).full_text) ||
               (typeof (t as any).content === "string" && (t as any).content) ||
               "",
             tweetId: t.tweetId || (t as any).id_str || (t as any).id,
-            tweeter: t.tweeter || (t as any).user?.screen_name || (t as any).user?.name,
+            tweeter:
+              t.tweeter ||
+              (t as any).user?.screen_name ||
+              (t as any).user?.name,
             datetime: t.datetime || (t as any).created_at,
             isVerified: Boolean(t.isVerified || (t as any).user?.verified),
             views: toNum((t as any).views),
@@ -93,7 +120,9 @@ export default function AnalysisPage() {
             retweets: toNum((t as any).retweets ?? (t as any).retweet_count),
             statusLink: t.statusLink,
           }))
-          .filter((t) => typeof t.textContent === "string" && t.textContent.trim().length > 0);
+          .filter(
+            (t) => typeof t.textContent === "string" && t.textContent.trim().length > 0
+          );
 
         if (norm.length) {
           const emo = computeEmotionalLandscape(norm);
@@ -103,8 +132,13 @@ export default function AnalysisPage() {
         }
 
         // 依据 keyword 猜测 ticker / contract（可选）
-        const kw = Array.isArray(j.keyword) ? j.keyword.filter((s): s is string => typeof s === "string") : [];
-        const guessTicker = kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || null;
+        const kw = Array.isArray(j.keyword)
+          ? j.keyword.filter(
+              (s): s is string => typeof s === "string"
+            )
+          : [];
+        const guessTicker =
+          kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || null;
         const guessContract =
           kw.find((k) => /^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(k)) || null; // 粗略匹配 base58/较长地址
         setTicker(guessTicker);
@@ -146,13 +180,21 @@ export default function AnalysisPage() {
       <div className="col-span-12 md:col-span-6 md:sticky md:top-20 self-start">
         <CampaignRightPane
           inputs={lastInput}
-          onAnalysisResult={(res) => {
+          onAnalysisResult={(
+            res: {
+              summary: string;
+              emotions?: ReturnType<typeof computeEmotionalLandscape> | null;
+              emotionsInsight?: string | null;
+            }
+          ) => {
             setSummary(res.summary);
             setEmotions((prev) =>
               res.emotions !== undefined ? (res.emotions ?? null) : prev
             );
             setEmotionsInsight((prev) =>
-              res.emotionsInsight !== undefined ? (res.emotionsInsight ?? null) : prev
+              res.emotionsInsight !== undefined
+                ? (res.emotionsInsight ?? null)
+                : prev
             );
           }}
           onJobIdChange={handleJobIdChange}

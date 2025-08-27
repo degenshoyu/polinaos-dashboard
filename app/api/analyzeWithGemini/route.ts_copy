@@ -18,6 +18,7 @@ import {
   computeEmotionalLandscape,
   type TweetForEmotion,
 } from "@/lib/analysis/emotionalLandscape";
+import { buildEmotionsInsightPrompt } from "@/lib/prompts/emotionsInsightPrompt";
 
 export const maxDuration = 300;
 
@@ -106,10 +107,17 @@ async function withTimeout<T>(
     ),
   ]) as Promise<T>;
 }
+
+type CallCtx = {
+  stage?: "batch" | "synthesis" | "emotions";
+  batchIndex?: number;
+  retry?: boolean;
+};
+
 async function callGemini(
   prompt: string,
   modelName = MODEL_NAME,
-  ctx?: { stage: "batch" | "synthesis"; batchIndex?: number; retry?: boolean },
+  ctx?: CallCtx,
 ): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY / GOOGLE_API_KEY");
@@ -231,7 +239,6 @@ export async function POST(req: Request) {
     const batchSummaries: string[] = [];
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
-      // 逐级收缩：320 → 160 → 100 字；仍超则丢尾
       const tryCaps = [TWEET_CAP0, 160, 100];
       let prompt: string | null = null;
       for (const cap of tryCaps) {
@@ -261,7 +268,7 @@ export async function POST(req: Request) {
             prompt = p;
             break;
           }
-          cur = cur.slice(0, cur.length - 3); // 每次去掉 3 条，加快收敛
+          cur = cur.slice(0, cur.length - 3);
         }
       }
       if (!prompt) {
@@ -322,6 +329,18 @@ export async function POST(req: Request) {
 
     const emotions = computeEmotionalLandscape(full);
 
+    let emotionsInsight: string | null = null;
+    try {
+      const emoPrompt = buildEmotionsInsightPrompt(emotions, {
+        projectName,
+        maxWords: 160,
+      });
+      emotionsInsight = await callGemini(emoPrompt);
+      // emotionsInsight = await callGemini(emoPrompt, MODEL_NAME, { stage: "emotions" });
+    } catch {
+      emotionsInsight = null;
+    }
+
     let resolvedSearchId: string | undefined = searchId;
 
     if (!resolvedSearchId && jobId) {
@@ -372,12 +391,17 @@ export async function POST(req: Request) {
           })),
           final: { text: finalMarkdown },
           emotions,
+          emotionsInsight,
         },
         summaryText: finalMarkdown,
       });
     }
 
-    return NextResponse.json({ text: finalMarkdown, emotions });
+    return NextResponse.json({
+      text: finalMarkdown,
+      emotions,
+      emotionsInsight,
+    });
   } catch (e: any) {
     const payload = process.env.DEBUG_GEMINI
       ? { error: e?.message || "AI error", stack: e?.stack }

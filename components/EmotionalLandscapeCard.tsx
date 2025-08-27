@@ -6,7 +6,6 @@ import ReactMarkdown from "react-markdown";
 import { toPng } from "html-to-image";
 import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
 
-/** ========= Styles (与 AiUnderstanding / InputCard 一致) ========= */
 const card =
   "p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5";
 const panel = "rounded-2xl border border-white/10 bg-white/5";
@@ -16,7 +15,6 @@ type Props = {
   data: EmotionalLandscape;
   insight?: string | null;
   className?: string;
-  /** 可选：用于在 Buckets & Evidence 顶部展示 */
   ticker?: string | null;
   contractAddress?: string | null;
 };
@@ -42,14 +40,13 @@ export default function EmotionalLandscapeCard({
 
   const toggle = (key: string) => setOpenBuckets((s) => ({ ...s, [key]: !s[key] }));
 
-  const ordered = data.buckets; // 已经按照 bullish → optimistic → neutral → concerned → bearish 排序
+  const ordered = data.buckets;
   const totalPct = Math.max(1, ordered.reduce((s, b) => s + (b.sharePct || 0), 0));
 
   /** ========= Screenshot helpers ========= */
   async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
     if (!node) throw new Error("Target element not found");
 
-    // 让布局与字体稳定（双 rAF + fonts.ready）
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     if ((document as any).fonts?.ready) {
       try {
@@ -197,11 +194,9 @@ export default function EmotionalLandscapeCard({
       <div ref={bucketsRef} className={card}>
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-lg font-semibold">Buckets & Evidence</h3>
-          {/* 右上角轻量说明 */}
           <span className="text-[11px] text-white/50">Weighted by views & engagements</span>
         </div>
 
-        {/* Meta: ticker + contract（可选显示） */}
         {(ticker || contractAddress) && (
           <div className={`${panel} p-3 mb-4 grid grid-cols-1 md:grid-cols-2 gap-3`}>
             {ticker && (
@@ -450,7 +445,7 @@ function borderFor(label: string) {
   }
 }
 
-/** ========= Canvas Brand Frame（与 StatisticSummary 相同风格） ========= */
+/** ========= Canvas Brand Frame ========= */
 async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise<string> {
   const [img, logo] = await Promise.all([
     loadImage(basePngUrl),
@@ -487,23 +482,19 @@ async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise
   ctx.scale(dpr, dpr);
   ctx.imageSmoothingEnabled = true;
 
-  // 背景面板
   ctx.fillStyle = "#0a0f0e";
   roundedRect(ctx, 0.5, 0.5, width - 1, height - 1, radius);
   ctx.fill();
 
-  // 边框
   ctx.strokeStyle = "rgba(255,255,255,0.18)";
   ctx.lineWidth = border;
   roundedRect(ctx, border / 2 + 0.5, border / 2 + 0.5, width - border - 1, height - border - 1, radius);
   ctx.stroke();
 
-  // 主截图
   const shotX = border + pad;
   const shotY = border + pad;
   ctx.drawImage(img, shotX, shotY);
 
-  // Footer 分隔线
   const footerTop = shotY + img.height + pad - 1;
   ctx.strokeStyle = "rgba(255,255,255,0.12)";
   ctx.beginPath();
@@ -529,7 +520,6 @@ async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise
     ctx.fill();
   }
 
-  // 左：品牌
   ctx.font = `700 ${brandFont}px ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial`;
   ctx.fillStyle = "rgba(255,255,255,0.95)";
   ctx.textBaseline = "middle";
@@ -538,7 +528,6 @@ async function composeCanvasBrandFrame(basePngUrl: string, dpr: number): Promise
   const brandTextY = logoY + logoSize / 2;
   ctx.fillText("PolinaOS", brandTextX, brandTextY);
 
-  // 右：三行链接
   ctx.font = `500 ${linkFont}px ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial`;
   ctx.fillStyle = "rgba(229,231,235,0.9)";
   ctx.textAlign = "right";

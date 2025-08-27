@@ -239,7 +239,6 @@ export async function POST(req: Request) {
     const batchSummaries: string[] = [];
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
-      // 逐级收缩：320 → 160 → 100 字；仍超则丢尾
       const tryCaps = [TWEET_CAP0, 160, 100];
       let prompt: string | null = null;
       for (const cap of tryCaps) {
@@ -269,7 +268,7 @@ export async function POST(req: Request) {
             prompt = p;
             break;
           }
-          cur = cur.slice(0, cur.length - 3); // 每次去掉 3 条，加快收敛
+          cur = cur.slice(0, cur.length - 3);
         }
       }
       if (!prompt) {

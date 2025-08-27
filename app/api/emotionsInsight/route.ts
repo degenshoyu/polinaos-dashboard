@@ -1,0 +1,214 @@
+// app/api/emotionsInsight/route.ts
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { db } from "@/lib/db/client";
+import { searches, aiUnderstandings } from "@/lib/db/schema";
+import { eq, desc } from "drizzle-orm";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { buildEmotionsInsightPrompt } from "@/lib/prompts/analyzeWithGeminiPrompt";
+import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
+
+/** ===================== Config & utils ===================== **/
+const MODEL_NAME = process.env.GEMINI_MODEL_NAME?.trim() || "gemini-2.5-flash";
+const FALLBACK_MODEL =
+  process.env.GEMINI_FALLBACK_MODEL?.trim() || "gemini-1.5-flash";
+const LLM_TIMEOUT_MS = parseDuration(process.env.AI_LLM_TIMEOUT_MS, 300_000);
+
+function parseDuration(input: string | undefined, fallbackMs: number): number {
+  if (!input) return fallbackMs;
+  const s = input.trim().toLowerCase();
+  if (/^\d+$/.test(s)) return Number(s);
+  const m = s.match(/^(\d+)\s*(ms|s|m)$/);
+  if (!m) return fallbackMs;
+  const v = Number(m[1]);
+  if (!Number.isFinite(v)) return fallbackMs;
+  switch (m[2]) {
+    case "ms":
+      return v;
+    case "s":
+      return v * 1000;
+    case "m":
+      return v * 60_000;
+    default:
+      return fallbackMs;
+  }
+}
+
+async function withTimeout<T>(
+  p: Promise<T>,
+  ms: number,
+  msg = "LLM request timeout",
+): Promise<T> {
+  const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 300_000;
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(msg)), safeMs),
+    ),
+  ]) as Promise<T>;
+}
+
+async function callGemini(prompt: string, model = MODEL_NAME): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error("Missing GEMINI_API_KEY / GOOGLE_API_KEY");
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const mdl = genAI.getGenerativeModel({ model });
+  const res = await withTimeout(mdl.generateContent(prompt), LLM_TIMEOUT_MS);
+  const text = res.response?.text?.() ?? res.response?.text();
+  if (!text) throw new Error("Empty response from Gemini");
+  return text;
+}
+
+/** ===================== Zod ===================== **/
+const Body = z.object({
+  jobId: z.string().optional().nullable(),
+  searchId: z.string().uuid().optional().nullable(),
+  projectName: z.string().optional(),
+  maxWords: z.number().int().positive().optional().default(160),
+  emotions: z.custom<EmotionalLandscape>(
+    (v) => typeof v === "object" && v !== null,
+  ),
+});
+
+/** ===================== Helpers: idempotency ===================== **/
+function stableStringify(obj: unknown): string {
+  const seen = new WeakSet();
+  const sort = (v: any): any => {
+    if (v && typeof v === "object") {
+      if (seen.has(v)) return null;
+      seen.add(v);
+      if (Array.isArray(v)) return v.map(sort);
+      return Object.keys(v)
+        .sort()
+        .reduce((acc: any, k) => {
+          acc[k] = sort(v[k]);
+          return acc;
+        }, {});
+    }
+    return v;
+  };
+  return JSON.stringify(sort(obj));
+}
+
+function hashEmotions(obj: EmotionalLandscape): string {
+  const s = stableStringify(obj);
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
+  return (h >>> 0).toString(16);
+}
+
+/** ===================== Route ===================== **/
+export async function POST(req: Request) {
+  try {
+    const parsed = Body.parse(await req.json());
+    const jobId = parsed.jobId ?? undefined;
+    let searchId = parsed.searchId ?? undefined;
+
+    // 1) resolve searchId by jobId if needed
+    if (!searchId && jobId) {
+      const row = await db.query.searches.findFirst({
+        where: eq(searches.jobId, jobId),
+        columns: { id: true },
+      });
+      searchId = row?.id;
+    }
+    if (!searchId) {
+      return NextResponse.json(
+        { error: "Search not found for given jobId/searchId" },
+        { status: 404 },
+      );
+    }
+
+    // 2) Load the newest
+    let latest = await db.query.aiUnderstandings.findFirst({
+      where: eq(aiUnderstandings.searchId, searchId),
+      orderBy: desc((aiUnderstandings as any).createdAt ?? aiUnderstandings.id),
+    });
+
+    const newHash = hashEmotions(parsed.emotions as EmotionalLandscape);
+    const oldJson: any = latest?.resultJson ?? null;
+    const oldHash: string | null = oldJson?.emotionsHash ?? null;
+    const oldInsight: string | null = oldJson?.emotionsInsight ?? null;
+
+    if (
+      latest &&
+      oldHash &&
+      oldHash === newHash &&
+      typeof oldInsight === "string" &&
+      oldInsight.length > 0
+    ) {
+      return NextResponse.json({
+        emotionsInsight: oldInsight,
+        fromCache: true,
+        saved: false,
+      });
+    }
+
+    // 3) build prompt & call LLM
+    const prompt = buildEmotionsInsightPrompt(parsed.emotions, {
+      projectName: parsed.projectName,
+      maxWords: parsed.maxWords,
+    });
+
+    let emotionsInsight: string;
+    try {
+      emotionsInsight = await callGemini(prompt, MODEL_NAME);
+    } catch (e) {
+      // fallback model once
+      emotionsInsight = await callGemini(prompt, FALLBACK_MODEL);
+    }
+
+    // 4) upsert into aiUnderstandings: update latest row if exists; else insert
+    if (!latest) {
+      latest = await db.query.aiUnderstandings.findFirst({
+        where: eq(aiUnderstandings.searchId, searchId),
+        orderBy: desc(
+          (aiUnderstandings as any).createdAt ?? aiUnderstandings.id,
+        ),
+      });
+    }
+
+    if (latest) {
+      const newJson = {
+        ...(oldJson ?? {}),
+        emotions: parsed.emotions,
+        emotionsInsight,
+        emotionsHash: newHash,
+        promptVersion: oldJson?.promptVersion ?? "emotions-only-v1",
+      };
+
+      await db
+        .update(aiUnderstandings)
+        .set({
+          resultJson: newJson,
+        })
+        .where(eq(aiUnderstandings.id, (latest as any).id));
+      return NextResponse.json({
+        emotionsInsight,
+        fromCache: false,
+        saved: true,
+      });
+    } else {
+      await db.insert(aiUnderstandings).values({
+        searchId,
+        model: MODEL_NAME,
+        resultJson: {
+          promptVersion: "emotions-only-v1",
+          emotions: parsed.emotions,
+          emotionsInsight,
+        },
+        summaryText: emotionsInsight ?? "",
+      });
+      return NextResponse.json({
+        emotionsInsight,
+        fromCache: false,
+        saved: true,
+      });
+    }
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || "Server error" },
+      { status: 500 },
+    );
+  }
+}

@@ -309,8 +309,15 @@ I'll guide you through the whole process:
             const hit = await fetch(`/api/ai-understanding?job_id=${encodeURIComponent(id)}`, { cache: "no-store" });
             const hitJson = await hit.json().catch(() => ({}));
             if (hit.ok && hitJson?.found && (hitJson.summaryText || hitJson.resultJson)) {
-              const summary = String(hitJson.summaryText || "");
-              onAnalysisResult?.({ summary });
+              const summary =
+                String(
+                  hitJson.summaryText ||
+                  hitJson.resultJson?.final?.text ||
+                  ""
+              );
+              const emotions = hitJson?.resultJson?.emotions ?? null;
+              const emotionsInsight = hitJson?.resultJson?.emotionsInsight ?? null;
+              onAnalysisResult?.({ summary, emotions, emotionsInsight });
               replaceGenerating("📊 Loaded existing AI understanding from database.");
               return;
             }

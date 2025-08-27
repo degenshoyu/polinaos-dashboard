@@ -35,6 +35,18 @@ type JobPayload = {
   tweets?: JobTweet[];
 };
 
+type UnderstandingResp = {
+  summary: string | null;
+  emotions: ReturnType<typeof computeEmotionalLandscape> | null;
+  emotionsInsight: string | null;
+  error?: string;
+};
+
+type EmotionsInsightResp = {
+  emotionsInsight?: string;
+  error?: string;
+};
+
 /** ===== Outer wrapper: Suspense boundary (does NOT call useSearchParams) ===== */
 export default function AnalysisPage() {
   return (
@@ -59,16 +71,13 @@ function AnalysisClient() {
   const [lastInput, setLastInput] = useState<AnalysisInput | null>(null);
   const [deepLinkUrl, setDeepLinkUrl] = useState<string | undefined>(undefined);
 
-  // Emotional Landscape（用于左侧渲染；deeplink 时我们在客户端即时计算）
   const [emotions, setEmotions] =
     useState<ReturnType<typeof computeEmotionalLandscape> | null>(null);
   const [emotionsInsight, setEmotionsInsight] = useState<string | null>(null);
 
-  // ticker / contract（显示在 Buckets 卡片头部，如果能从关键词里推断）
   const [ticker, setTicker] = useState<string | null>(null);
   const [contractAddress, setContractAddress] = useState<string | null>(null);
 
-  // 统一设置 deeplink 显示的 URL（右侧在启动/切换 job 时也会回调设置）
   async function handleJobIdChange(jobId: string | null) {
     if (!jobId) {
       setDeepLinkUrl(undefined);
@@ -80,7 +89,6 @@ function AnalysisClient() {
     );
   }
 
-  // ===== Deeplink 进来时：直接拉取 job 数据并客户端计算 Emotional Landscape =====
   useEffect(() => {
     if (!deeplinkJob) return;
 
@@ -88,6 +96,7 @@ function AnalysisClient() {
 
     (async () => {
       try {
+        // 1) 拉 Job 数据
         const r = await fetch(
           `/api/jobProxy?job_id=${encodeURIComponent(deeplinkJob)}`,
           { cache: "no-store" }
@@ -97,7 +106,7 @@ function AnalysisClient() {
 
         const rows = Array.isArray(j.tweets) ? j.tweets : [];
 
-        // 组装为 TweetForEmotion（尽量容错）
+        // 2) 规范化并计算情感图（本地）
         const norm: TweetForEmotion[] = rows
           .map((t) => ({
             textContent:
@@ -121,34 +130,79 @@ function AnalysisClient() {
             statusLink: t.statusLink,
           }))
           .filter(
-            (t) => typeof t.textContent === "string" && t.textContent.trim().length > 0
+            (t) =>
+              typeof t.textContent === "string" &&
+              t.textContent.trim().length > 0
           );
 
+        let emo: ReturnType<typeof computeEmotionalLandscape> | null = null;
         if (norm.length) {
-          const emo = computeEmotionalLandscape(norm);
+          emo = computeEmotionalLandscape(norm);
           setEmotions(emo);
         } else {
           setEmotions(null);
         }
 
-        // 依据 keyword 猜测 ticker / contract（可选）
+        // 3) 推断 ticker / contract
         const kw = Array.isArray(j.keyword)
-          ? j.keyword.filter(
-              (s): s is string => typeof s === "string"
-            )
+          ? j.keyword.filter((s): s is string => typeof s === "string")
           : [];
         const guessTicker =
           kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || null;
         const guessContract =
-          kw.find((k) => /^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(k)) || null; // 粗略匹配 base58/较长地址
+          kw.find((k) => /^[1-9A-HJ-NP-Za-km-z]{32,}$/.test(k)) || null;
         setTicker(guessTicker);
         setContractAddress(guessContract);
+        const projectName =
+          (Array.isArray(j.keyword) && j.keyword[0]) || undefined;
 
-        // deeplink 初次加载没有 AI 总结/情感洞察时，保持 null；当用户点击分析时会再被覆盖
+        // 4) 拉最近一次 AI understanding（若有历史 insight 直接使用）
+        try {
+          const u = await fetch(
+            `/api/aiUnderstanding?job_id=${encodeURIComponent(deeplinkJob)}`,
+            { cache: "no-store" }
+          );
+          const uj = (await u.json()) as UnderstandingResp;
+          if (u.ok) {
+            if (typeof uj.summary === "string" && !summary)
+              setSummary(uj.summary);
+            if (uj.emotions && !emotions) setEmotions(uj.emotions);
+            if (typeof uj.emotionsInsight === "string") {
+              setEmotionsInsight(uj.emotionsInsight);
+            } else if (emo) {
+              // 5) 没有历史 insight，就即时生成并写库
+              const created = await createInsightForJob(
+                deeplinkJob,
+                emo,
+                projectName
+              );
+              if (created) setEmotionsInsight(created);
+            }
+          } else if (emo) {
+            // 接口失败时也尽力生成（不阻塞页面）
+            const created = await createInsightForJob(
+              deeplinkJob,
+              emo,
+              projectName
+            );
+            if (created) setEmotionsInsight(created);
+          }
+        } catch {
+          // 静默失败：不阻塞页面（用户仍可在右侧运行分析）
+          if (emo) {
+            const created = await createInsightForJob(
+              deeplinkJob,
+              emo,
+              projectName
+            );
+            if (created) setEmotionsInsight(created);
+          }
+        }
+
+        // 保持与之前行为一致
         setSummary((prev) => prev ?? null);
         setEmotionsInsight((prev) => prev ?? null);
       } catch (e) {
-        // 静默失败：不阻塞页面（用户仍可点击右侧运行分析）
         console.warn("[deeplink hydrate failed]", (e as any)?.message || e);
       }
     })();
@@ -162,7 +216,6 @@ function AnalysisClient() {
         <CampaignLeftPane
           aiSummary={summary}
           deepLinkUrl={deepLinkUrl}
-          // 将 deeplink 计算出来的情感图 & meta 透传给左侧卡片
           emotions={emotions}
           emotionsInsight={emotionsInsight}
           ticker={ticker}
@@ -188,6 +241,7 @@ function AnalysisClient() {
             }
           ) => {
             setSummary(res.summary);
+            // 只有在明确提供时才更新；undefined 时保留现有值（避免旧数据清空）
             setEmotions((prev) =>
               res.emotions !== undefined ? (res.emotions ?? null) : prev
             );
@@ -208,4 +262,29 @@ function AnalysisClient() {
 function toNum(n: any): number | undefined {
   const x = Number(n);
   return Number.isFinite(x) ? x : undefined;
+}
+
+/** 生成并入库 emotions insight（POST /api/emotionsInsight） */
+async function createInsightForJob(
+  jobId: string,
+  emotions: ReturnType<typeof computeEmotionalLandscape>,
+  projectName?: string
+): Promise<string | null> {
+  try {
+    const r2 = await fetch("/api/emotionsInsight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jobId,
+        emotions,
+        projectName,
+        maxWords: 160,
+      }),
+    });
+    const jr2 = (await r2.json()) as EmotionsInsightResp;
+    if (r2.ok && typeof jr2.emotionsInsight === "string") {
+      return jr2.emotionsInsight;
+    }
+  } catch {}
+  return null;
 }
