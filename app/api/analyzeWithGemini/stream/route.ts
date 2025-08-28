@@ -35,13 +35,21 @@ const SYNTH_MAX = Number(process.env.AI_SYNTH_PROMPT_MAX_CHARS ?? 8000);
 const TWEET_CAP0 = Number(process.env.AI_TWEET_CHAR_CAP ?? 320);
 const LLM_TIMEOUT_MS = Number(process.env.AI_LLM_TIMEOUT_MS ?? 300000);
 
-const Body = z.object({
-  job: z.any().optional(),
-  tweets: z.array(z.any()).min(1),
-  jobId: z.string().nullable().optional(),
-  searchId: z.string().uuid().nullable().optional(),
-  projectName: z.string().optional(),
-});
+const Body = z
+  .object({
+    job: z.any().optional(),
+    tweets: z.array(z.any()).min(1).optional(),
+    jobId: z.string().nullable().optional(),
+    searchId: z.string().uuid().nullable().optional(),
+    projectName: z.string().optional(),
+  })
+  .refine(
+    (v) =>
+      (Array.isArray(v.tweets) && v.tweets.length > 0) ||
+      (typeof v.jobId === "string" && v.jobId?.trim()) ||
+      (typeof v.searchId === "string" && v.searchId?.trim()),
+    { message: "Provide `tweets` or `jobId` or `searchId`" },
+  );
 
 function extractTextFromTweet(anyTweet: any): string {
   return (
@@ -134,7 +142,54 @@ export async function POST(req: Request) {
           caps: { AI_BATCH_SIZE, AI_BATCH_WORDS, AI_FINAL_WORDS },
         });
 
-        const tweetsRaw = parsed.tweets || [];
+        let tweetsRaw: any[] = Array.isArray(parsed.tweets)
+          ? parsed.tweets
+          : [];
+        if (tweetsRaw.length === 0) {
+          const hdrProto = req.headers.get("x-forwarded-proto") || "http";
+          const hdrHost = req.headers.get("host");
+          const baseUrl =
+            process.env.APP_BASE_URL ||
+            (hdrHost ? `${hdrProto}://${hdrHost}` : "");
+
+          async function tryJson(path: string) {
+            try {
+              const r = await fetch(`${baseUrl}${path}`, { cache: "no-store" });
+              if (!r.ok) return null;
+              return await r.json().catch(() => null);
+            } catch {
+              return null;
+            }
+          }
+
+          let jobId = (parsed.jobId || "")?.trim() || "";
+          if (!jobId && parsed.searchId) {
+            const a = await tryJson(
+              `/api/searches?id=${encodeURIComponent(parsed.searchId)}`,
+            );
+            const b = jobId
+              ? null
+              : await tryJson(
+                  `/api/searches/${encodeURIComponent(parsed.searchId)}`,
+                );
+            const pick = a || b || {};
+            jobId =
+              pick?.jobId ||
+              pick?.job_id ||
+              pick?.search?.jobId ||
+              pick?.search?.job_id ||
+              "";
+            jobId = typeof jobId === "string" ? jobId.trim() : "";
+          }
+
+          if (jobId) {
+            const jp = await tryJson(
+              `/api/jobProxy?job_id=${encodeURIComponent(jobId)}`,
+            );
+            const arr = Array.isArray(jp?.tweets) ? jp.tweets : [];
+            tweetsRaw = arr;
+          }
+        }
         send("input", { raw: tweetsRaw.length });
 
         // normalize & filter

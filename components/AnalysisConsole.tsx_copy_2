@@ -23,10 +23,7 @@ export default function AnalysisConsole({
 }) {
   // UI + status states
   const [status, setStatus] = useState<"idle" | "scanning" | "complete" | "error">("idle");
-
-  type ConsoleMsg = { text: string; time?: string; tag?: "ai-gen" };
-  const [messages, setMessages] = useState<ConsoleMsg[]>([]);
-
+  const [messages, setMessages] = useState<{ text: string; time?: string }[]>([]);
   const [jobId, setJobId] = useState<string | null>(null);
   const [tweetCount, setTweetCount] = useState<number>(0);
 
@@ -40,7 +37,7 @@ export default function AnalysisConsole({
   // Refs for effects and timers
   const containerRef = useRef<HTMLDivElement>(null);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  // const genMsgIndexRef = useRef<number | null>(null);
+  const genMsgIndexRef = useRef<number | null>(null);
   const totalBatchesRef = useRef<number>(0);
   const foundTweetsRef = useRef<number>(0);
 
@@ -144,26 +141,16 @@ I'll guide you through the whole process:
     });
   }
 
-  function findAiGenIndex(list: ConsoleMsg[]) {
-    const tagged = list.findIndex((m) => m.tag === "ai-gen");
-    if (tagged >= 0) return tagged;
-
-    const legacy = list.findIndex((m) =>
-      /^(🧠\s|let me analyze\b)/i.test(m.text)
-    );
-    return legacy;
-  }
-
   function updateGenerating(text: string) {
-    setMessages((prev) => {
-      const idx = findAiGenIndex(prev);
-      if (idx >= 0) {
-        const next = prev.slice();
-        next[idx] = { ...next[idx], text };
-        return next;
-      }
-      return [...prev, { text, time: timeStr(), tag: "ai-gen" }];
-    });
+    const idx = genMsgIndexRef.current;
+    if (typeof idx === "number") {
+      replaceAt(idx, text);
+    } else {
+      setMessages((prev) => {
+        genMsgIndexRef.current = prev.length;
+        return [...prev, { text, time: timeStr() }];
+      });
+    }
   }
 
   function percent(n: number, d: number) {
@@ -188,13 +175,15 @@ I'll guide you through the whole process:
    */
   async function startAIStreamByJobId(jobId: string) {
     setMessages((prev) => {
-      const idx = findAiGenIndex(prev);
-      if (idx < 0) return prev;
-      const next = prev.slice();
-      next.splice(idx, 1);
-      return next;
+      genMsgIndexRef.current = prev.length;
+      return [
+        ...prev,
+        {
+          text: "🧠 Let me analyze the content and extract key insights for you...",
+          time: timeStr(),
+        },
+      ];
     });
-
     updateGenerating("🧠 Analyzing… loading AI configuration");
 
     try {
@@ -509,16 +498,13 @@ I'll guide you through the whole process:
 
   // Replace the temporary "generating" placeholder with final text
   function replaceGenerating(text: string) {
-    setMessages((prev) => {
-      const idx = findAiGenIndex(prev);
-      if (idx >= 0) {
-        const next = prev.slice();
-        next[idx] = { ...next[idx], text };
-        delete next[idx].tag;
-        return next;
-      }
-      return [...prev, { text, time: timeStr() }];
-    });
+    const idx = genMsgIndexRef.current;
+    if (typeof idx === "number") {
+      replaceAt(idx, text);
+      genMsgIndexRef.current = null;
+    } else {
+      append(text);
+    }
   }
 
   // Toggle collapsed state (accessible + persisted)
