@@ -98,7 +98,7 @@ function promptLen(s: string) {
 async function callGemini(
   prompt: string,
   model: string,
-  ctx?: { stage?: string; batch?: number },
+  ctx?: { stage?: string; batch?: number; retried?: boolean },
 ) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error("Missing GEMINI_API_KEY/GOOGLE_API_KEY");
@@ -117,7 +117,7 @@ async function callGemini(
       : res?.response?.text;
   if (text && String(text).trim()) return String(text);
   // fallback once
-  if (!ctx || (ctx && (ctx as any).retried !== true)) {
+  if (!ctx || ctx.retried !== true) {
     return callGemini(prompt.slice(0, 12000), FALLBACK_MODEL, {
       ...ctx,
       retried: true,
