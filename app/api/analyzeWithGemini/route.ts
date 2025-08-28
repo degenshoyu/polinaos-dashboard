@@ -21,6 +21,21 @@ import {
 import { buildEmotionsInsightPrompt } from "@/lib/prompts/emotionsInsightPrompt";
 
 export const maxDuration = 300;
+const DEBUG =
+  (process.env.DEBUG_GEMINI ?? "").toString().toLowerCase() === "1" ||
+  (process.env.DEBUG_GEMINI ?? "").toString().toLowerCase() === "true";
+const log = (...args: any[]) => {
+  if (DEBUG) console.log("[AI]", ...args);
+};
+const warn = (...args: any[]) => {
+  if (DEBUG) console.warn("[AI]", ...args);
+};
+const time = (label: string) => {
+  if (DEBUG) console.time(label);
+};
+const timeEnd = (label: string) => {
+  if (DEBUG) console.timeEnd(label);
+};
 
 /** ===================== Safe env parsing helpers ===================== **/
 function parseDuration(input: string | undefined, fallbackMs: number): number {
@@ -189,7 +204,7 @@ function capText(s: string, max = 320) {
 }
 function promptLen(s: string) {
   return s.length;
-} // 粗略用字符数
+}
 const BATCH_MAX = parseIntSafe(process.env.AI_BATCH_PROMPT_MAX_CHARS, 12000);
 const SYNTH_MAX = parseIntSafe(process.env.AI_SYNTH_PROMPT_MAX_CHARS, 8000);
 const TWEET_CAP0 = parseIntSafe(process.env.AI_TWEET_CHAR_CAP, 320);
@@ -197,7 +212,22 @@ const TWEET_CAP0 = parseIntSafe(process.env.AI_TWEET_CHAR_CAP, 320);
 /** ===================== Route ===================== **/
 export async function POST(req: Request) {
   try {
+    time("AI total");
     const parsed = Body.parse(await req.json());
+    log("config", {
+      MODEL_NAME,
+      MAX_TWEETS_PER_BATCH,
+      MAX_WORDS_PER_BATCH,
+      MAX_WORDS_FINAL,
+      LLM_TIMEOUT_MS,
+    });
+    log("input.headers", {
+      jobId: parsed.jobId,
+      searchId: parsed.searchId,
+      projectName: parsed.projectName,
+    });
+    const rawCount = Array.isArray(parsed.tweets) ? parsed.tweets.length : 0;
+    log("input.tweetsRaw.count", rawCount);
     const tweetsRaw = parsed.tweets;
     const jobId = parsed.jobId ?? undefined;
     const searchId = parsed.searchId ?? undefined;
@@ -207,6 +237,7 @@ export async function POST(req: Request) {
         ? String(parsed.job.keyword[0] || "")
         : undefined);
 
+    time("normalize+map");
     const full: TweetForEmotion[] = (Array.isArray(tweetsRaw) ? tweetsRaw : [])
       .map((t: any) => ({
         textContent: extractTextFromTweet(t),
@@ -224,9 +255,17 @@ export async function POST(req: Request) {
         (t) =>
           typeof t.textContent === "string" && t.textContent.trim().length > 0,
       );
+    timeEnd("normalize+map");
+    log("normalize.result", { fullCount: full.length });
 
     const lite = full.map(({ textContent }) => ({ textContent }));
+    time("dedupe+cleanup");
     const clean = cleanupTweets(lite);
+    timeEnd("dedupe+cleanup");
+    log("cleanup.result", {
+      unique: clean.length,
+      dropped: lite.length - clean.length,
+    });
     if (clean.length === 0) {
       return NextResponse.json(
         { error: "No valid tweets to analyze after normalization." },
@@ -234,7 +273,13 @@ export async function POST(req: Request) {
       );
     }
 
+    time("chunking");
     const batches = chunkArray(clean, MAX_TWEETS_PER_BATCH);
+    timeEnd("chunking");
+    log("chunking.result", {
+      batchCount: batches.length,
+      sizes: batches.map((b) => b.length),
+    });
 
     const batchSummaries: string[] = [];
     for (let i = 0; i < batches.length; i++) {
@@ -249,7 +294,10 @@ export async function POST(req: Request) {
           projectName,
           maxWords: MAX_WORDS_PER_BATCH,
         });
-        if (promptLen(p) <= BATCH_MAX) {
+        const len = promptLen(p);
+        log("batch.promptTry", { i, cap, len, BATCH_MAX });
+
+        if (len <= BATCH_MAX) {
           prompt = p;
           break;
         }
@@ -264,7 +312,15 @@ export async function POST(req: Request) {
             projectName,
             maxWords: MAX_WORDS_PER_BATCH,
           });
-          if (promptLen(p) <= BATCH_MAX) {
+          const len = promptLen(p);
+          log("batch.trimCountTry", {
+            i,
+            cap,
+            tryCount: cur.length,
+            len,
+            BATCH_MAX,
+          });
+          if (len <= BATCH_MAX) {
             prompt = p;
             break;
           }
@@ -272,20 +328,20 @@ export async function POST(req: Request) {
         }
       }
       if (!prompt) {
-        console.warn("[BatchDrop] prompt too long after trimming", {
-          i,
-          size: batches[i].length,
-        });
+        warn("BatchDrop", { i, size: batches[i].length });
         continue;
       }
       try {
+        time(`LLM batch#${i}`);
         const summary = await callGemini(prompt, MODEL_NAME, {
           stage: "batch",
           batchIndex: i,
         });
+        timeEnd(`LLM batch#${i}`);
+        log("batch.ok", { i, summaryLen: summary.length });
         batchSummaries.push(summary);
       } catch (e: any) {
-        console.warn("[BatchSkip]", i, e?.message || e);
+        warn("BatchSkip", { i, err: e?.message || String(e) });
       }
     }
     if (batchSummaries.length === 0) {
@@ -295,12 +351,14 @@ export async function POST(req: Request) {
       );
     }
 
+    log("synthesis.build.start", { summaries: batchSummaries.length });
     let synthesisPrompt = buildSynthesisPrompt(batchSummaries, {
       projectName,
       maxWords: MAX_WORDS_FINAL,
     });
 
     if (promptLen(synthesisPrompt) > SYNTH_MAX) {
+      log("synthesis.trim", { len: promptLen(synthesisPrompt), SYNTH_MAX });
       const trimmed = batchSummaries.map((s) =>
         s.length > 500 ? s.slice(0, 500) + "…" : s,
       );
@@ -323,11 +381,21 @@ export async function POST(req: Request) {
         });
       }
     }
+
+    time("LLM synthesis");
     const finalMarkdown = await callGemini(synthesisPrompt, MODEL_NAME, {
       stage: "synthesis",
     });
+    timeEnd("LLM synthesis");
+    log("synthesis.ok", { len: finalMarkdown.length });
 
+    time("emotions.compute");
     const emotions = computeEmotionalLandscape(full);
+    timeEnd("emotions.compute");
+    log("emotions.stats", {
+      tweets: full.length,
+      buckets: Object.keys(emotions).length,
+    });
 
     let emotionsInsight: string | null = null;
     try {
@@ -335,15 +403,20 @@ export async function POST(req: Request) {
         projectName,
         maxWords: 160,
       });
+      time("LLM emotions");
       emotionsInsight = await callGemini(emoPrompt);
+      timeEnd("LLM emotions");
+      log("emotions.llm.ok", { len: emotionsInsight?.length ?? 0 });
       // emotionsInsight = await callGemini(emoPrompt, MODEL_NAME, { stage: "emotions" });
     } catch {
       emotionsInsight = null;
+      warn("emotions.llm.fail");
     }
 
     let resolvedSearchId: string | undefined = searchId;
 
     if (!resolvedSearchId && jobId) {
+      log("resolveSearchId.byJobId", { jobId });
       const row = await db.query.searches.findFirst({
         where: eq(searches.jobId, jobId),
         columns: { id: true },
@@ -352,6 +425,7 @@ export async function POST(req: Request) {
     }
 
     if (!resolvedSearchId) {
+      log("resolveSearchId.bySessionOrCookie");
       const session = await getServerSession(authOptions);
       const userId: string | null = (session?.user as any)?.id ?? null;
       const cookieStore = await cookies();
@@ -378,6 +452,7 @@ export async function POST(req: Request) {
     }
 
     if (resolvedSearchId) {
+      time("db.insert.aiUnderstandings");
       await db.insert(aiUnderstandings).values({
         searchId: resolvedSearchId,
         model: MODEL_NAME,
@@ -395,17 +470,19 @@ export async function POST(req: Request) {
         },
         summaryText: finalMarkdown,
       });
+      timeEnd("db.insert.aiUnderstandings");
+      log("persist.ok", { searchId: resolvedSearchId });
     }
 
-    return NextResponse.json({
-      text: finalMarkdown,
-      emotions,
-      emotionsInsight,
-    });
+    const out = { text: finalMarkdown, emotions, emotionsInsight };
+    log("done", { outKeys: Object.keys(out) });
+    timeEnd("AI total");
+    return NextResponse.json(out);
   } catch (e: any) {
     const payload = process.env.DEBUG_GEMINI
       ? { error: e?.message || "AI error", stack: e?.stack }
       : { error: e?.message || "AI error" };
-    return NextResponse.json({ status: 400 });
+    console.error("[AI] fail", payload);
+    return NextResponse.json(payload, { status: 400 });
   }
 }
