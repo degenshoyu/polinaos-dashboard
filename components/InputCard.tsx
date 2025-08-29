@@ -81,7 +81,7 @@ export default function InputCard({
         <div className="relative">
           <input
             className="w-full px-3 py-2 bg-[#0d0d0d] border border-[#333] focus:ring-2 focus:ring-[#64e3a1] rounded-md text-white placeholder:text-gray-500 text-sm"
-            placeholder="Search token or address (e.g. moodeng / 0x... / 9n4...)"
+            placeholder="Search token or address (e.g. popcat / 0x... / 9n4...)"
             value={localQuery}
             onChange={(e) => {
               const v = e.target.value;
