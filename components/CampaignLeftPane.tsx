@@ -8,6 +8,7 @@ import type { AnalysisInput } from "@/components/types";
 import EmotionalLandscapeCard from "@/components/EmotionalLandscapeCard";
 import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
 import type { AnalysisResult } from "@/components/types";
+import CommitmentIndex from "@/components/CommitmentIndex";
 
 export default function CampaignLeftPane({
   onRun,
@@ -59,6 +60,13 @@ export default function CampaignLeftPane({
           contractAddress={contractAddress}
         />
       )}
+
+      {/* Commitment Index  */}
+      <CommitmentIndex
+        deepLinkUrl={deepLinkUrl}
+        ticker={ticker}
+        contractAddress={contractAddress}
+      />
     </div>
   );
 }
