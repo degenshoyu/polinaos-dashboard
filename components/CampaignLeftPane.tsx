@@ -100,16 +100,6 @@ function EmptyEmotionsCard({
               </span>
             </div>
           )}
-          {deepLinkUrl && (
-            <div className="md:col-span-2">
-              <span className="text-xs text-gray-400">Deeplink</span>
-              <div className="mt-1 flex items-center gap-2">
-                <code className="text-[11px] md:text-xs px-2 py-1 rounded-md border border-white/10 bg-white/5 text-gray-300 break-all">
-                  {deepLinkUrl}
-                </code>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

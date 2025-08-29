@@ -77,14 +77,13 @@ export default function AnalysisConsole({
   useEffect(() => {
     if (status === "idle" && messages.length === 0) {
       append(
-        `👋 Hi, I’m Polina – your assistant for understanding how your project is performing on Twitter.
+        `👋 Hi, I’m Analyst Agent, Polina – your crypto intelligence co-pilot
 
-I'll guide you through the whole process:
-1. Fetch the most recent tweets that mention your project.
-2. Use my AI power to summarize the content, tone and trends.
-3. Generate tailored community tasks and track engagement.
+1️⃣ Search a coin you care about 💎
+2️⃣ I’ll collect 7 days of tweets and analyze sentiment ❤️‍🔥, trends 📈, and engagement 🤝
+3️⃣ Get a concise, shareable report 📑 with actionable insights 🚀
 
-✨ Most features are still under development. Want full access? Join the waitlist!`
+✨ Demo version · Twitter only 🛠 — multi-channel intelligence coming soon 🌐`
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -566,7 +565,7 @@ I'll guide you through the whole process:
           <div
             id="analysis-console-body"
             ref={containerRef}
-            className="px-4 py-3 space-y-4 text-sm h-[420px] overflow-y-auto border-t border-white/10 mt-3"
+            className="px-4 py-3 space-y-4 text-sm h-[240px] overflow-y-auto border-t border-white/10 mt-3"
           >
             {messages.map((m, i) => {
               const isScanningLine = m.text.startsWith("⌛ Scanning in progress");
