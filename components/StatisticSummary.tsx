@@ -386,11 +386,11 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     }
   }
 
-  /** Header（主按钮 + 折叠菜单） */
+  /** Header **/
   const header = (
     <div className="flex items-center justify-between mb-4">
       <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-        Statistic · Summary
+        Statistic Summary
       </h2>
       <div className="flex items-center gap-2 text-xs text-gray-400">
 

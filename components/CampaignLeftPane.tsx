@@ -33,7 +33,7 @@ export default function CampaignLeftPane({
       <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-            Campaign · Input
+            Search
           </h2>
           {deepLinkUrl ? <CopyLinkButton url={deepLinkUrl} /> : null}
         </div>
@@ -76,7 +76,7 @@ function EmptyEmotionsCard({
     <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-          Emotional · Landscape
+          Emotional Landscape
         </h2>
       </div>
       <p className="text-sm text-gray-500">

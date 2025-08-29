@@ -543,7 +543,7 @@ export default function AnalysisConsole({
         title={collapsed ? "Expand Analysis Console" : "Collapse Analysis Console"}
       >
         <span className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
-          Analysis · Console
+          Analysis Console
         </span>
         <span
           className={`
