@@ -158,28 +158,46 @@ async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
 }
 
 async function renderShareCardOffscreen(metric: ShareMetric): Promise<string> {
-  const refW = tweeterShareRef.current?.clientWidth ?? 1024;
   const host = document.createElement("div");
   Object.assign(host.style, {
     position: "fixed",
     left: "0-10000px",
     top: "0",
-    width: `${refW}px`,
     pointerEvents: "none",
     background: "#0a0f0e",
     zIndex: "2147483647",
-    transform: "translateZ(0)",
+    // transform: "translateZ(0)",
   } as Partial<CSSStyleDeclaration>);
   document.body.appendChild(host);
 
+  const style = document.createElement("style");
+  style.textContent = `
+    [data-export-root] {
+      display: inline-block;
+      width: max-content;
+      height: max-content;
+      overflow: clip !important;
+      box-sizing: border-box;
+    }
+    [data-export-root], [data-export-root] * { scrollbar-width: none !important; }
+    [data-export-root]::-webkit-scrollbar,
+    [data-export-root] *::-webkit-scrollbar { display: none !important; width:0 !important; height:0 !important; }
+  `;
+  host.appendChild(style)
+
   const root = createRoot(host);
-  root.render(<TweeterShareCard tweets={rowsAll} metric={metric} />);
+  root.render(
+    <div data-export-root>
+      <TweeterShareCard tweets={rowsAll} metric={metric} />
+    </div>
+  );
 
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
   window.dispatchEvent(new Event("resize"));
   await new Promise((r) => requestAnimationFrame(r));
   if ((document as any).fonts?.ready) { try { await (document as any).fonts.ready; } catch {} }
 
+  const target = host.querySelector("[data-export-root]") as HTMLElement;
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const png = await toPng(host, {
     backgroundColor: "#0a0f0e",
@@ -510,7 +528,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
                 <Tile color="#3ef2ac" label="Tweets" value={compact(aggAll.tweets)} />
                 <Tile color="#7dd3fc" label="Views" value={compact(aggAll.views)} />
                 <Tile color="#fcd34d" label="Engagements" value={compact(aggAll.engagements)} />
-                <Tile color="#d8b4fe" label="Engagement Rate" value={pctText(aggAll.er)} />
+                <Tile color="#d8b4fe" label="Eng Rate" value={pctText(aggAll.er)} />
               </div>
             </div>
 
@@ -521,7 +539,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
                 <Tile color="#3ef2ac" label="Tweets" value={compact(aggVer.tweets)} />
                 <Tile color="#7dd3fc" label="Views" value={compact(aggVer.views)} />
                 <Tile color="#fcd34d" label="Engagements" value={compact(aggVer.engagements)} />
-                <Tile color="#d8b4fe" label="Engagement Rate" value={pctText(aggVer.er)} />
+                <Tile color="#d8b4fe" label="Eng Rate" value={pctText(aggVer.er)} />
               </div>
             </div>
           </div>
@@ -574,7 +592,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 /** Small KPI tile */
 function Tile({ color, label, value }: { color: string; label: string; value: string | number }) {
-  const isER = label.toLowerCase().includes("engagement rate");
+  const isER = label.toLowerCase().includes("eng rate");
   return (
     <div
       className={`rounded-lg border border-white/10 px-3 py-2 ${

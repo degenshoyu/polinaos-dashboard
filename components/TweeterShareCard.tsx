@@ -198,13 +198,13 @@ export default function TweeterShareCard({
       className={`rounded-2xl border border-white/10 bg-black/10 p-4 ${className}`}
       data-metric={activeMetric}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-        <div className="text-xs text-gray-400">
+      <div className="flex flex-wrap items-center gap-3 mb-2">
+        <div className="w-full text-xs text-gray-400">
           {labelForMetric(activeMetric)} (Top {topN}; others merged)
         </div>
 
         {/* Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Segmented metric selector */}
           <div
             className="flex rounded-lg overflow-hidden border border-white/10 bg-white/5"
