@@ -45,9 +45,73 @@ export default function CampaignLeftPane({
 
       {emotions ? (
         <div className="p-0">
-          <EmotionalLandscapeCard data={emotions} insight={emotionsInsight ?? undefined} />
+          <EmotionalLandscapeCard
+            data={emotions}
+            insight={emotionsInsight ?? undefined}
+            ticker={ticker}
+            contractAddress={contractAddress}
+          />
         </div>
-      ) : null}
+      ) : (
+        <EmptyEmotionsCard
+          deepLinkUrl={deepLinkUrl}
+          ticker={ticker}
+          contractAddress={contractAddress}
+        />
+      )}
+    </div>
+  );
+}
+
+function EmptyEmotionsCard({
+  deepLinkUrl,
+  ticker,
+  contractAddress,
+}: {
+  deepLinkUrl?: string;
+  ticker?: string | null;
+  contractAddress?: string | null;
+}) {
+  return (
+    <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+          Emotional · Landscape
+        </h2>
+      </div>
+      <p className="text-sm text-gray-500">
+        Waiting for AI analysis… it appears here once tweets are collected.
+      </p>
+      {(ticker || contractAddress || deepLinkUrl) && (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {ticker && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Ticker</span>
+              <span className="px-2 py-0.5 text-sm rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono">
+                {ticker}
+              </span>
+            </div>
+          )}
+          {contractAddress && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Contract</span>
+              <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
+                {contractAddress}
+              </span>
+            </div>
+          )}
+          {deepLinkUrl && (
+            <div className="md:col-span-2">
+              <span className="text-xs text-gray-400">Deeplink</span>
+              <div className="mt-1 flex items-center gap-2">
+                <code className="text-[11px] md:text-xs px-2 py-1 rounded-md border border-white/10 bg-white/5 text-gray-300 break-all">
+                  {deepLinkUrl}
+                </code>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
