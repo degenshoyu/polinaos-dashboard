@@ -310,9 +310,8 @@ export default function CommitmentIndex({
               disabled={!jobId || refreshing}
               className="px-2 py-1 text-xs rounded-md border border-white/10 bg-white/5 hover:bg-white/10 disabled:opacity-40"
             >
-              {refreshing ? "Refreshing…" : "Refresh"}
+              {refreshing ? "Refreshing…" : "↻ Refresh"}
             </button>
-            <WeightsPopover weights={weights} setWeights={setWeights} />
           </div>
         </div>
 
@@ -322,7 +321,7 @@ export default function CommitmentIndex({
         </div>
 
         {/* Body states */}
-        {!jobId && <p className="text-sm text-gray-500">Waiting for a job… start a scan on the right to populate data.</p>}
+        {!jobId && <p className="text-sm text-gray-500">Waiting for AI analysis… it appears here once tweets are collected.</p>}
         {error && <p className="text-sm text-rose-300">Error: {error}</p>}
         {jobId && rows && authors && authors.length === 0 && (
           <p className="text-sm text-gray-400">No qualified authors after filters.</p>
@@ -435,11 +434,6 @@ export default function CommitmentIndex({
             </ul>
           </div>
         )}
-
-        {/* Footnote */}
-        <div className="mt-3 text-xs text-white/40">
-          Heuristics v0.3 · Filters: other tickers/contracts, pump slogans, link-only · Multi-factor originality w/ n-gram uniqueness
-        </div>
       </div>
     </div>
   );
@@ -574,4 +568,3 @@ function shorten(addr: string, head = 6, tail = 6) {
   if (addr.length <= head + tail) return addr;
   return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
 }
-
