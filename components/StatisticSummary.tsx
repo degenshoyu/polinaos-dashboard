@@ -574,13 +574,35 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 /** Small KPI tile */
 function Tile({ color, label, value }: { color: string; label: string; value: string | number }) {
+  const isER = label.toLowerCase().includes("engagement rate");
   return (
-    <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+    <div
+      className={`rounded-lg border border-white/10 px-3 py-2 ${
+        isER
+          ? "bg-gradient-to-r from-[#27a567]/40 to-[#2fd480]/40 shadow-lg shadow-emerald-500/20"
+          : "bg-white/5"
+      }`}
+    >
       <div className="flex items-center gap-2">
-        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: color }} />
-        <span className="text-[11px] text-gray-400">{label}</span>
+        <span
+          className={`inline-block w-2.5 h-2.5 rounded-sm`}
+          style={{ backgroundColor: color }}
+        />
+        <span
+          className={`text-[11px] ${isER ? "text-emerald-300 font-semibold uppercase" : "text-gray-400"}`}
+        >
+          {label}
+        </span>
       </div>
-      <div className="mt-1 text-sm text-white font-semibold">{value}</div>
+      <div
+        className={`mt-1 ${
+          isER
+            ? "text-lg font-bold bg-gradient-to-r from-[#2fd480] to-[#3ef2ac] text-transparent bg-clip-text"
+            : "text-sm text-white font-semibold"
+        }`}
+      >
+        {value}
+      </div>
     </div>
   );
 }

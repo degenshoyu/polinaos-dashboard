@@ -215,22 +215,22 @@ export default function EmotionalLandscapeCard({
                 </button>
               </div>
             )}
-            {contractAddress && (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-400">Contract</span>
-                <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
-                  {contractAddress}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => copyText(contractAddress, "contract")}
-                  className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80"
-                  title="Copy contract"
-                >
-                  {copied === "contract" ? "Copied ✓" : "Copy"}
-                </button>
-              </div>
-            )}
+{contractAddress && (
+  <div className="flex items-center gap-2">
+    <span className="text-xs text-gray-400">Contract</span>
+    <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
+      {shortenAddress(contractAddress)}
+    </span>
+    <button
+      type="button"
+      onClick={() => copyText(contractAddress, "contract")}
+      className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-white/80"
+      title="Copy contract"
+    >
+      {copied === "contract" ? "Copied ✓" : "Copy"}
+    </button>
+  </div>
+)}
           </div>
         )}
 
@@ -566,4 +566,11 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.onerror = (e) => reject(e);
     img.src = src;
   });
+}
+
+function shortenAddress(addr?: string, head = 6, tail = 6): string {
+  if (!addr) return "";
+  const len = addr.length;
+  if (len <= head + tail) return addr;
+  return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
 }

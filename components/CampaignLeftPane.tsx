@@ -95,8 +95,8 @@ function EmptyEmotionsCard({
           {contractAddress && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-400">Contract</span>
-              <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
-                {contractAddress}
+                <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
+                  {shortenAddress(contractAddress)}
               </span>
             </div>
           )}
@@ -104,6 +104,13 @@ function EmptyEmotionsCard({
       )}
     </div>
   );
+}
+
+function shortenAddress(addr?: string, head = 6, tail = 6): string {
+  if (!addr) return "";
+  const len = addr.length;
+  if (len <= head + tail) return addr;
+  return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
 }
 
 function CopyLinkButton({ url }: { url: string }) {
