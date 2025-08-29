@@ -583,16 +583,12 @@ function Tile({ color, label, value }: { color: string; label: string; value: st
           : "bg-white/5"
       }`}
     >
-      <div className="flex items-center gap-2">
-        <span
-          className={`inline-block w-2.5 h-2.5 rounded-sm`}
-          style={{ backgroundColor: color }}
-        />
-        <span
-          className={`text-[11px] ${isER ? "text-emerald-300 font-semibold uppercase" : "text-gray-400"}`}
-        >
-          {label}
-        </span>
+      <div
+        className={`text-[11px] text-left ${
+          isER ? "text-emerald-300 font-semibold uppercase" : "text-gray-400"
+        }`}
+      >
+        {label}
       </div>
       <div
         className={`mt-1 ${
