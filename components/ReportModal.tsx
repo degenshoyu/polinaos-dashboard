@@ -490,7 +490,7 @@ export default function ReportModal({
         <div
           ref={panelRef}
           tabIndex={-1}
-          className="max-h-[70vh] overflow-y-auto p-5 text-[13px] leading-relaxed text-white/90"
+          className="analysis-console-body max-h-[70vh] overflow-y-auto p-5 text-[13px] leading-relaxed text-white/90"
           onWheelCapture={(e) => e.stopPropagation()}
           onTouchMove={(e) => e.stopPropagation()}
         >
