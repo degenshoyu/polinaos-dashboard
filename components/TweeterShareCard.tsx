@@ -299,7 +299,7 @@ export default function TweeterShareCard({
 
       {/* Table under the pie */}
       {showTable && (
-        <div className="mt-4 overflow-x-auto">
+        <div className="mt-4 overflow-x-auto analysis-scrollbar">
           <table className="w-full text-sm">
             <thead className="text-xs text-gray-400">
               <tr className="[&>th]:py-2 [&>th]:px-2">

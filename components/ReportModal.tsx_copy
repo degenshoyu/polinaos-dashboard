@@ -1,0 +1,314 @@
+// components/ReportModal.tsx
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+type TweetRow = {
+  tweetId?: string;
+  tweeter?: string;
+  textContent?: string;
+  datetime?: string; // ISO
+  statusLink?: string;
+  views?: number;
+  likes?: number;
+  retweets?: number;
+  replies?: number;
+  isVerified?: boolean;
+};
+
+type JobPayload = {
+  job_id: string;
+  status: string;
+  start_date?: string;  // "2025-08-17"
+  end_date?: string;    // "2025-08-25"
+  keyword?: string[];
+  tweets_count?: number;
+  tweets?: TweetRow[];
+};
+
+export default function ReportModal({
+  open,
+  onClose,
+  jobId,
+  className = "",
+}: {
+  open: boolean;
+  onClose: () => void;
+  jobId: string;
+  className?: string;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [data, setData] = useState<JobPayload | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const body = document.body;
+    const prevOverflow = body.style.overflow;
+    body.style.overflow = "hidden";
+    return () => {
+      body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      panelRef.current?.focus();
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!jobId) return;
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const r = await fetch(`/api/jobProxy?job_id=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        const j = (await r.json()) as JobPayload;
+        if (!r.ok) throw new Error((j as any)?.error || r.statusText);
+        setData(j);
+      } catch (e: any) {
+        setErr(e?.message || "Failed to load job data");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [open, jobId]);
+
+  // helpers
+  const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+  const compact = (v: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(v);
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const fmtDate = (s?: string) => {
+    if (!s) return "N/A";
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+    return new Intl.DateTimeFormat("en", { month: "short", day: "2-digit", year: "numeric" }).format(d);
+  };
+
+  const rowsAll = useMemo(() => (data?.tweets ?? []).map((t) => ({ ...t })), [data]);
+  const rowsVer = useMemo(() => rowsAll.filter((t) => t.isVerified), [rowsAll]);
+
+  // aggregates
+  const aggAll = useMemo(() => {
+    const tweets = rowsAll.length;
+    const views = rowsAll.reduce((s, t) => s + n(t.views), 0);
+    const engs  = rowsAll.reduce((s, t) => s + n(t.likes) + n(t.retweets) + n(t.replies), 0);
+    const er = views > 0 ? engs / views : 0;
+    return { tweets, views, engs, er };
+  }, [rowsAll]);
+
+  const aggVer = useMemo(() => {
+    const tweets = rowsVer.length;
+    const views = rowsVer.reduce((s, t) => s + n(t.views), 0);
+    const engs  = rowsVer.reduce((s, t) => s + n(t.likes) + n(t.retweets) + n(t.replies), 0);
+    const er = views > 0 ? engs / views : 0;
+    return { tweets, views, engs, er };
+  }, [rowsVer]);
+
+  // ticker from keywords: first string starting with $
+  const ticker = useMemo(() => {
+    const kw = Array.isArray(data?.keyword) ? data!.keyword!.filter((s): s is string => typeof s === "string") : [];
+    return kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || "$ASSET";
+  }, [data]);
+
+  // KOLs
+  type KOL = { user: string; count: number; views: number; engs: number; er: number };
+  const kols: KOL[] = useMemo(() => {
+    const m = new Map<string, KOL>();
+    for (const t of rowsAll) {
+      const u = (t.tweeter || "").trim() || "unknown";
+      const o = m.get(u) || { user: u, count: 0, views: 0, engs: 0, er: 0 };
+      o.count += 1;
+      o.views += n(t.views);
+      o.engs  += n(t.likes) + n(t.retweets) + n(t.replies);
+      m.set(u, o);
+    }
+    const arr = [...m.values()];
+    for (const k of arr) k.er = k.views > 0 ? k.engs / k.views : 0;
+    // 排序：先按总互动，再按浏览
+    arr.sort((a, b) => (b.engs - a.engs) || (b.views - a.views));
+    return arr;
+  }, [rowsAll]);
+
+  const top1 = kols[0];
+  const others = kols.slice(1, 5);
+
+  // distribution insight（非常轻量的启发式）
+  const grinders = useMemo(() => kols.filter(k => k.count >= Math.max(6, Math.ceil(rowsAll.length / 120))).slice(0, 3).map(k => `@${k.user}`), [kols, rowsAll.length]);
+  const highER   = useMemo(() => kols.filter(k => k.er >= 0.08 && k.count >= 2).slice(0, 3).map(k => `@${k.user}`), [kols]);
+
+  const periodText = useMemo(() => {
+    const s = fmtDate(data?.start_date);
+    const e = fmtDate(data?.end_date);
+    return `${s} → ${e}`;
+  }, [data]);
+
+  // 组装报告文本（尽量贴近你的示例）
+  const report = useMemo(() => {
+    const lines: string[] = [];
+    lines.push(`📈 ${ticker} Twitter Report – ${periodText}`);
+    lines.push(`Powered by @PolinaAIOS`);
+    lines.push("");
+    // 1/
+    lines.push(`1/ Overall Performance`);
+    lines.push(`🧵 ${compact(aggAll.tweets)} total tweets`);
+    lines.push(`👀 ${compact(aggAll.views)} total views`);
+    lines.push(`💬 ${compact(aggAll.engs)} total engagements`);
+    lines.push(`📊 Engagement Rate (ER): ${(aggAll.er * 100).toFixed(1)}%`);
+    lines.push("");
+    // 一句判断：若 ER > 3% 就“explosive”，否则“steady”
+    if (aggAll.er >= 0.03) {
+      lines.push(`${ticker} had explosive reach — trending widely across CT, proving its memetic strength.`);
+    } else if (aggAll.er >= 0.012) {
+      lines.push(`${ticker} showed solid traction with healthy on-chain chatter and consistent social lift.`);
+    } else {
+      lines.push(`${ticker} gained visibility but engagement per impression remains modest; optimize content & KOL mix.`);
+    }
+    lines.push("");
+
+    // 2/
+    lines.push(`2/ Verified Activity`);
+    lines.push(`✅ ${compact(aggVer.tweets)} verified tweets`);
+    lines.push(`👀 ${compact(aggVer.views)} verified views`);
+    lines.push(`💬 ${compact(aggVer.engs)} verified engagements`);
+    lines.push(`📈 Verified ER: ${(aggVer.er * 100).toFixed(1)}%`);
+    lines.push("");
+    const verShare = aggAll.views > 0 ? (aggVer.views / aggAll.views) : 0;
+    if (verShare >= 0.65) {
+      lines.push(`Nearly all of ${ticker}’s traction came from verifieds, cementing it as more than just retail noise.`);
+    } else if (verShare >= 0.35) {
+      lines.push(`Verifieds contributed a meaningful share of reach, balancing community and credible voices.`);
+    } else {
+      lines.push(`Most reach was community-driven; verified amplification remains a growth lever.`);
+    }
+    lines.push("");
+
+    // 3/
+    lines.push(`3/ Top KOLs`);
+    if (top1) {
+      lines.push(`🥇 @${top1.user}`);
+      lines.push(`🔁 ${top1.count} tweets`);
+      lines.push(`👁️ ${compact(top1.views)} views`);
+      lines.push(`💥 ${compact(top1.engs)} engagements`);
+      lines.push(`📊 ER: ${(top1.er * 100).toFixed(1)}%`);
+      lines.push(`📌 #1 Ranked by score`);
+      lines.push("");
+    }
+    if (others.length > 0) {
+      lines.push(`🔥 Others on fire:`);
+      for (const o of others) {
+        lines.push(`• @${o.user} – ${o.count} tweets, ${compact(o.views)} views, ${compact(o.engs)} engs`);
+      }
+      lines.push("");
+    }
+
+    // distribution insight
+    const left = grinders.length ? grinders.join(", ") : "grinders";
+    const right = highER.length ? highER.join(", ") : "high-ER KOLs";
+    lines.push(`→ Distribution insight: hybrid model – ${left} + ${right} → wide net of reach.`);
+    lines.push("");
+
+    // 4/
+    lines.push(`4/ Content Dynamics`);
+    // Top Engager
+    if (top1) {
+      lines.push(`• Top Engager: @${top1.user} – dominated with consistent multi-tweet impact.`);
+    }
+    // Volume Grinder
+    const vol = kols.slice().sort((a,b)=>b.count-a.count)[0];
+    if (vol && (!top1 || vol.user !== top1.user)) {
+      lines.push(`• Volume Grinder: @${vol.user} dropped ${vol.count} tweets, keeping ${ticker} trending.`);
+    } else if (vol) {
+      lines.push(`• Volume Grinder: @${vol.user} sustained momentum with ${vol.count} tweets.`);
+    }
+    // Viral Drivers
+    const viral = kols.filter(k => k.er >= 0.05).slice(0, 2).map(k => `@${k.user}`);
+    if (viral.length) {
+      lines.push(`• Viral Drivers: ${viral.join(" & ")} amplified narrative into mainstream CT.`);
+    }
+    // Verified weight
+    lines.push(`• Verified Weight: Verifieds = ${(verShare*100).toFixed(0)}% of all views → strong credibility signals.`);
+
+    return lines.join("\n");
+  }, [ticker, periodText, aggAll, aggVer, kols, top1, others]);
+
+  async function copyReport() {
+    try {
+      await navigator.clipboard.writeText(report);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // fallback
+      window.prompt("Copy this report:", report);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center ${className}`}
+      aria-modal="true"
+      role="dialog"
+    >
+      {/* overlay */}
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      {/* panel */}
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
+        className="relative w-[min(920px,95vw)] max-h-[85vh] overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] shadow-2xl flex flex-col"
+      >
+        <div className="flex items-center justify-between p-4 border-b border-white/10">
+          <div className="text-lg font-semibold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] bg-clip-text text-transparent">
+            Twitter · Report
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={copyReport}
+              className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-gray-200"
+            >
+              {copied ? "✓ Copied" : "Copy"}
+            </button>
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 rounded-md bg-emerald-400/15 hover:bg-emerald-400/25 border border-emerald-400/20 text-xs text-emerald-200"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        <div
+          ref={scrollAreaRef}
+          className="flex-1 p-5 overflow-y-auto overscroll-contain"
+          onWheelCapture={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
+        >
+          {loading && <p className="text-sm text-gray-400">Loading report…</p>}
+          {err && <p className="text-sm text-rose-300">Error: {err}</p>}
+          {!loading && !err && (
+            <pre className="whitespace-pre-wrap text-[13.5px] leading-6 text-gray-200">
+{report}
+            </pre>
+          )}
+        </div>
+
+        <div className="px-5 pb-4 text-[11px] text-gray-400 border-t border-white/10">
+          Data source: X/Twitter scan · Job <span className="text-gray-300">{jobId}</span>
+        </div>
+      </div>
+    </div>
+  );
+}

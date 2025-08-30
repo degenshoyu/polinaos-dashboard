@@ -127,19 +127,11 @@ export default function StatisticSummary({
     const d = daysBetween(start, end);
     const perTweetViews = t > 0 ? totals.views / t : 0;
     const perTweetEngs = t > 0 ? totals.engagements / t : 0;
-    // mean of per-tweet ER (与 totals.engagements/totals.views 不同)
-    const meanER = rows.length
-      ? rows.reduce((s, r) => {
-          const v = n(r.views);
-          const e = n(r.likes) + n(r.retweets) + n(r.replies);
-          return s + (v > 0 ? e / v : 0);
-        }, 0) / rows.length
-      : 0;
     return {
       avgTweetsPerDay: totals.tweets / d,
       avgViewsPerTweet: perTweetViews,
       avgEngsPerTweet: perTweetEngs,
-      avgER: meanER,
+      avgER: perTweetViews > 0 ? perTweetEngs / perTweetViews : 0,
     };
   }
 
