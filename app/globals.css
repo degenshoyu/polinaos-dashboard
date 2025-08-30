@@ -80,3 +80,27 @@
 .font-sora {
   font-family: var(--font-sora), ui-sans-serif, system-ui, sans-serif;
 }
+
+/* ===== Scrollbar styling for AnalysisConsole ===== */
+.analysis-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.analysis-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.analysis-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #2fd480, #27a567);
+  border-radius: 8px;
+}
+
+.analysis-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #3ef2ac, #239e5d);
+}
+
+/* Firefox */
+.analysis-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #27a567 transparent;
+}

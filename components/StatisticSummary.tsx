@@ -110,6 +110,81 @@ export default function StatisticSummary({
     return { tweets, views, engagements, er };
   }, [rowsVerified]);
 
+
+  /** ---------- Averages & Buckets per spec ---------- */
+  const daysBetween = (a?: string, b?: string) => {
+    if (!a || !b) return 1;
+    const d1 = new Date(a); const d2 = new Date(b);
+    const ok = !Number.isNaN(d1.getTime()) && !Number.isNaN(d2.getTime());
+    if (!ok) return 1;
+    const ms = Math.max(0, d2.getTime() - d1.getTime());
+    const days = Math.floor(ms / 86400000) + 1; // inclusive
+    return Math.max(1, days);
+  };
+
+  function computeAverages(rows: TweetRow[], totals: { tweets: number; views: number; engagements: number; er: number }, start?: string, end?: string) {
+    const t = totals.tweets || 0;
+    const d = daysBetween(start, end);
+    const perTweetViews = t > 0 ? totals.views / t : 0;
+    const perTweetEngs = t > 0 ? totals.engagements / t : 0;
+    // mean of per-tweet ER (与 totals.engagements/totals.views 不同)
+    const meanER = rows.length
+      ? rows.reduce((s, r) => {
+          const v = n(r.views);
+          const e = n(r.likes) + n(r.retweets) + n(r.replies);
+          return s + (v > 0 ? e / v : 0);
+        }, 0) / rows.length
+      : 0;
+    return {
+      avgTweetsPerDay: totals.tweets / d,
+      avgViewsPerTweet: perTweetViews,
+      avgEngsPerTweet: perTweetEngs,
+      avgER: meanER,
+    };
+  }
+
+  function computeBuckets(rows: TweetRow[]) {
+    const total = rows.length || 1;
+    let er_lt1 = 0, er_1_2_5 = 0, er_2_5_5 = 0, er_gt5 = 0;
+    let v_lt1k = 0, v_1k_2_5k = 0, v_2_5k_5k = 0, v_gt5k = 0;
+
+    for (const r of rows) {
+      const v = n(r.views);
+      const e = n(r.likes) + n(r.retweets) + n(r.replies);
+      const er = v > 0 ? e / v : 0;
+      // ER buckets
+      if (er < 0.01) er_lt1++;
+      else if ( er < 0.025 ) er_1_2_5++;
+      else if ( er <= 0.05 ) er_2_5_5++;
+      else er_gt5++;
+      // Views buckets
+      if (v < 1000) v_lt1k++;
+      else if (v <= 2500) v_1k_2_5k++;
+      else if (v <= 5000) v_2_5k_5k++;
+      else v_gt5k++;
+    }
+    const toShare = (x: number) => x / total;
+    return {
+      erShares: {
+        lt1: toShare(er_lt1),
+        _1_2_5: toShare(er_1_2_5),
+        _2_5_5: toShare(er_2_5_5),
+        gt5: toShare(er_gt5),
+      },
+      viewShares: {
+        lt1k: toShare(v_lt1k),
+        _1k_2_5k: toShare(v_1k_2_5k),
+        _2_5k_5k: toShare(v_2_5k_5k),
+        gt5k: toShare(v_gt5k),
+      },
+    };
+  }
+
+  const avgAll = useMemo(() => computeAverages(rowsAll, aggAll, data?.start_date, data?.end_date), [rowsAll, aggAll, data?.start_date, data?.end_date]);
+  const avgVer = useMemo(() => computeAverages(rowsVerified, aggVer, data?.start_date, data?.end_date), [rowsVerified, aggVer, data?.start_date, data?.end_date]);
+  const bucketsAll = useMemo(() => computeBuckets(rowsAll), [rowsAll]);
+  const bucketsVer = useMemo(() => computeBuckets(rowsVerified), [rowsVerified]);
+
   /** ============ html-to-image Helpers ============ */
 async function saveNodeAsPng(node: HTMLElement | null, filename: string) {
   if (!node) throw new Error("Target element not found");
@@ -530,6 +605,28 @@ function loadImage(src: string): Promise<HTMLImageElement> {
                 <Tile color="#fcd34d" label="Engagements" value={compact(aggAll.engagements)} />
                 <Tile color="#d8b4fe" label="Eng Rate" value={pctText(aggAll.er)} />
               </div>
+
+            {/* Row 1: Averages */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                <Tile color="#34d399" label="Avg Tweets" value={avgAll.avgTweetsPerDay.toFixed(2)} />
+                <Tile color="#34d399" label="Avg Views" value={compact(avgAll.avgViewsPerTweet)} />
+                <Tile color="#34d399" label="Avg Engs" value={compact(avgAll.avgEngsPerTweet)} />
+                <Tile color="#a78bfa" label="Avg ER" value={pctText(avgAll.avgER)} />
+              </div>
+              {/* Row 2: ER buckets */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+                <Tile color="#f9a8d4" label="ER < 1%" value={pctText(bucketsAll.erShares.lt1)} />
+                <Tile color="#f9a8d4" label="ER 1% ~ 2.5%" value={pctText(bucketsAll.erShares._1_2_5)} />
+                <Tile color="#f9a8d4" label="ER 2.5% ~ 5%" value={pctText(bucketsAll.erShares._2_5_5)} />
+                <Tile color="#f9a8d4" label="ER > 5%" value={pctText(bucketsAll.erShares.gt5)} />
+              </div>
+              {/* Row 3: Views buckets */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+                <Tile color="#7dd3fc" label="Views < 1K" value={pctText(bucketsAll.viewShares.lt1k)} />
+                <Tile color="#7dd3fc" label="Views 1K ~ 2.5K" value={pctText(bucketsAll.viewShares._1k_2_5k)} />
+                <Tile color="#7dd3fc" label="Views 2.5K ~ 5K" value={pctText(bucketsAll.viewShares._2_5k_5k)} />
+                <Tile color="#7dd3fc" label="Views > 5K" value={pctText(bucketsAll.viewShares.gt5k)} />
+              </div>
             </div>
 
             {/* Verified tweets (tiles) */}
@@ -541,15 +638,37 @@ function loadImage(src: string): Promise<HTMLImageElement> {
                 <Tile color="#fcd34d" label="Engagements" value={compact(aggVer.engagements)} />
                 <Tile color="#d8b4fe" label="Eng Rate" value={pctText(aggVer.er)} />
               </div>
+
+              {/* Row 1: Averages (Verified) */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                <Tile color="#34d399" label="Avg Tweets" value={avgVer.avgTweetsPerDay.toFixed(2)} />
+                <Tile color="#34d399" label="Avg Views" value={compact(avgVer.avgViewsPerTweet)} />
+                <Tile color="#34d399" label="Avg Engs" value={compact(avgVer.avgEngsPerTweet)} />
+                <Tile color="#a78bfa" label="Avg ER" value={pctText(avgVer.avgER)} />
+              </div>
+              {/* Row 2: ER buckets (Verified) */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+                <Tile color="#f9a8d4" label="ER < 1%" value={pctText(bucketsVer.erShares.lt1)} />
+                <Tile color="#f9a8d4" label="ER 1% ~ 2.5%" value={pctText(bucketsVer.erShares._1_2_5)} />
+                <Tile color="#f9a8d4" label="ER 2.5% ~ 5%" value={pctText(bucketsVer.erShares._2_5_5)} />
+                <Tile color="#f9a8d4" label="ER > 5%" value={pctText(bucketsVer.erShares.gt5)} />
+              </div>
+              {/* Row 3: Views buckets (Verified) */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+                <Tile color="#7dd3fc" label="Views < 1K" value={pctText(bucketsVer.viewShares.lt1k)} />
+                <Tile color="#7dd3fc" label="Views 1K ~ 2.5K" value={pctText(bucketsVer.viewShares._1k_2_5k)} />
+                <Tile color="#7dd3fc" label="Views 2.5K ~ 5K" value={pctText(bucketsVer.viewShares._2_5k_5k)} />
+                <Tile color="#7dd3fc" label="Views > 5K" value={pctText(bucketsVer.viewShares.gt5k)} />
+              </div>
             </div>
           </div>
 
-          {/* --- (2/3/4) Tweeter share：不改组件，只外层包 ref；如组件内部能加 data-section 更佳 --- */}
+          {/* --- (2/3/4) Tweeter share --- */}
           <div ref={tweeterShareRef}>
             <TweeterShareCard tweets={rowsAll} />
           </div>
 
-          {/* --- Top tweets by views（页面展示保留；按你的要求不参与截图） --- */}
+          {/* --- Top tweets by views --- */}
           <div ref={topListRef} className="rounded-2xl border border-white/10 bg-black/10 p-4">
             <div className="text-xs text-gray-400 mb-3">Top tweets by views</div>
             <ul className="space-y-3">
@@ -592,28 +711,26 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 /** Small KPI tile */
 function Tile({ color, label, value }: { color: string; label: string; value: string | number }) {
-  const isER = label.toLowerCase().includes("eng rate");
+  const isER = /eng\s*rate|avg\s*er/i.test(label);
   return (
     <div
-      className={`rounded-lg border border-white/10 px-3 py-2 ${
-        isER
-          ? "bg-gradient-to-r from-[#27a567]/40 to-[#2fd480]/40 shadow-lg shadow-emerald-500/20"
-          : "bg-white/5"
-      }`}
+      className={`rounded-lg border border-white/10 px-3 py-2
+        ${isER ? "bg-gradient-to-r from-[#27a567]/40 to-[#2fd480]/40 shadow-lg shadow-emerald-500/20" : "bg-white/5"}
+        last:bg-gradient-to-r last:from-[#27a567]/40 last:to-[#2fd480]/40 last:shadow-lg last:shadow-emerald-500/20`}
     >
       <div
-        className={`text-[11px] text-left ${
-          isER ? "text-emerald-300 font-semibold uppercase" : "text-gray-400"
-        }`}
+        className={`text-[11px] text-left
+          ${isER ? "text-emerald-300 font-semibold uppercase" : "text-gray-400"}
+          last:text-emerald-300 last:font-semibold last:uppercase`}
       >
         {label}
       </div>
       <div
-        className={`mt-1 ${
-          isER
+        className={`mt-1
+          ${isER
             ? "text-lg font-bold bg-gradient-to-r from-[#2fd480] to-[#3ef2ac] text-transparent bg-clip-text"
-            : "text-sm text-white font-semibold"
-        }`}
+            : "text-sm text-white font-semibold"}
+          last:text-lg last:font-bold last:bg-gradient-to-r last:from-[#2fd480] last:to-[#3ef2ac] last:text-transparent last:bg-clip-text`}
       >
         {value}
       </div>

@@ -565,7 +565,7 @@ export default function AnalysisConsole({
           <div
             id="analysis-console-body"
             ref={containerRef}
-            className="px-4 py-3 space-y-4 text-sm h-[240px] overflow-y-auto border-t border-white/10 mt-3"
+            className="analysis-scrollbar px-4 py-3 space-y-4 text-sm h-[240px] overflow-y-auto border-t border-white/10 mt-3"
           >
             {messages.map((m, i) => {
               const isScanningLine = m.text.startsWith("⌛ Scanning in progress");
