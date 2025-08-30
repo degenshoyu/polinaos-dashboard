@@ -67,6 +67,11 @@ export default function ReportModal({
     }
   };
 
+  // Base58（Solana/pump.fun 样式）地址检测
+  const BASE58_STRICT = /^[1-9A-HJ-NP-Za-km-z]{32,60}$/;
+  // 全局扫描：从文本里找出所有疑似地址（必须带 g）
+  const BASE58_GLOBAL = /[1-9A-HJ-NP-Za-km-z]{32,60}/g;
+
   /** ======= lifecycle ======= */
   useEffect(() => {
     if (!open) return;
@@ -105,10 +110,61 @@ export default function ReportModal({
     };
   }, [open, jobId]);
 
-  /** ======= data prep ======= */
-  const rowsAll = useMemo<TweetRow[]>(() => (data?.tweets ?? []).map((t) => ({ ...t })), [data]);
+  /** ======= data prep（含过滤） ======= */
+  // 原始推文（不做过滤）
+  const rowsAllRaw = useMemo<TweetRow[]>(
+    () => (data?.tweets ?? []).map((t) => ({ ...t })),
+    [data]
+  );
+
+  // 从 keywords 取 ticker：第一个以 $ 开头的字符串
+  const ticker = useMemo(() => {
+    const kw = Array.isArray(data?.keyword)
+      ? (data!.keyword as string[]).filter((s) => typeof s === "string")
+      : [];
+    return kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || "$ASSET";
+  }, [data]);
+
+  // 识别目标合约地址（用 raw 数据，避免先过滤后识别导致误判）
+  const contractAddress = useMemo(() => {
+    const candidates: string[] = [];
+    const kw = Array.isArray(data?.keyword)
+      ? (data!.keyword as string[]).filter((s) => typeof s === "string")
+      : [];
+    candidates.push(...kw);
+    for (const t of rowsAllRaw) if (t.textContent) candidates.push(...t.textContent.split(/\s+/));
+    const hit = candidates.find((s) => BASE58_STRICT.test(s));
+    return hit || "N/A";
+  }, [data, rowsAllRaw]);
+
+  // 过滤：1) $keyword 次数 > 2；2) 含其他 base58 地址（不等于目标 CA）
+  const rowsAll = useMemo<TweetRow[]>(() => {
+    const ca = BASE58_STRICT.test(contractAddress) ? contractAddress : null;
+    const tk = ticker && ticker !== "$ASSET" ? ticker : null;
+    const coreTk = tk ? tk.replace(/^\$/g, "").toLowerCase() : null;
+    return rowsAllRaw.filter((t) => {
+      const text = t.textContent || "";
+      if (coreTk) {
+        const tickers = (text.match(/\$[A-Za-z0-9_]{2,20}/g) || []).map((s) =>
+          s.slice(1).toLowerCase()
+        );
+        const hasOtherTicker = tickers.some((sym) => sym !== coreTk);
+        if (hasOtherTicker) return false;
+      }
+      if (ca) {
+        const found = text.match(BASE58_GLOBAL) || [];
+        if (found.length) {
+          const others = new Set(found.filter((addr) => addr !== ca));
+          if (others.size > 0) return false;
+        }
+      }
+      return true;
+    });
+  }, [rowsAllRaw, ticker, contractAddress]);
+
   const rowsVer = useMemo<TweetRow[]>(() => rowsAll.filter((t) => t.isVerified), [rowsAll]);
 
+  // 汇总
   const aggAll = useMemo(() => {
     const tweets = rowsAll.length;
     const views = rowsAll.reduce((s, t) => s + n(t.views), 0);
@@ -125,37 +181,15 @@ export default function ReportModal({
     return { tweets, views, engs, er };
   }, [rowsVer]);
 
-  // ticker from keywords: first string starting with $
-  const ticker = useMemo(() => {
-    const kw = Array.isArray(data?.keyword)
-      ? (data!.keyword as string[]).filter((s) => typeof s === "string")
-      : [];
-    return kw.find((k) => /^\$[A-Za-z0-9_]{2,20}$/.test(k)) || "$ASSET";
-  }, [data]);
-
-  // best-effort contract address extraction（兼容 base58/pump.fun）
-  const contractAddress = useMemo(() => {
-    const candidates: string[] = [];
-    const kw = Array.isArray(data?.keyword)
-      ? (data!.keyword as string[]).filter((s) => typeof s === "string")
-      : [];
-    candidates.push(...kw);
-    for (const t of rowsAll) if (t.textContent) candidates.push(...t.textContent.split(/\s+/));
-    const base58 = /^[1-9A-HJ-NP-Za-km-z]{32,60}$/;
-    const hit = candidates.find((s) => base58.test(s));
-    return hit || "N/A";
-  }, [data, rowsAll]);
-
-  // light themes (keywords, exclude $ticker & base58-like)
+  // 轻主题（排除 $ 与 base58）
   const topThemes = useMemo(() => {
     const kw = Array.isArray(data?.keyword)
       ? (data!.keyword as string[]).filter((s) => typeof s === "string")
       : [];
-    const base58 = /^[1-9A-HJ-NP-Za-km-z]{32,60}$/;
-    return kw.filter((k) => !k.startsWith("$") && !base58.test(k)).slice(0, 3);
+    return kw.filter((k) => !k.startsWith("$") && !BASE58_STRICT.test(k)).slice(0, 3);
   }, [data]);
 
-  // per-tweet ER percentiles
+  // ER 分位
   const erPercentiles = useMemo(() => {
     const ers = rowsAll
       .map((r) => {
@@ -169,7 +203,7 @@ export default function ReportModal({
     return { p50: pick(0.5), p90: pick(0.9), p99: pick(0.99) };
   }, [rowsAll]);
 
-  // averages + recommended Avg ER
+  // 平均
   const avgAllViews = useMemo(() => (aggAll.tweets > 0 ? aggAll.views / aggAll.tweets : 0), [aggAll]);
   const avgAllEngs = useMemo(() => (aggAll.tweets > 0 ? aggAll.engs / aggAll.tweets : 0), [aggAll]);
   const avgAllER = useMemo(() => (avgAllViews > 0 ? avgAllEngs / avgAllViews : 0), [avgAllViews, avgAllEngs]);
@@ -221,7 +255,7 @@ export default function ReportModal({
       arr.push({ user, count, views, engs, er, verifiedViews, verifiedShare, bestTweet: best, score: 0 });
       if (engs > maxEngs) maxEngs = engs;
     }
-    // composite score: 55% engs (norm), 30% ER (capped at 10%), 15% verified share
+    // composite score: 55% engs (norm), 30% ER (≤10%), 15% verified share
     for (const k of arr) {
       const engsNorm = maxEngs > 0 ? k.engs / maxEngs : 0;
       const erNorm = Math.min(1, k.er / 0.1);
@@ -243,7 +277,7 @@ export default function ReportModal({
     return `${origin}/dashboard/campaign/analysis?job=${encodeURIComponent(id)}`;
   }, [data?.job_id, jobId]);
 
-  // ⏰ Time-of-day lift windows (top-3 hours by score = 0.6*p50(ER) + 0.4*(avgViews/overallAvgViews))
+  // ⏰ Time-of-day lift windows（Top-3 小时段）
   const timeWindows = useMemo(() => {
     const items = rowsAll
       .map((r) => {
@@ -295,7 +329,7 @@ export default function ReportModal({
     return { head, mid, tail };
   }, [kols]);
 
-  // 🔔 Potential triggers (light heuristics from text + verified share)
+  // 🔔 Potential triggers（文案/verified share 启发式）
   const potentialTriggers = useMemo(() => {
     const text = rowsAll.map((r) => (r.textContent || "").toLowerCase()).join(" ");
     const hits: string[] = [];
@@ -320,19 +354,11 @@ export default function ReportModal({
     return best;
   }, [rowsAll]);
 
-  /** ======= report text (short, pure-text, with light emojis) ======= */
+  /** ======= report text（纯文本 + 轻度 emoji） ======= */
   const report = useMemo(() => {
     const lines: string[] = [];
-    lines.push(`PolinaOS Twitter Performance Report`);
-    lines.push("");
-    lines.push(`Ticker: ${ticker}`);
-    lines.push(`CA: ${contractAddress}`);
-    lines.push(`Time Window: since ${fmtDate(data?.start_date)} until ${fmtDate(data?.end_date)}`);
-    lines.push(`Statistical caliber:`);
-    lines.push(`- Engagements = Likes + Retweets + Replies`);
-    lines.push(`- Avg ER = Avg Engs / Avg Views`);
-    lines.push(`Source: @PolinaAIOS ${deeplink}`);
-    lines.push("");
+
+    // —— Executive Summary（Rich & Dynamic，两句） ——
     const execSummary = buildExecutiveSummary(rowsAll, {
       mode: "rich",
       emoji: true,
@@ -343,6 +369,20 @@ export default function ReportModal({
     });
     lines.push(execSummary);
     lines.push("");
+
+    // —— Header / Stat Caliber ——
+    lines.push(`PolinaOS Twitter Performance Report`);
+    lines.push("");
+    lines.push(`Ticker: ${ticker}`);
+    lines.push(`CA: ${contractAddress}`);
+    lines.push(`Time Window: since ${fmtDate(data?.start_date)} until ${fmtDate(data?.end_date)}`);
+    lines.push(`Statistical caliber:`);
+    lines.push(`- Engagements = Likes + Retweets + Replies`);
+    lines.push(`- Avg ER = Avg Engs / Avg Views`);
+    lines.push(`Source: @PolinaAIOS ${deeplink}`);
+    lines.push("");
+
+    // —— Executive Snapshot ——
     lines.push(`1) Executive Snapshot 📌`);
     lines.push(`- 🧵 Total Tweets ${compact(aggAll.tweets)} vs Verified Tweets ${compact(aggVer.tweets)}`);
     lines.push(`- 👀 Total Views ${compact(aggAll.views)} vs Verified Views ${compact(aggVer.views)}`);
@@ -350,7 +390,12 @@ export default function ReportModal({
     lines.push(`- 💬 Total Engagements ${compact(aggAll.engs)} vs Verified Engagements ${compact(aggVer.engs)}`);
     lines.push(`- ✨ Avg Engagements ${compact(avgAllEngs)} vs Verified Avg Engagements ${compact(avgVerEngs)}`);
     lines.push(`- 📊 ER (overall) = ${pct(aggAll.er)}`);
-    lines.push(`- 📐 ER distribution (per-tweet): p50 ${pct(erPercentiles.p50)}, p90 ${pct(erPercentiles.p90)}, p99 ${pct(erPercentiles.p99)}`);
+    lines.push(`- 📈 Avg ER (recommended) = ${pct(avgAllER)}`);
+    lines.push(
+      `- 📐 ER distribution (per-tweet): p50 ${pct(erPercentiles.p50)}, p90 ${pct(erPercentiles.p90)}, p99 ${pct(
+        erPercentiles.p99
+      )}`
+    );
     lines.push(`- ✅ Verified views share: ${pct(verShare)}`);
     lines.push(`- 🔖 Top themes: ${topThemes.length ? topThemes.join(", ") : "—"}`);
     if (bestTweetOverall) {
@@ -361,6 +406,8 @@ export default function ReportModal({
       );
     }
     lines.push("");
+
+    // —— Shiller Leaderboard（总榜，emoji 行内格式） ——
     lines.push(`2) Shiller Leaderboard 🏆 (Overall Score)`);
     for (const k of kols.slice(0, 5)) {
       const best = k.bestTweet ? ` | best → ${k.bestTweet.link ?? "(no link)"}` : "";
@@ -371,6 +418,8 @@ export default function ReportModal({
       );
     }
     lines.push("");
+
+    // —— Segmented Leaderboards（3A–3F） ——
     lines.push(`3) Segmented Leaderboards (omit if empty)`);
     const section = (title: string, arr: typeof kols) => {
       if (!arr.length) return;
@@ -384,7 +433,6 @@ export default function ReportModal({
       }
       lines.push("");
     };
-    section(`3A. High-Impact 🥇 (overall Top 3)`, kols.slice(0, 3));
     const viralSpikers = kols.filter((k) => k.count <= 2 && k.er >= 0.05).sort((a, b) => b.er - a.er).slice(0, 5);
     const volumeGrinders = kols
       .filter((k) => k.count >= Math.max(5, Math.ceil(rowsAll.length / 150)))
@@ -401,11 +449,14 @@ export default function ReportModal({
       const medianViews = xs.length ? (xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2) : 0;
       return kols.filter((k) => k.views <= medianViews && k.er >= 0.03).sort((a, b) => b.er - a.er).slice(0, 5);
     })();
+    section(`3A. High-Impact 🥇 (overall Top 3)`, kols.slice(0, 3));
     section(`3B. Viral Spikers ⚡ (≤2 tweets & ER ≥ 5%)`, viralSpikers);
     section(`3C. Volume Grinders 🔁 (≥5 tweets)`, volumeGrinders);
     section(`3D. Verified Leaders ✅ (verified views ≥ 50%)`, verifiedLeaders);
     section(`3E. Steady Contributors 🧱 (2–5 tweets, ER 2–5%)`, steadyContributors);
     section(`3F. Emerging 🌱 (low-view baseline, ER ≥ 3%)`, emerging);
+
+    // —— Distribution Insights（条件渲染；无信号不显示） ——
     lines.push(`4) Distribution Insights 🚚`);
     if (timeWindows.length) {
       const txt = timeWindows
@@ -424,23 +475,31 @@ export default function ReportModal({
     if (potentialTriggers.length) {
       lines.push(`- 🔔 Potential triggers: ${potentialTriggers.join(", ")}`);
     }
+
     return lines.join("\n");
   }, [
-    data,
+    // data fields（仅用到的）
+    data?.start_date,
+    data?.end_date,
+    data?.job_id,
     jobId,
+    // stat blocks
     ticker,
     contractAddress,
     aggAll,
     aggVer,
     avgAllViews,
     avgAllEngs,
+    avgAllER,
     avgVerViews,
     avgVerEngs,
     erPercentiles,
     verShare,
     topThemes,
+    // leaderboards & inputs
     kols,
     rowsAll,
+    // insights
     timeWindows,
     reachStructure,
     potentialTriggers,
@@ -448,15 +507,13 @@ export default function ReportModal({
     deeplink,
   ]);
 
-  /** ======= render ======= */
-  if (!open) return null;
-
+  /** ======= handlers ======= */
   const onCopy = async () => {
-    // try Clipboard API
+    // Clipboard API
     try {
       await navigator.clipboard.writeText(report);
     } catch {
-      // minimal, silent fallback (no popup)
+      // 静默回退（不弹窗）
       try {
         const ta = document.createElement("textarea");
         ta.value = report;
@@ -468,7 +525,7 @@ export default function ReportModal({
         document.execCommand("copy");
         document.body.removeChild(ta);
       } catch {
-        // ignore — still show "Copied" per requirement
+        // ignore
       }
     }
     setCopied(true);
@@ -478,6 +535,9 @@ export default function ReportModal({
       copyTimerRef.current = null;
     }, 2000);
   };
+
+  /** ======= render ======= */
+  if (!open) return null;
 
   return (
     <div
@@ -515,7 +575,7 @@ export default function ReportModal({
           </div>
         </div>
 
-        {/* body */}
+        {/* body — use the same scroll container style as AnalysisConsole */}
         <div
           ref={panelRef}
           tabIndex={-1}
