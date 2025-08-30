@@ -7,7 +7,7 @@ import { useGeckoSearch, type TokenOption } from "@/hooks/useGeckoSearch";
 
 export default function InputCard({
   onRun,
-  deepLinkUrl, // 仍保留入参，但不显示 Copy 按钮
+  deepLinkUrl,
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;
@@ -26,25 +26,6 @@ export default function InputCard({
     tokenAddress: "",
   });
 
-  type SelectedMeta = {
-    networkId?: string;
-    symbol?: string;
-    name?: string;
-    imageUrl?: string;
-    priceUsd?: number;
-    marketCapUsd?: number;
-    reserveUsd?: number;
-    volume24hUsd?: number;
-    createdAt?: string;
-    dex?: string;
-    // 新增：外链
-    dexUrl?: string;
-    twitter?: string | null;
-    telegram?: string | null;
-    website?: string | null;
-  };
-  const [selectedMeta, setSelectedMeta] = useState<SelectedMeta | null>(null);
-
   const preferredChains = useMemo(() => ["solana", "ethereum"], []);
   const { query: hookQuery, setQuery: setHookQuery, results, loading, error } =
     useGeckoSearch({ preferredChains, debounceMs: 300, limit: 10 });
@@ -55,7 +36,7 @@ export default function InputCard({
 
   const canRun = useMemo(() => Boolean(form.tokenAddress?.trim()), [form.tokenAddress]);
 
-  const applySelection = async (opt: TokenOption | null) => {
+  const applySelection = (opt: TokenOption | null) => {
     if (!opt) return;
     const next: AnalysisInput = {
       ...form,
@@ -68,48 +49,8 @@ export default function InputCard({
     };
     setForm(next);
     setLocalQuery(`${opt.symbol} · ${shortAddr(opt.tokenAddress)}`);
-
-    // 先乐观设置基础元信息
-    setSelectedMeta({
-      networkId: opt.chain,
-      symbol: opt.symbol,
-      name: opt.name,
-      imageUrl: opt.logo ?? undefined,
-      priceUsd: opt.priceUsd ?? undefined,
-      marketCapUsd: (opt as any).marketCap ?? (opt as any).fdv ?? undefined,
-      reserveUsd: (opt as any).liquidity,
-      volume24hUsd: (opt as any).vol24h,
-      createdAt: (opt as any).createdAt ?? undefined,
-      dex: opt.dex ?? undefined,
-    });
-
     onRun(next);
     setMode("frozen");
-
-    // 抓 socials（不阻塞 UI）
-    try {
-      const qs = new URLSearchParams({ chain: opt.chain, address: opt.tokenAddress || "" });
-      const r = await fetch(`/api/dexscreener/info?${qs.toString()}`);
-      if (r.ok) {
-        const data = await r.json();
-        setSelectedMeta((prev) => ({
-          ...(prev || {}),
-          dexUrl:
-            data?.dexUrl ||
-            (opt.chain && opt.tokenAddress
-              ? `https://dexscreener.com/${opt.chain}/${opt.tokenAddress}`
-              : undefined),
-          twitter: data?.twitter ?? null,
-          telegram: data?.telegram ?? null,
-          website: data?.website ?? null,
-          createdAt: data?.createdAt || prev?.createdAt,
-        }));
-      } else {
-        // 失败时静默
-      }
-    } catch {
-      // 静默
-    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -147,10 +88,7 @@ export default function InputCard({
               setLocalQuery(v);
               setActiveIdx(0);
               setHookQuery(v);
-              if (!v.trim()) {
-                setForm((f) => ({ ...f, projectName: "", tokenAddress: "" }));
-                setSelectedMeta(null);
-              }
+              if (!v.trim()) setForm((f) => ({ ...f, projectName: "", tokenAddress: "" }));
             }}
             onKeyDown={onKeyDown}
             aria-expanded={(results?.length ?? 0) > 0}
@@ -185,10 +123,10 @@ export default function InputCard({
                     tokenAddress={it.tokenAddress}
                     dex={it.dex ?? undefined}
                     priceUsd={it.priceUsd ?? undefined}
-                    marketCapUsd={(it as any).marketCap ?? (it as any).fdv ?? undefined}
-                    reserveUsd={(it as any).liquidity}
-                    volume24hUsd={(it as any).vol24h}
-                    createdAt={(it as any).createdAt ?? undefined}
+                    marketCapUsd={it.marketCap ?? it.fdv ?? undefined}
+                    reserveUsd={it.liquidity}
+                    volume24hUsd={it.vol24h}
+                    createdAt={undefined}
                   />
                 ))}
             </div>
@@ -200,11 +138,23 @@ export default function InputCard({
           projectName={form.projectName}
           tokenAddress={form.tokenAddress}
           frozenText={localQuery || `${form.projectName} · ${shortAddr(form.tokenAddress)}`}
+          deepLinkUrl={deepLinkUrl}
           onChange={() => setMode("editing")}
-          meta={selectedMeta || undefined}
         />
       )}
-      {/* 外围重复信息已移除 */}
+
+      {/* Read-only summary */}
+      <div className="mt-4 text-xs text-gray-400 space-y-1">
+        <div className="truncate">
+          <span className="text-gray-400">Project: </span>
+          <span className="text-gray-200">{form.projectName || "-"}</span>
+        </div>
+        <div className="truncate">
+          <span className="text-gray-400">Token: </span>
+          <span className="text-gray-200">{form.tokenAddress || "-"}</span>
+        </div>
+        {!canRun && <div className="text-[11px] text-amber-400/80">Tip: Select a token from the list to start analysis automatically.</div>}
+      </div>
     </div>
   );
 }
@@ -214,115 +164,42 @@ function FrozenView({
   projectName,
   tokenAddress,
   frozenText,
+  deepLinkUrl,
   onChange,
-  meta,
 }: {
   projectName?: string;
   tokenAddress?: string;
   frozenText?: string;
+  deepLinkUrl?: string;
   onChange?: () => void;
-  meta?: {
-    networkId?: string;
-    symbol?: string;
-    name?: string;
-    imageUrl?: string;
-    priceUsd?: number;
-    marketCapUsd?: number;
-    reserveUsd?: number;
-    volume24hUsd?: number;
-    createdAt?: string;
-    dex?: string;
-    dexUrl?: string;
-    twitter?: string | null;
-    telegram?: string | null;
-    website?: string | null;
-  };
 }) {
-  const dexUrl =
-    meta?.dexUrl ||
-    (meta?.networkId && tokenAddress
-      ? `https://dexscreener.com/${meta.networkId}/${tokenAddress}`
-      : tokenAddress
-      ? `https://dexscreener.com/search?q=${encodeURIComponent(tokenAddress)}`
-      : undefined);
-
-  const socialsFallback = tokenAddress
-    ? `https://dexscreener.com/search?q=${encodeURIComponent(tokenAddress)}`
-    : undefined;
-
-  const btn = (href?: string | null, label?: string, extraClass = "") =>
-    href ? (
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        className={`px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-[12px] font-medium text-gray-100 ${extraClass}`}
-      >
-        {label}
-      </a>
-    ) : null;
+  const copy = async () => {
+    try {
+      if (!deepLinkUrl) return;
+      await navigator.clipboard.writeText(deepLinkUrl);
+    } catch {
+      window.prompt("Copy this link:", deepLinkUrl || "");
+    }
+  };
 
   return (
-    <div className="w-full rounded-xl border border-white/10 bg-white/[0.04] p-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0 flex items-center gap-3">
-          <div className="relative h-8 w-8 rounded-full overflow-hidden bg-white/10 shrink-0">
-            {meta?.imageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={meta.imageUrl} alt={meta.symbol || projectName || "token"} className="h-full w-full object-cover" loading="lazy" />
-            ) : (
-              <div className="h-full w-full flex items-center justify-center text-[10px] text-gray-300">
-                {(meta?.symbol || projectName || "?").slice(0, 2)}
-              </div>
-            )}
-          </div>
-          <div className="min-w-0">
-            <div className="text-sm text-white truncate">{projectName || "-"}</div>
-            <div className="text-[11px] text-gray-400 truncate">
-              {frozenText || shortAddr(tokenAddress)}
-            </div>
-          </div>
-        </div>
-
-        <div className="ml-3 flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={onChange}
-            className="px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-xs font-medium text-gray-100"
-            title="Change token"
-          >
-            Change
-          </button>
+    <div className="w-full rounded-xl border border-white/10 bg-white/[0.04] p-3 flex items-center justify-between">
+      <div className="min-w-0">
+        <div className="text-sm text-white truncate">{projectName || "-"}</div>
+        <div className="text-[11px] text-gray-400 truncate">
+          {frozenText || shortAddr(tokenAddress)}
         </div>
       </div>
 
-      {/* 统计 chips */}
-      <div className="mt-3 flex flex-wrap items-center gap-1.5">
-        {chip("Price", typeof meta?.priceUsd === "number" ? `$${meta?.priceUsd.toFixed(6)}` : "-")}
-        {chip("MktCap", moneyShort(meta?.marketCapUsd))}
-        {chip("24H Vol", moneyShort(meta?.volume24hUsd))}
-        {chip("Liq", moneyShort(meta?.reserveUsd))}
-        {chip("Age", ageText(meta?.createdAt))}
-        {chip("DEX", meta?.dex || "-")}
-      </div>
-
-      {/* 外链按钮：真实 socials，没数据再兜底 */}
-      <div className="mt-2 flex flex-wrap gap-2">
-        {btn(dexUrl, "View on Dexscreener", "border-emerald-400/20 bg-emerald-400/10 hover:bg-emerald-400/15 text-emerald-200")}
-        {btn(meta?.twitter, "Twitter")}
-        {btn(meta?.telegram, "Telegram")}
-        {btn(meta?.website, "Website")}
-        {!meta?.twitter && !meta?.telegram && !meta?.website && socialsFallback && (
-          <a
-            href={socialsFallback}
-            target="_blank"
-            rel="noreferrer"
-            className="px-2.5 py-1.5 rounded-md border border-indigo-400/20 bg-indigo-400/10 hover:bg-indigo-400/15 text-[12px] font-medium text-indigo-200"
-            title="Open socials panel on Dexscreener (via search)"
-          >
-            Socials (Dexscreener)
-          </a>
-        )}
+      <div className="ml-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onChange}
+          className="px-2.5 py-1.5 rounded-md border border-white/10 bg-white/10 hover:bg-white/15 text-xs font-medium text-gray-100"
+          title="Change token"
+        >
+          Change
+        </button>
       </div>
     </div>
   );
@@ -362,7 +239,26 @@ function ResultCard({
   onClick,
   onMouseEnter,
 }: ResultCardProps) {
-  const age = React.useMemo(() => ageText(createdAt), [createdAt]);
+  const age = React.useMemo(() => {
+    if (!createdAt) return "-";
+    const t = new Date(createdAt).getTime();
+    if (Number.isNaN(t)) return "-";
+    const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+    if (days < 1) return "new";
+    if (days < 30) return `${days}d`;
+    const months = Math.floor(days / 30);
+    const rest = days % 30;
+    return `${months}mo${rest ? ` ${rest}d` : ""}`;
+  }, [createdAt]);
+
+  const chip = (label: string, value?: React.ReactNode) => (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-white/10 bg-white/[0.06] text-[11px] text-gray-300">
+      <span className="text-gray-400">{label}:</span>
+      <span className="text-gray-200">{value ?? "-"}</span>
+    </span>
+  );
+
+  const short = (addr?: string) => (!addr ? "-" : addr.length <= 14 ? addr : `${addr.slice(0, 8)}…${addr.slice(-6)}`);
 
   return (
     <button
@@ -410,7 +306,7 @@ function ResultCard({
       </div>
 
       <div className="mt-1 text-[11px] text-gray-500 truncate">
-        TOKEN: {shortAddr(tokenAddress)}
+        TOKEN: {short(tokenAddress)}
       </div>
     </button>
   );
@@ -430,27 +326,4 @@ function moneyShort(v?: number) {
   if (abs >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `${(v / 1_000).toFixed(2)}K`;
   return v.toFixed(2);
-}
-
-// 统一年龄文本
-function ageText(createdAt?: string) {
-  if (!createdAt) return "-";
-  const t = new Date(createdAt).getTime();
-  if (Number.isNaN(t)) return "-";
-  const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
-  if (days < 1) return "new";
-  if (days < 30) return `${days}d`;
-  const months = Math.floor(days / 30);
-  const rest = days % 30;
-  return `${months}mo${rest ? ` ${rest}d` : ""}`;
-}
-
-// chip 小徽章
-function chip(label: string, value?: React.ReactNode) {
-  return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-white/10 bg-white/[0.06] text-[11px] text-gray-300">
-      <span className="text-gray-400">{label}:</span>
-      <span className="text-gray-200">{value ?? "-"}</span>
-    </span>
-  );
 }
