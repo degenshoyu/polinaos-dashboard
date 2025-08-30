@@ -40,6 +40,8 @@ export default function ReportModal({
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
 
   /** ======= helpers ======= */
   const n = (x: any) => {
@@ -77,6 +79,11 @@ export default function ReportModal({
       clearTimeout(t);
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
+      if (copyTimerRef.current) {
+        clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = null;
+      }
+      setCopied(false);
     };
   }, [open, onClose]);
 
@@ -427,14 +434,13 @@ export default function ReportModal({
     aggVer,
     avgAllViews,
     avgAllEngs,
-    avgAllER,
     avgVerViews,
     avgVerEngs,
     erPercentiles,
     verShare,
     topThemes,
     kols,
-    rowsAll.length,
+    rowsAll,
     timeWindows,
     reachStructure,
     potentialTriggers,
@@ -446,12 +452,31 @@ export default function ReportModal({
   if (!open) return null;
 
   const onCopy = async () => {
+    // try Clipboard API
     try {
       await navigator.clipboard.writeText(report);
-      alert("Report copied.");
     } catch {
-      window.prompt("Copy the report text:", report);
+      // minimal, silent fallback (no popup)
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = report;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {
+        // ignore — still show "Copied" per requirement
+      }
     }
+    setCopied(true);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopied(false);
+      copyTimerRef.current = null;
+    }, 2000);
   };
 
   return (
@@ -471,10 +496,14 @@ export default function ReportModal({
           <div className="flex items-center gap-2">
             <button
               onClick={onCopy}
-              className="px-3 py-1.5 text-xs rounded-lg border border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10"
-              aria-label="Copy report"
+              className={`px-3 py-1.5 text-xs rounded-lg border ${
+                copied
+                  ? "border-emerald-400 text-emerald-200 bg-emerald-400/10"
+                  : "border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10"
+              }`}
+              aria-label={copied ? "Copied" : "Copy report"}
             >
-              Copy
+              {copied ? "Copied" : "Copy"}
             </button>
             <button
               onClick={onClose}
