@@ -8,6 +8,10 @@ import {
   integer,
   numeric,
   index,
+  boolean,
+  bigint,
+  pgEnum,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -109,3 +113,147 @@ export type NewSearch = typeof searches.$inferInsert;
 
 export type AIUnderstanding = typeof aiUnderstandings.$inferSelect;
 export type NewAIUnderstanding = typeof aiUnderstandings.$inferInsert;
+
+/* ===================== KOL Leaderboard — enums ===================== */
+export const tweetType = pgEnum("tweet_type", [
+  "tweet",
+  "retweet",
+  "quote",
+  "reply",
+]);
+export const mentionSource = pgEnum("mention_source", [
+  "ca",
+  "ticker",
+  "phrase",
+  "hashtag",
+  "upper",
+  "llm",
+]);
+
+/* ===================== kols ===================== */
+export const kols = pgTable(
+  "kols",
+  {
+    twitterUid: text("twitter_uid").primaryKey(),
+    twitterUsername: text("twitter_username").notNull().unique(),
+    displayName: text("display_name"),
+    active: boolean("active").notNull().default(true),
+    notes: text("notes"),
+    accountCreationDate: timestamp("account_creation_date", {
+      withTimezone: true,
+    }),
+    followers: integer("followers").notNull().default(0),
+    following: integer("following").notNull().default(0),
+    bio: text("bio"),
+    profileImgUrl: text("profile_img_url"),
+  },
+  (t) => ({
+    byFollowers: index("idx_kols_followers").on(t.followers.desc()),
+  }),
+);
+
+export const kolsRelations = relations(kols, ({ many }) => ({
+  tweets: many(kolTweets),
+}));
+
+/* ===================== kol_tweets ===================== */
+/** Note: use tweet_id as the primary key to simplify upserts */
+export const kolTweets = pgTable(
+  "kol_tweets",
+  {
+    tweetId: text("tweet_id").primaryKey(), // unique tweet id as PK
+    twitterUid: text("twitter_uid")
+      .notNull()
+      .references(() => kols.twitterUid, { onUpdate: "cascade" }),
+    twitterUsername: text("twitter_username").notNull(),
+
+    type: tweetType("type").notNull().default("tweet"),
+    textContent: text("text_content"),
+
+    views: bigint("views", { mode: "bigint" })
+      .notNull()
+      .default(sql`0`),
+    likes: integer("likes").notNull().default(0),
+    retweets: integer("retweets").notNull().default(0),
+    replies: integer("replies").notNull().default(0),
+
+    publishDate: timestamp("publish_date", { withTimezone: true }).notNull(),
+    statusLink: text("status_link"),
+
+    // helpful extras for ranking / filters
+    authorIsVerified: boolean("author_is_verified"),
+    lang: text("lang"),
+
+    replyToTweetId: text("reply_to_tweet_id"),
+    quotedTweetId: text("quoted_tweet_id"),
+    retweetedTweetId: text("retweeted_tweet_id"),
+
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+
+    rawJson: jsonb("raw_json"),
+  },
+  (t) => ({
+    byPublish: index("idx_kol_tweets_pub").on(t.publishDate.desc()),
+    byUidPublish: index("idx_kol_tweets_uid_pub").on(
+      t.twitterUid,
+      t.publishDate.desc(),
+    ),
+  }),
+);
+
+export const kolTweetsRelations = relations(kolTweets, ({ one, many }) => ({
+  kol: one(kols, {
+    fields: [kolTweets.twitterUid],
+    references: [kols.twitterUid],
+  }),
+  mentions: many(tweetTokenMentions),
+}));
+
+/* ===================== tweet_token_mentions ===================== */
+export const tweetTokenMentions = pgTable(
+  "tweet_token_mentions",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tweetId: text("tweet_id")
+      .notNull()
+      .references(() => kolTweets.tweetId, { onDelete: "cascade" }),
+    tokenKey: text("token_key").notNull(), // canonical key (contract or normalized ticker, e.g. "usduc")
+    tokenDisplay: text("token_display"), // for UI ($USDUC or short addr)
+    confidence: integer("confidence").notNull().default(100), // store 0..100 for simplicity
+    source: mentionSource("source").notNull(), // ca|ticker|phrase|hashtag|upper|llm
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    uniqTweetToken: uniqueIndex("uniq_tweet_token").on(t.tweetId, t.tokenKey),
+    byToken: index("idx_mentions_token").on(t.tokenKey),
+  }),
+);
+
+export const tweetTokenMentionsRelations = relations(
+  tweetTokenMentions,
+  ({ one }) => ({
+    tweet: one(kolTweets, {
+      fields: [tweetTokenMentions.tweetId],
+      references: [kolTweets.tweetId],
+    }),
+  }),
+);
+
+/* ===================== Inferred Types (new) ===================== */
+export type Kol = typeof kols.$inferSelect;
+export type NewKol = typeof kols.$inferInsert;
+
+export type KolTweet = typeof kolTweets.$inferSelect;
+export type NewKolTweet = typeof kolTweets.$inferInsert;
+
+export type TweetTokenMention = typeof tweetTokenMentions.$inferSelect;
+export type NewTweetTokenMention = typeof tweetTokenMentions.$inferInsert;

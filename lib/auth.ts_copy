@@ -1,3 +1,4 @@
+// lib/auth.ts
 import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import bs58 from "bs58";
@@ -5,14 +6,6 @@ import nacl from "tweetnacl";
 import { db } from "@/lib/db/client";
 import { users } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
-
-/** ---- Admin 白名单（用小写比较，env 里也写小写） ---- */
-const ADMIN_SET = new Set(
-  (process.env.ADMIN_WALLETS ?? "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean),
-);
 
 /** Verify a Solana signature against a plaintext message. */
 function verifySolanaSignature(
@@ -34,10 +27,12 @@ function verifySolanaSignature(
 async function findOrCreateUserByWallet(walletAddressRaw: string) {
   const walletAddress = walletAddressRaw.toLowerCase();
 
+  // Try to find first
   const existing = await db.query.users.findFirst({
     where: eq(users.walletAddress, walletAddress),
   });
   if (existing) {
+    // Optional: update lastLoginAt/updatedAt
     await db
       .update(users)
       .set({ lastLoginAt: new Date(), updatedAt: new Date() })
@@ -45,6 +40,7 @@ async function findOrCreateUserByWallet(walletAddressRaw: string) {
     return existing;
   }
 
+  // Insert new (unique on wallet_address prevents duplicates)
   const [inserted] = await db
     .insert(users)
     .values({
@@ -56,6 +52,7 @@ async function findOrCreateUserByWallet(walletAddressRaw: string) {
 
   if (inserted) return inserted;
 
+  // If conflict happened concurrently, fetch again
   const fallback = await db.query.users.findFirst({
     where: eq(users.walletAddress, walletAddress),
   });
@@ -65,7 +62,6 @@ async function findOrCreateUserByWallet(walletAddressRaw: string) {
 
 export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt" as const },
-
   providers: [
     CredentialsProvider({
       name: "Solana",
@@ -83,67 +79,33 @@ export const authOptions: NextAuthOptions = {
         const ok = verifySolanaSignature(publicKey, message, signature);
         if (!ok) return null;
 
-        // ✅ Persist user (lowercased) in Postgres
+        // ✅ Persist user (find-or-create) in Postgres
         const user = await findOrCreateUserByWallet(publicKey);
 
-        // ✅ 返回时把两份地址都带上（兼容旧字段），以及 DB 用户 id
+        // Return a compact user object; id will flow into jwt/session callbacks.
         return {
-          id: user.id, // DB uuid
-          name: user.walletAddress, // 旧代码可能读 name
-          address: user.walletAddress, // 旧代码读 address
-          walletAddress: user.walletAddress, // 新代码读 walletAddress
+          id: user.id, // <-- database user id (uuid)
+          name: user.walletAddress, // Navbar fallback
+          address: user.walletAddress, // explicit address field
         } as any;
       },
     }),
   ],
-
   callbacks: {
     async jwt({ token, user }) {
-      // 登录当次：把地址放进 token；之后保留
-      const addrFromUser =
-        (user as any)?.walletAddress ||
-        (user as any)?.address ||
-        (user as any)?.name;
-
+      // First login: copy from `user`; subsequent calls keep existing token
       if (user) {
         token.id = (user as any).id;
-        token.address = (addrFromUser ?? token.address) as any;
-        (token as any).walletAddress =
-          addrFromUser ?? (token as any).walletAddress;
+        token.address = (user as any).address || (user as any).name;
       }
-
-      // 统一拿一个地址（优先 token.walletAddress，再到 token.address/name/sub）
-      const wallet =
-        ((token as any).walletAddress as string) ||
-        ((token as any).address as string) ||
-        (token.name as string) ||
-        (token.sub as string) ||
-        "";
-
-      // ✅ 计算管理员（小写比较）
-      (token as any).isAdmin = wallet
-        ? ADMIN_SET.has(wallet.toLowerCase())
-        : false;
-
       return token;
     },
-
     async session({ session, token }) {
-      // 把 token 里的字段透传到 session（同时兼容旧字段）
-      const wallet =
-        ((token as any).walletAddress as string) ||
-        ((token as any).address as string) ||
-        (session.user?.name as string) ||
-        "";
-
+      // Expose id/address to the client
       (session.user as any).id = token.id;
-      (session.user as any).walletAddress = wallet;
-      (session.user as any).address = wallet; // 兼容旧组件
-      (session.user as any).isAdmin = Boolean((token as any).isAdmin);
-
+      (session.user as any).address = token.address || session.user?.name;
       return session;
     },
   },
-
   secret: process.env.NEXTAUTH_SECRET,
 };

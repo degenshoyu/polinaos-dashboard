@@ -5,6 +5,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { toPng } from "html-to-image";
 import TweeterShareCard, { MinimalTweet, ShareMetric } from "@/components/TweeterShareCard";
+import {
+  filterSpamTweets,
+  resolveCAFromJob,
+  resolveCoreFromJob,
+  BASE58_STRICT,
+} from "@/components/filters/spamDetection";
 
 /** Minimal Tweet type extracted from jobProxy payload */
 type TweetRow = MinimalTweet & {
@@ -89,7 +95,24 @@ export default function StatisticSummary({
   };
 
   /** Base arrays */
-  const rowsAll = useMemo(() => (data?.tweets ?? []).map((t) => ({ ...t })), [data]);
+  const rowsAllRaw = useMemo(() => (data?.tweets ?? []).map((t) => ({ ...t })), [data]);
+
+  const coreTicker = useMemo(() => resolveCoreFromJob(data?.keyword), [data]);
+  const contractAddress = useMemo(() => {
+    const ca = resolveCAFromJob(data?.keyword, rowsAllRaw);
+    return ca && BASE58_STRICT.test(ca) ? ca : null;
+  }, [data, rowsAllRaw]);
+
+  const rowsAll = useMemo(() => {
+    const rules = {
+      coreTicker: coreTicker ?? null,
+      contractAddress: contractAddress,
+      maxOtherTickers: 2,
+    };
+    return filterSpamTweets(rowsAllRaw, rules);
+  }, [rowsAllRaw, coreTicker, contractAddress]);
+
+  const spamDetected = useMemo(() => Math.max(0, rowsAllRaw.length - rowsAll.length), [rowsAllRaw, rowsAll]);
   const rowsVerified = useMemo(() => rowsAll.filter((t) => t.isVerified), [rowsAll]);
 
   /** Aggregates for All */
@@ -563,7 +586,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
       {!loading && !err && rowsAll.length > 0 && (
         <div className="grid grid-cols-1 gap-6">
-          {/* --- (1) Search summary + All totals + Verified totals：外层包一层，方便一起截图 --- */}
+          {/* --- (1) Search summary + All totals + Verified totals --- */}
           <div ref={summaryTotalsRef} className="grid grid-cols-1 gap-6">
             {/* Search summary */}
             <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
@@ -584,7 +607,15 @@ function loadImage(src: string): Promise<HTMLImageElement> {
                     <span className="text-gray-400">Tweets fetched: </span>
                     <span className="text-white/80">{compact(data!.tweets_count!)}</span>
                   </div>
-                )}
+                  )}
+                  <div>
+                    <span className="text-gray-400">Spam detected: </span>
+                    <span className="text-white/80">{compact(spamDetected)}</span>
+                </div>
+                <div>
+                  <span className="text-gray-400">Analyzed (clean): </span>
+                  <span className="text-white/80">{compact(rowsAll.length)}</span>
+                </div>
               </div>
             </div>
 

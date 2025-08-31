@@ -8,6 +8,20 @@
       "when": 1755414373547,
       "tag": "0000_parallel_echo",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1756609327625,
+      "tag": "0001_lying_black_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1756610625352,
+      "tag": "0002_striped_gideon",
+      "breakpoints": true
     }
   ]
 }

@@ -315,11 +315,6 @@ export default function CommitmentIndex({
           </div>
         </div>
 
-        {/* Meta */}
-        <div className="text-xs text-white/60 mb-3">
-          Filtered by: {`Ticker: ${myTickerLabel}`} · {`Contract: ${contractLabel}`}
-        </div>
-
         {/* Body states */}
         {!jobId && <p className="text-sm text-gray-500">Waiting for AI analysis… it appears here once tweets are collected.</p>}
         {error && <p className="text-sm text-rose-300">Error: {error}</p>}
