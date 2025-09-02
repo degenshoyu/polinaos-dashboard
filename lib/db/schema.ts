@@ -12,6 +12,7 @@ import {
   bigint,
   pgEnum,
   uniqueIndex,
+  primaryKey, // ✅ 新增：用于命名主键
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -71,10 +72,7 @@ export const searches = pgTable(
 );
 
 export const searchesRelations = relations(searches, ({ one, many }) => ({
-  user: one(users, {
-    fields: [searches.userId],
-    references: [users.id],
-  }),
+  user: one(users, { fields: [searches.userId], references: [users.id] }),
   aiUnderstands: many(aiUnderstandings),
 }));
 
@@ -107,10 +105,8 @@ export const aiRelations = relations(aiUnderstandings, ({ one }) => ({
 /* ===================== Inferred Types ===================== */
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
-
 export type Search = typeof searches.$inferSelect;
 export type NewSearch = typeof searches.$inferInsert;
-
 export type AIUnderstanding = typeof aiUnderstandings.$inferSelect;
 export type NewAIUnderstanding = typeof aiUnderstandings.$inferInsert;
 
@@ -148,7 +144,7 @@ export const kols = pgTable(
     profileImgUrl: text("profile_img_url"),
   },
   (t) => ({
-    byFollowers: index("idx_kols_followers").on(t.followers.desc()),
+    byFollowers: index("idx_kols_followers").on(t.followers),
   }),
 );
 
@@ -157,11 +153,10 @@ export const kolsRelations = relations(kols, ({ many }) => ({
 }));
 
 /* ===================== kol_tweets ===================== */
-/** Note: use tweet_id as the primary key to simplify upserts */
 export const kolTweets = pgTable(
   "kol_tweets",
   {
-    tweetId: text("tweet_id").primaryKey(), // unique tweet id as PK
+    tweetId: text("tweet_id").notNull(),
     twitterUid: text("twitter_uid")
       .notNull()
       .references(() => kols.twitterUid, { onUpdate: "cascade" }),
@@ -198,10 +193,15 @@ export const kolTweets = pgTable(
     rawJson: jsonb("raw_json"),
   },
   (t) => ({
-    byPublish: index("idx_kol_tweets_pub").on(t.publishDate.desc()),
+    pkTweetId: primaryKey({
+      name: "pk_kol_tweets_tweet_id",
+      columns: [t.tweetId],
+    }),
+
+    byPublish: index("idx_kol_tweets_pub").on(t.publishDate),
     byUidPublish: index("idx_kol_tweets_uid_pub").on(
       t.twitterUid,
-      t.publishDate.desc(),
+      t.publishDate,
     ),
   }),
 );
@@ -226,7 +226,7 @@ export const tweetTokenMentions = pgTable(
       .references(() => kolTweets.tweetId, { onDelete: "cascade" }),
     tokenKey: text("token_key").notNull(), // canonical key (contract or normalized ticker, e.g. "usduc")
     tokenDisplay: text("token_display"), // for UI ($USDUC or short addr)
-    confidence: integer("confidence").notNull().default(100), // store 0..100 for simplicity
+    confidence: integer("confidence").notNull().default(100), // 0..100
     source: mentionSource("source").notNull(), // ca|ticker|phrase|hashtag|upper|llm
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

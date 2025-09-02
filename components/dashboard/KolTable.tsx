@@ -1,0 +1,324 @@
+// components/dashboard/KolTable.tsx
+"use client";
+
+import { useMemo, useState } from "react";
+import { RefreshCw, History } from "lucide-react";
+
+export type KolRow = {
+  twitterUid: string | null;
+  twitterUsername: string;
+  displayName?: string | null;
+  followers?: number | null;
+  profileImgUrl?: string | null;
+  // …省略无关字段
+  totalTweets?: number | null;
+  totalViews?: number | null;
+  totalEngagements?: number | null;
+  // …
+  [k: string]: any;
+};
+
+type Props = {
+  rows: KolRow[];
+  loading?: boolean;
+  onRefresh?: () => void;
+  onUpdateOne?: (handle: string) => void;
+  updatingMap?: Record<string, boolean>;
+};
+
+type SortKey = "twitterUsername" | "followers";
+type SortDir = "asc" | "desc";
+
+export default function KolTable({
+  rows,
+  loading,
+  onRefresh,
+  onUpdateOne,
+  updatingMap = {},
+}: Props) {
+  const [query, setQuery] = useState("");
+  const [pageSize, setPageSize] = useState(25);
+  const [page, setPage] = useState(1);
+  const [sortKey, setSortKey] = useState<SortKey>("followers");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  // 扫描状态与“本地覆盖 totals”
+  const [scanning, setScanning] = useState<Record<string, boolean>>({});
+  const [scanMsg, setScanMsg] = useState<Record<string, string | null>>({});
+  const [overrides, setOverrides] = useState<Record<
+    string,
+    { totalTweets: number; totalViews: number; totalEngs: number }
+  >>({});
+
+  // util
+  const toNum = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const pickNum = (r: any, keys: string[]) => {
+    for (const k of keys) if (r[k] !== undefined && r[k] !== null) return toNum(r[k]);
+    return 0;
+  };
+
+  // 取值时优先使用 overrides
+  const getTotals = (handle: string, r: KolRow) => {
+    const h = handle.replace(/^@+/, "").toLowerCase();
+    const o = overrides[h];
+    const baseTweets = pickNum(r, ["totalTweets", "total_tweets", "last7dTweets", "weeklyTweets", "tweets"]);
+    const baseViews  = pickNum(r, ["totalViews", "total_views", "last7dViews", "weeklyViews", "views"]);
+    const baseEngs   = pickNum(r, ["totalEngagements", "total_engagements", "totalEngs", "last7dEngagements", "weeklyEngagements", "engagements"]);
+    return {
+      totalTweets: o?.totalTweets ?? baseTweets,
+      totalViews:  o?.totalViews  ?? baseViews,
+      totalEngs:   o?.totalEngs   ?? baseEngs,
+    };
+  };
+
+  // er = views / engs（engs=0 显示 "—"）
+  const fmtER = (views: number, engs: number) => {
+    const v = Number(views) || 0;
+    const e = Number(engs) || 0;
+    if (v <= 0) return "0%";
+    return `${((e / v) * 100).toFixed(2)}%`;
+  };
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const base = !q
+      ? rows
+      : rows.filter((r) =>
+          (r.twitterUsername || "").toLowerCase().includes(q) ||
+          (r.displayName || "").toLowerCase().includes(q)
+        );
+    const sorted = [...base].sort((a, b) => {
+      const av = (a as any)[sortKey] ?? "";
+      const bv = (b as any)[sortKey] ?? "";
+      const res = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+      return sortDir === "asc" ? res : -res;
+    });
+    return sorted;
+  }, [rows, query, sortKey, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * pageSize;
+  const visible = filtered.slice(start, start + pageSize);
+
+  const setSort = (k: SortKey) => (k === sortKey ? setSortDir((d) => (d === "asc" ? "desc" : "asc")) : (setSortKey(k), setSortDir(k === "twitterUsername" ? "asc" : "desc")));
+
+  const headerCell = (label: string, key?: SortKey) => (
+    <th className={`py-1.5 pl-3 pr-4 font-medium tracking-wide ${key ? "cursor-pointer select-none" : ""}`} onClick={key ? () => setSort(key) : undefined} aria-sort={key === sortKey ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+      <div className="flex items-center gap-1">
+        <span>{label}</span>
+        {key === sortKey && <span className="opacity-60 text-[11px]">{sortDir === "asc" ? "▲" : "▼"}</span>}
+      </div>
+    </th>
+  );
+
+  // === 扫描：轮询 aggregate，结束后取 scan 接口返回的 totals 做最后覆盖 ===
+  const scanTimeline = async (handleRaw: string) => {
+    const handle = handleRaw.replace(/^@+/, "").toLowerCase();
+    setScanning((m) => ({ ...m, [handle]: true }));
+    setScanMsg((m) => ({ ...m, [handle]: null }));
+
+    let pollId: number | null = null;
+
+    const pollOnce = async () => {
+      try {
+        const r = await fetch(`/api/kols/aggregate?screen_name=${encodeURIComponent(handle)}&days=7`, { cache: "no-store" });
+        const j = await r.json();
+        if (j?.ok && j?.totals) {
+          setOverrides((m) => ({
+            ...m,
+            [handle]: {
+              totalTweets: toNum(j.totals.totalTweets),
+              totalViews: toNum(j.totals.totalViews),
+              totalEngs: toNum(j.totals.totalEngs),
+            },
+          }));
+        }
+      } catch {}
+    };
+
+    // 开始轮询（每 2 秒）
+    pollId = window.setInterval(pollOnce, 2000);
+    // 先来一发
+    await pollOnce();
+
+    try {
+      const res = await fetch("/api/kols/scan-tweets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ screen_name: handle }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) throw new Error(data?.error ?? `Scan failed: ${res.status}`);
+
+      // 最终覆盖：使用 scan 接口计算好的 totals
+      if (data?.totals) {
+        setOverrides((m) => ({
+          ...m,
+          [handle]: {
+            totalTweets: toNum(data.totals.totalTweets),
+            totalViews: toNum(data.totals.totalViews),
+            totalEngs: toNum(data.totals.totalEngs),
+          },
+        }));
+      }
+
+      setScanMsg((m) => ({ ...m, [handle]: `✅ scanned=${data?.scanned ?? 0}, inserted=${data?.inserted ?? 0}` }));
+      await onRefresh?.(); // 可选：顺带刷新基础行（头像/粉丝等）
+    } catch (e: any) {
+      setScanMsg((m) => ({ ...m, [handle]: `❌ ${e?.message ?? e}` }));
+    } finally {
+      if (pollId) window.clearInterval(pollId);
+      setScanning((m) => ({ ...m, [handle]: false }));
+    }
+  };
+
+  return (
+    <div className="rounded-2xl p-4 bg-white/5 backdrop-blur border border-white/10 space-y-4 text-[13px]">
+      {/* Toolbar：仅 Weekly */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex rounded-xl border border-white/10 overflow-hidden" aria-label="Date window">
+          <button role="tab" aria-selected disabled className="px-2.5 py-1.5 text-[13px] bg-white/10 cursor-default">Weekly (Last 7d)</button>
+        </div>
+        <input className="flex-1 min-w-[220px] max-w-[340px] bg-transparent border rounded px-2.5 py-1.5 text-[13px]" placeholder="Filter: handle / name" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} />
+        <div className="ml-auto flex items-center gap-2">
+          <label className="text-[11px] opacity-70">Rows / page</label>
+          <select className="bg-transparent border rounded px-2 py-1 text-[13px]" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}>
+            {[10, 25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <button onClick={onRefresh} disabled={loading} className="rounded-xl px-2.5 py-1.5 border border-white/10 hover:bg-white/10 text-[13px]">{loading ? "Refreshing…" : "Refresh"}</button>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="overflow-auto rounded-xl border border-white/10">
+        <table className="min-w-[1100px] w-full text-[13px]">
+          <thead className="text-left opacity-70 bg-white/5 sticky top-0 backdrop-blur">
+            <tr>
+              {headerCell("#")}
+              {headerCell("KOL", "twitterUsername")}
+              {headerCell("Followers", "followers")}
+              {headerCell("Total Tweets")}
+              {headerCell("Total Views")}
+              {headerCell("Total Engs.")}
+              {headerCell("ER")}
+              {headerCell("Total Shills")}
+              {headerCell("Shills’ Views")}
+              {headerCell("Shills’ Engs")}
+              {headerCell("Shills ER")}
+              {headerCell("Coins Shilled")}
+              {headerCell("Actions")}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((r, idx) => {
+              const handle = r.twitterUsername;
+              const clean = handle.replace(/^@+/, "");
+              const rowNo = (safePage - 1) * pageSize + idx + 1;
+              const isUpdating = !!updatingMap[handle];
+              const isScanning = !!scanning[clean];
+
+              const { totalTweets, totalViews, totalEngs } = getTotals(handle, r);
+
+              return (
+                <tr key={handle} className="border-t border-white/10 align-top">
+                  <td className="py-1.5 pl-3 pr-4 text-[12px] opacity-70">{rowNo}</td>
+                  <td className="py-1.5 pl-3 pr-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full overflow-hidden bg-white/10 flex items-center justify-center">
+                        {r.profileImgUrl ? <img src={r.profileImgUrl} alt={handle} className="w-full h-full object-cover" /> : <span className="text-[11px]">@</span>}
+                      </div>
+                      <div>
+                        <div className="font-medium leading-5">
+                          <a href={`https://x.com/${clean}`} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                            {r.displayName || `@${clean}`}
+                          </a>
+                        </div>
+                        <div className="text-[12px] opacity-70">@{clean}</div>
+                      </div>
+                    </div>
+                  </td>
+
+                  <td className="py-1.5 pr-4">{toNum(r.followers).toLocaleString()}</td>
+
+                  <td className="py-1.5 pr-4">{totalTweets.toLocaleString()}</td>
+                  <td className="py-1.5 pr-4">{totalViews.toLocaleString()}</td>
+                  <td className="py-1.5 pr-4">{totalEngs.toLocaleString()}</td>
+                  <td className="py-1.5 pr-4">{fmtER(totalViews, totalEngs)}</td>
+
+                  {/* 下面三组“Shills*”留 UI，不改动数据来源 */}
+                  <td className="py-1.5 pr-4">{pickNum(r, ["totalShills","shills_total","total_shills"]).toLocaleString()}</td>
+                  <td className="py-1.5 pr-4">{pickNum(r, ["shillViews","shills_views","shillsViews"]).toLocaleString()}</td>
+                  <td className="py-1.5 pr-4">{pickNum(r, ["shillEngagements","shills_engagements","shillsEngagements"]).toLocaleString()}</td>
+                  <td className="py-1.5 pr-4">{fmtER(pickNum(r, ["shillViews","shills_views","shillsViews"]), pickNum(r, ["shillEngagements","shills_engagements","shillsEngagements"]))}</td>
+
+                  <td className="py-1.5 pr-4 max-w-[16rem]">
+                    {Array.isArray(r.coinsShilled) && r.coinsShilled.length ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {r.coinsShilled.slice(0, 8).map((c: string) => (
+                          <span key={c} className="px-2 py-0.5 rounded-full text-[12px] border border-white/10 bg-white/5" title={c}>{c}</span>
+                        ))}
+                        {r.coinsShilled.length > 8 && <span className="text-[12px] opacity-70">+{r.coinsShilled.length - 8}</span>}
+                      </div>
+                    ) : "—"}
+                  </td>
+
+                  <td className="py-1.5 pr-4">
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => onUpdateOne?.(handle)}
+                        disabled={isUpdating || isScanning}
+                        className="p-1.5 rounded-full border border-white/10 hover:bg-white/10"
+                        title="Update user"
+                      >
+                      {isUpdating ? (
+                        <RefreshCw className="w-4 h-4 animate-spin opacity-70" />
+                      ) : (
+                        <RefreshCw className="w-4 h-4 opacity-70" />
+                      )}
+                      </button>
+                      <button
+                      onClick={() => scanTimeline(handle)}
+                      disabled={isUpdating || isScanning}
+                      className="p-1.5 rounded-full border border-white/10 hover:bg-white/10"
+                      title="Scan Timeline (last 7d)"
+                    >
+                      {isScanning ? (
+                        <History className="w-4 h-4 animate-pulse opacity-70" />
+                       ) : (
+                        <History className="w-4 h-4 opacity-70" />
+                      )}
+                      </button>
+                    </div>
+                      {scanMsg[clean] && (
+                        <div className="mt-1 text-[12px] opacity-80">{scanMsg[clean]}</div>
+                      )}
+                    </td>
+                </tr>
+              );
+            })}
+            {!visible.length && (
+              <tr>
+                <td colSpan={13} className="py-6 text-center opacity-60">{loading ? "Loading…" : "No KOLs found."}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      <div className="flex flex-wrap items-center gap-2 justify-between">
+        <div className="text-[12px] opacity-70">
+          Showing <b>{visible.length ? start + 1 : 0}</b>–<b>{start + visible.length}</b> of <b>{filtered.length}</b>
+        </div>
+        <div className="flex items-center gap-1">
+          <button className="px-2 py-1 rounded border border-white/10 hover:bg-white/10 text-[13px]" onClick={() => setPage(1)} disabled={safePage === 1}>«</button>
+          <button className="px-2 py-1 rounded border border-white/10 hover:bg-white/10 text-[13px]" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={safePage === 1}>‹</button>
+          <span className="px-2 text-[13px]">Page <b>{safePage}</b> / {totalPages}</span>
+          <button className="px-2 py-1 rounded border border-white/10 hover:bg-white/10 text-[13px]" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={safePage === totalPages}>›</button>
+          <button className="px-2 py-1 rounded border border-white/10 hover:bg-white/10 text-[13px]" onClick={() => setPage(totalPages)} disabled={safePage === totalPages}>»</button>
+        </div>
+      </div>
+    </div>
+  );
+}

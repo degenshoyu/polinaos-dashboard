@@ -9,7 +9,7 @@ import {
   BASE58_STRICT,
 } from "@/components/filters/spamDetection";
 
-/** ======= Types ======= */
+/** ===== Types ===== */
 type TweetRow = {
   tweeter?: string;
   views?: number;
@@ -19,7 +19,6 @@ type TweetRow = {
   textContent?: string;
   statusLink?: string;
   isVerified?: boolean;
-  /** Optional ISO datetime string (used for time-of-day analysis) */
   datetime?: string;
 };
 
@@ -41,7 +40,7 @@ export default function ReportModal({
   onClose: () => void;
   jobId: string | null;
 }) {
-  /** ======= UI state ======= */
+  /** ===== UI state ===== */
   const [data, setData] = useState<JobPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -49,7 +48,7 @@ export default function ReportModal({
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
 
-  /** ======= helpers ======= */
+  /** ===== helpers ===== */
   const n = (x: any) => {
     const v = Number(x);
     return Number.isFinite(v) && v > 0 ? v : 0;
@@ -57,23 +56,19 @@ export default function ReportModal({
   const compact = (v: number) => {
     if (!Number.isFinite(v)) return "0";
     const abs = Math.abs(v);
-    if (abs >= 1e9) return (v / 1e9).toFixed(2).replace(/\.0+$/, "") + "B";
-    if (abs >= 1e6) return (v / 1e6).toFixed(2).replace(/\.0+$/, "") + "M";
-    if (abs >= 1e3) return (v / 1e3).toFixed(2).replace(/\.0+$/, "") + "K";
+    if (abs >= 1e9) return (v / 1e9).toFixed(2).replace(/\.00?$/, "") + "B";
+    if (abs >= 1e6) return (v / 1e6).toFixed(2).replace(/\.00?$/, "") + "M";
+    if (abs >= 1e3) return (v / 1e3).toFixed(2).replace(/\.00?$/, "") + "K";
     return String(Math.round(v));
   };
-  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const pct = (v: number) => (v * 100).toFixed(1).replace(/\.0$/, "") + "%";
   const fmtDate = (s?: string) => {
     if (!s) return "—";
-    try {
-      const d = new Date(s);
-      return d.toISOString().slice(0, 10);
-    } catch {
-      return s;
-    }
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? s : d.toISOString().slice(0, 10);
   };
 
-  /** ======= lifecycle ======= */
+  /** ===== lifecycle ===== */
   useEffect(() => {
     if (!open) return;
     const prev = document.body.style.overflow;
@@ -93,7 +88,6 @@ export default function ReportModal({
     };
   }, [open, onClose]);
 
-  // fetch once when open & jobId present
   useEffect(() => {
     if (!open || !jobId) return;
     let cancelled = false;
@@ -101,9 +95,7 @@ export default function ReportModal({
     setErr(null);
     fetch(`/api/jobProxy?job_id=${encodeURIComponent(jobId)}`, { cache: "no-store" })
       .then((r) => r.json())
-      .then((j) => {
-        if (!cancelled) setData(j);
-      })
+      .then((j) => !cancelled && setData(j))
       .catch((e) => !cancelled && setErr(e?.message || "Failed to load report data"))
       .finally(() => !cancelled && setLoading(false));
     return () => {
@@ -111,24 +103,21 @@ export default function ReportModal({
     };
   }, [open, jobId]);
 
-  /** ======= data prep ======= */
-  // 原始推文（不做过滤）
+  /** ===== data prep ===== */
   const rowsAllRaw = useMemo<TweetRow[]>(
     () => (data?.tweets ?? []).map((t) => ({ ...t })),
     [data]
   );
 
-  // 从 keywords 取核心 ticker（不带 $，小写）
   const coreTicker = useMemo(() => resolveCoreFromJob(data?.keyword), [data]);
   const ticker = useMemo(() => (coreTicker ? `$${coreTicker}` : "$ASSET"), [coreTicker]);
 
-  // 目标合约地址（优先 keywords，其次文本）
   const contractAddress = useMemo(() => {
     const ca = resolveCAFromJob(data?.keyword, rowsAllRaw);
     return ca || "N/A";
   }, [data, rowsAllRaw]);
 
-  // 统一 spam 过滤：包含其他 CA 或者超过 2 个其他 $ticker 的推文直接排除
+  // Spam 过滤
   const rowsAll = useMemo<TweetRow[]>(() => {
     const rules = {
       coreTicker: coreTicker ?? null,
@@ -157,95 +146,96 @@ export default function ReportModal({
     return { tweets, views, engs, er };
   }, [rowsVer]);
 
-  // ER 分位
-  const erPercentiles = useMemo(() => {
-    const ers = rowsAll
-      .map((r) => {
-        const v = n(r.views);
-        const e = n(r.likes) + n(r.retweets) + n(r.replies);
-        return v > 0 ? e / v : 0;
-      })
-      .sort((a, b) => a - b);
-    const pick = (p: number) =>
-      ers.length ? ers[Math.min(ers.length - 1, Math.floor(p * (ers.length - 1)))] : 0;
-    return { p50: pick(0.5), p90: pick(0.9), p99: pick(0.99) };
-  }, [rowsAll]);
-
-  // 平均
   const avgAllViews = useMemo(() => (aggAll.tweets > 0 ? aggAll.views / aggAll.tweets : 0), [aggAll]);
   const avgAllEngs = useMemo(() => (aggAll.tweets > 0 ? aggAll.engs / aggAll.tweets : 0), [aggAll]);
-  const avgAllER = useMemo(() => (avgAllViews > 0 ? avgAllEngs / avgAllViews : 0), [avgAllViews, avgAllEngs]);
-  const avgVerViews = useMemo(() => (aggVer.tweets > 0 ? aggVer.views / aggVer.tweets : 0), [aggVer]);
-  const avgVerEngs = useMemo(() => (aggVer.tweets > 0 ? aggVer.engs / aggVer.tweets : 0), [aggVer]);
   const verShare = useMemo(() => (aggAll.views > 0 ? aggVer.views / aggAll.views : 0), [aggAll, aggVer]);
 
-  /** ======= KOL aggregation + score ======= */
-  type KOL = {
-    user: string;
-    count: number;
+  /** ===== KOL aggregation & helpers for Top-3 blocks ===== */
+  type MinimalTweet = Pick<
+    TweetRow,
+    "tweeter" | "views" | "likes" | "retweets" | "replies" | "statusLink" | "isVerified"
+  >;
+
+  type UserAgg = {
+    handle: string;
     views: number;
     engs: number;
+    tweets: number;
     er: number;
-    verifiedViews: number;
-    verifiedShare: number;
-    bestTweet?: { er: number; engs: number; views: number; link?: string };
-    score: number;
+    verified: boolean;
+    topTweetUrl?: string;
+    _topViews: number;
   };
 
-  const kols: KOL[] = useMemo(() => {
-    const byUser = new Map<string, { rows: TweetRow[] }>();
-    for (const t of rowsAll) {
-      const u = (t.tweeter || "").trim() || "unknown";
-      const o = byUser.get(u) || { rows: [] };
-      o.rows.push(t);
-      byUser.set(u, o);
-    }
-    const arr: KOL[] = [];
-    let maxEngs = 0;
-    for (const [user, { rows }] of byUser) {
-      let count = 0,
-        views = 0,
-        engs = 0,
-        verifiedViews = 0;
-      let best: KOL["bestTweet"] | undefined;
-      for (const r of rows) {
-        count++;
-        const v = n(r.views);
-        const e = n(r.likes) + n(r.retweets) + n(r.replies);
-        views += v;
-        engs += e;
-        if (r.isVerified) verifiedViews += v;
-        const er = v > 0 ? e / v : 0;
-        if (!best || er > best.er) best = { er, engs: e, views: v, link: r.statusLink };
-      }
-      const er = views > 0 ? engs / views : 0;
-      const verifiedShare = views > 0 ? verifiedViews / views : 0;
-      arr.push({ user, count, views, engs, er, verifiedViews, verifiedShare, bestTweet: best, score: 0 });
-      if (engs > maxEngs) maxEngs = engs;
-    }
-    // composite score: 55% engs (norm), 30% ER (≤10%), 15% verified share
-    for (const k of arr) {
-      const engsNorm = maxEngs > 0 ? k.engs / maxEngs : 0;
-      const erNorm = Math.min(1, k.er / 0.1);
-      const verNorm = k.verifiedShare;
-      k.score = 0.55 * engsNorm + 0.3 * erNorm + 0.15 * verNorm;
-    }
-    arr.sort((a, b) => b.score - a.score || b.engs - a.engs || b.views - a.views);
-    return arr;
-  }, [rowsAll]);
+  const aggregateByUser = (tweets: MinimalTweet[]): UserAgg[] => {
+    const map = new Map<string, UserAgg>();
+    for (const t of tweets || []) {
+      const handle = (t.tweeter || "").replace(/^@?/, "");
+      if (!handle) continue;
+      const views = n(t.views, 0);
+      const engs = n(t.likes, 0) + n(t.retweets, 0) + n(t.replies, 0);
+      const verified = Boolean(t.isVerified);
+      const url = t.statusLink || "";
 
-  /** ======= Insights ======= */
-  // full deeplink
+      const prev =
+        map.get(handle) ||
+        ({ handle, views: 0, engs: 0, tweets: 0, er: 0, verified: false, topTweetUrl: "", _topViews: -1 } as UserAgg);
+
+      const cur: UserAgg = {
+        ...prev,
+        views: prev.views + views,
+        engs: prev.engs + engs,
+        tweets: prev.tweets + 1,
+        verified: prev.verified || verified,
+      };
+      if (views > (prev._topViews ?? -1) && url) {
+        cur._topViews = views;
+        cur.topTweetUrl = url;
+      }
+      map.set(handle, cur);
+    }
+    return Array.from(map.values()).map((u) => ({ ...u, er: u.views > 0 ? u.engs / u.views : 0 }));
+  };
+
+  const MEDALS = ["🥇", "🥈", "🥉"] as const;
+
+  function buildTop3Block(title: string, list: UserAgg[]) {
+    const top3 = list.slice(0, 3);
+    const lines: string[] = [title, ""];
+    top3.forEach((u, i) => {
+      const medal = MEDALS[i] || "•";
+      const handle = "@" + u.handle;
+      const line2 = `${compact(u.views)} views | ${compact(u.engs)} engs | ${pct(u.er)} ER`;
+      const topLabel = i === 0 ? "Top Tweet" : "Top Tw";
+      const url = u.topTweetUrl || "";
+      lines.push(`${medal} ${handle}`);
+      lines.push(line2);
+      lines.push(`${topLabel}: ${url}`);
+      lines.push("");
+    });
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n");
+  }
+
+  function median(nums: number[]): number {
+    const a = nums.filter((x) => Number.isFinite(x)).sort((x, y) => x - y);
+    if (!a.length) return 0;
+    const mid = Math.floor(a.length / 2);
+    return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
+  }
+
+  const users = useMemo<UserAgg[]>(() => aggregateByUser(rowsAll as MinimalTweet[]), [rowsAll]);
+
+  /** ===== Insights ===== */
   const deeplink = useMemo(() => {
     const origin =
       typeof window !== "undefined" && window.location?.origin
         ? window.location.origin
-        : (process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://localhost:3000");
+        : process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://localhost:3000";
     const id = data?.job_id || jobId || "";
     return `${origin}/dashboard/campaign/analysis?job=${encodeURIComponent(id)}`;
   }, [data?.job_id, jobId]);
 
-  // ⏰ Time-of-day lift windows（Top-3 小时段）
   const timeWindows = useMemo(() => {
     const items = rowsAll
       .map((r) => {
@@ -259,6 +249,7 @@ export default function ReportModal({
         return { hour, v, e, er };
       })
       .filter(Boolean) as { hour: number; v: number; e: number; er: number }[];
+
     if (!items.length) return [];
     const byHour = Array.from({ length: 24 }, () => ({ count: 0, views: 0, ers: [] as number[] }));
     for (const it of items) {
@@ -284,21 +275,8 @@ export default function ReportModal({
       .slice(0, 3);
   }, [rowsAll, aggAll]);
 
-  // ⭐ best tweet overall by ER（备用）
-  const bestTweetOverall = useMemo(() => {
-    let best: { er: number; views: number; engs: number; link?: string } | null = null;
-    for (const r of rowsAll) {
-      const v = n(r.views);
-      const e = n(r.likes) + n(r.retweets) + n(r.replies);
-      const er = v > 0 ? e / v : 0;
-      if (!best || er > best.er) best = { er, views: v, engs: e, link: r.statusLink };
-    }
-    return best;
-  }, [rowsAll]);
-
-  /** ======= report text（新版：与你示例一致的 6 段式） ======= */
+  /** ===== Report text (目标样式) ===== */
   const report = useMemo(() => {
-    // Executive summary（两句，沿用独立模块）
     const execSummary = buildExecutiveSummary(rowsAll, {
       mode: "rich",
       emoji: true,
@@ -308,121 +286,72 @@ export default function ReportModal({
       endDate: data?.end_date,
     });
 
-    const topN = <T,>(arr: T[], n: number) => arr.slice(0, Math.max(0, n));
-
-    // 1️⃣ Executive Snapshot
+    // 1️⃣ Executive Snapshot（严格对齐你的示例）
     const snapshot = [
-      `🧵 Total Tweets ${aggAll.tweets} vs Verified Tweets ${aggVer.tweets}`,
-      `👀 Total Views ${compact(aggAll.views)} vs Verified Views ${compact(aggVer.views)}`,
-      `✨ Avg Views ${compact(avgAllViews)} vs Verified Avg Views ${compact(avgVerViews)}`,
-      `💬 Total Engagements ${compact(aggAll.engs)} vs Verified Engagements ${compact(aggVer.engs)}`,
-      `✨ Avg Engagements ${compact(avgAllEngs)} vs Verified Avg Engagements ${compact(avgVerEngs)}`,
-      `📊 ER (overall) = ${pct(aggAll.er)}`,
-      `✅ Verified views share: ${pct(verShare)}`,
+      `${aggAll.tweets} total tweets`,
+      `${compact(aggAll.views)} total views | ${compact(aggAll.tweets ? aggAll.views / aggAll.tweets : 0)} avg views`,
+      `${compact(aggAll.engs)} engagements | ${compact(aggAll.tweets ? aggAll.engs / aggAll.tweets : 0)} avg engs`,
+      "",
+      `📊 ${pct(aggAll.er)} ER`,
+      `✅ ${pct(verShare)} verified views share`,
     ].join("\n");
 
-    // 2️⃣ Verified Leaders（按 verifiedViews 排，展示前 5）
-    const verifiedLeaders = topN(
-      kols.filter(k => k.verifiedShare >= 0.5)
-          .sort((a,b) => b.verifiedViews - a.verifiedViews),
-      5
-    ).map((k, i) => {
-      const medal = ["🥇","🥈","🥉","🎖","🏅"][i] ?? "•";
-      const best = k.bestTweet?.link ? `\nTop Tw: ${k.bestTweet.link}` : "";
-      return `${medal} @${k.user} — ${k.count} 📄 | ${compact(k.views)} 👁 | ${compact(k.engs)} ❤🔁💬 | ER ${pct(k.er)}${best}`;
-    }).join("\n");
+    // 2️⃣ Verified Leaders ✅ (by top views) — 仅 Top 3，三行块格式
+    const verifiedLeaders = users
+      .filter((u) => u.verified)
+      .sort((a, b) => b.views - a.views);
 
-    // 3️⃣ Shiller Leaderboard（按综合 score 排）
-    const shillerTop = topN(
-      [...kols].sort((a,b)=> b.score - a.score || b.engs - a.engs || b.views - a.views),
-      5
-    ).map((k, i) => {
-      const medal = ["🥇","🥈","🥉","🎖","🏅"][i] ?? "•";
-      const best = k.bestTweet?.link ? `\nTop Tw: ${k.bestTweet.link}` : "";
-      return `${medal} @${k.user} — score ${(k.score*100).toFixed(0)} | ${k.count} 📄 | ${compact(k.views)} 👁 | ${compact(k.engs)} ❤🔁💬 | ER ${pct(k.er)}${best}`;
-    }).join("\n");
+    // 3️⃣ Shiller Leaderboard 🏆 (Overall Score) — 简易稳定综合分
+    const withScore = users
+      .map((u) => ({ ...u, _score: u.views * 0.6 + u.engs * 0.3 + (u.er * 100) * 0.1 }))
+      .sort((a, b) => b._score - a._score);
 
-    // 4️⃣ Volume Grinders（≥5 条）
-    const grinders = topN(
-      kols.filter(k => k.count >= Math.max(5, Math.ceil(rowsAll.length / 150)))
-          .sort((a,b)=> b.count - a.count || b.engs - a.engs),
-      3
-    ).map((k,i) => {
-      const medal = ["🥇","🥈","🥉"][i] ?? "•";
-      const best = k.bestTweet?.link ? `\nTop Tw: ${k.bestTweet.link}` : "";
-      return `${medal} @${k.user} — ${k.count} 📄 | ${compact(k.views)} 👁 | ${compact(k.engs)} ❤🔁💬 | ER ${pct(k.er)}${best}`;
-    }).join("\n");
+    // 4️⃣ Volume Grinders 🔁 (≥5 tweets)
+    const grinders = users
+      .filter((u) => u.tweets >= 5)
+      .sort((a, b) => (b.tweets - a.tweets) || (b.views - a.views));
 
-    // 5️⃣ Emerging（低基线 + ER ≥ 3%）
-    const medianViews = (() => {
-      const xs = kols.map(k => k.views).sort((a,b)=> a-b);
-      if (!xs.length) return 0;
-      const m = Math.floor(xs.length/2);
-      return xs.length % 2 ? xs[m] : (xs[m-1] + xs[m]) / 2;
-    })();
-    const emerging = topN(
-      kols.filter(k => k.views <= medianViews && k.er >= 0.03)
-          .sort((a,b)=> b.er - a.er),
-      3
-    ).map((k,i) => {
-      const medal = ["🥇","🥈","🥉"][i] ?? "•";
-      const best = k.bestTweet?.link ? `\nTop Tw: ${k.bestTweet.link}` : "";
-      return `${medal} @${k.user} — ${k.count} 📄 | ${compact(k.views)} 👁 | ${compact(k.engs)} ❤🔁💬 | ER ${pct(k.er)}${best}`;
-    }).join("\n");
+    // 5️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)
+    const p50Views = median(users.map((u) => (u.views / Math.max(1, u.tweets))));
+    const emerging = users
+      .filter((u) => (u.views / Math.max(1, u.tweets)) <= p50Views && u.er >= 0.03)
+      .sort((a, b) => b.er - a.er);
 
-    // 6️⃣ Distribution Insights（保留你示例里的两个点）
+    // 6️⃣ Distribution Insights
     const timeTxt = timeWindows.length
-      ? timeWindows.map(x => `${String(x.hour).padStart(2,"0")}:00 (ER p50 ${pct(x.er)})`).join(", ")
+      ? timeWindows.map((x) => `${String(x.hour).padStart(2, "0")}:00 (ER p50 ${pct(x.er)})`).join(", ")
       : "—";
-    const insights = [
+
+    // Header（严格对齐：三行括号 + 空行 + exec）
+    const parts: string[] = [
+      `${ticker} Weekly X Report`,
+      `[ ${contractAddress} ]`,
+      `[ ${fmtDate(data?.start_date)} ~ ${fmtDate(data?.end_date)} ]`,
+      "",
+      execSummary,
+      "",
+      "1️⃣ Executive Snapshot",
+      "",
+      snapshot,
+      "",
+      buildTop3Block("2️⃣ Verified Leaders ✅ (by top views)", verifiedLeaders),
+      "",
+      buildTop3Block("3️⃣ Shiller Leaderboard 🏆 (Overall Score)", withScore),
+      "",
+      buildTop3Block("4️⃣ Volume Grinders 🔁 (≥5 tweets)", grinders),
+      "",
+      buildTop3Block("5️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)", emerging),
+      "",
+      "6️⃣ Distribution Insights 🚚",
+      "",
       `- ⏰ Time-of-day lift windows: ${timeTxt}`,
       `- 🔵 Verified contribution trend: ${pct(verShare)} (level)`,
-    ].join("\n");
+    ];
 
-    // ====== 拼装成目标样式 ======
-    const header = [
-      `${ticker} Twitter Performance Report`,
-      `${contractAddress}`,
-      `since ${fmtDate(data?.start_date)} until ${fmtDate(data?.end_date)}`,
-      ``,
-      `Source: @PolinaAIOS ${deeplink}`,
-      ``,
-      execSummary,
-      ``,
-      `1️⃣ Executive Snapshot 📌`,
-      ``,
-      snapshot,
-      ``,
-      `2️⃣ Verified Leaders ✅ (by top views)`,
-      ``,
-      verifiedLeaders || "—",
-      ``,
-      `3️⃣ Shiller Leaderboard 🏆 (Overall Score)`,
-      ``,
-      shillerTop || "—",
-      ``,
-      `4️⃣ Volume Grinders 🔁 (≥5 tweets)`,
-      ``,
-      grinders || "—",
-      ``,
-      `5️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)`,
-      ``,
-      emerging || "—",
-      ``,
-      `6️⃣ Distribution Insights 🚚`,
-      ``,
-      insights,
-    ].join("\n");
+    return parts.join("\n");
+  }, [rowsAll, data?.start_date, data?.end_date, data?.job_id, jobId, ticker, contractAddress, aggAll, verShare, users, timeWindows]);
 
-    return header;
-  }, [
-    data?.start_date, data?.end_date, data?.job_id, jobId,
-    ticker, contractAddress,
-    aggAll, aggVer, avgAllViews, avgAllEngs, avgVerViews, avgVerEngs, verShare,
-    kols, rowsAll, timeWindows, deeplink,
-  ]);
-
-  /** ======= handlers ======= */
+  /** ===== handlers ===== */
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(report);
@@ -449,7 +378,7 @@ export default function ReportModal({
     }, 2000);
   };
 
-  /** ======= render ======= */
+  /** ===== render ===== */
   if (!open) return null;
 
   return (
@@ -463,7 +392,6 @@ export default function ReportModal({
         className="w-full max-w-3xl rounded-2xl border border-white/10 bg-[#0b0f0e]/95 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
           <h3 className="text-sm md:text-base font-semibold text-white/90">📄 Report</h3>
           <div className="flex items-center gap-2">
@@ -488,11 +416,10 @@ export default function ReportModal({
           </div>
         </div>
 
-        {/* body — use the same scroll container style as AnalysisConsole */}
         <div
           ref={panelRef}
           tabIndex={-1}
-          className="analysis-console-body max-h:[70vh] md:max-h-[70vh] overflow-y-auto p-5 text-[13px] leading-relaxed text-white/90"
+          className="analysis-console-body md:max-h-[70vh] overflow-y-auto p-5 text-[13px] leading-relaxed text-white/90"
           onWheelCapture={(e) => e.stopPropagation()}
           onTouchMove={(e) => e.stopPropagation()}
         >
@@ -500,6 +427,7 @@ export default function ReportModal({
           {err && <div className="text-red-400">Error: {err}</div>}
           {!loading && !err && <pre className="whitespace-pre-wrap font-mono">{report}</pre>}
           <div className="mt-3 text-[11px] text-white/40">jobId: {data?.job_id || jobId || "-"}</div>
+          <div className="mt-1 text-[11px] text-white/30">Source: @PolinaAIOS {deeplink}</div>
         </div>
       </div>
     </div>

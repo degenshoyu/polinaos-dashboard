@@ -16,6 +16,14 @@ const BodySchema = z
     projectName: z.string().optional(),
     twitterHandle: z.string().optional(),
     contractAddress: z.string().optional(),
+
+    screen_name: z.union([z.string(), z.array(z.string())]).optional(),
+    keyword: z.union([z.string(), z.array(z.string())]).optional(),
+
+    startDate: z.string().optional(),
+    endDate: z.string().optional(),
+    maxTweets: z.number().int().min(1).max(500).optional(),
+    minFaves: z.number().int().min(0).max(10000).optional(),
   })
   .passthrough();
 
@@ -32,7 +40,17 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { projectName, twitterHandle, contractAddress } = parsed.data;
+
+  const {
+    projectName,
+    twitterHandle,
+    contractAddress,
+    screen_name,
+    keyword,
+    startDate,
+    endDate,
+    minFaves,
+  } = parsed.data;
 
   const session = await getServerSession(authOptions);
   const userId: string | null = (session?.user as any)?.id ?? null;
@@ -45,41 +63,76 @@ export async function POST(req: NextRequest) {
         controller.enqueue(new TextEncoder().encode(`${msg}\n`));
 
       try {
-        const keywords: string[] = [];
-        if (projectName) keywords.push(String(projectName).replaceAll(" ", ""));
-        if (contractAddress) keywords.push(String(contractAddress));
-        if (twitterHandle)
-          keywords.push(String(twitterHandle).replace("@", ""));
+        const toArr = (v?: string | string[]) =>
+          v == null ? [] : Array.isArray(v) ? v : [v];
 
-        write(`🔍 Scanning for keywords: ${keywords.join(", ")}`);
+        const normHandle = (s: string) => s.trim().replace(/^@+/, "");
+
+        let screenNames: string[] = toArr(screen_name)
+          .map(String)
+          .map(normHandle);
+
+        if (!screenNames.length && twitterHandle) {
+          screenNames = [normHandle(String(twitterHandle))];
+        }
+
+        const keywords: string[] = toArr(keyword).map(String);
+        if (!keywords.length) {
+          if (projectName)
+            keywords.push(String(projectName).replaceAll(" ", ""));
+          if (contractAddress) keywords.push(String(contractAddress));
+          if (!screenNames.length && twitterHandle) {
+            keywords.push(normHandle(String(twitterHandle)));
+          }
+        }
 
         const today = new Date();
-        const start = new Date();
-        start.setDate(today.getDate() - 7);
-        const end = new Date(today);
-        end.setDate(today.getDate() + 1);
+        const startDefault = new Date();
+        startDefault.setDate(today.getDate() - 7);
+        const endDefault = new Date(today);
+        endDefault.setDate(today.getDate() + 1);
 
-        const body = {
-          keyword: keywords,
-          start_date: start.toISOString().split("T")[0],
-          end_date: end.toISOString().split("T")[0],
-          max_tweets: 30,
-          min_faves: 2,
+        const start_date = startDate ?? startDefault.toISOString().slice(0, 10);
+        const end_date = endDate ?? endDefault.toISOString().slice(0, 10);
+        const min_faves = minFaves ?? 2;
+
+        if (screenNames.length) {
+          write(
+            `🔍 Scanning timelines: ${screenNames.map((s) => "@" + s).join(", ")} (${start_date} → ${end_date})`,
+          );
+        } else {
+          write(
+            `🔍 Scanning for keywords: ${keywords.join(", ")} (${start_date} → ${end_date})`,
+          );
+        }
+
+        const body: Record<string, unknown> = {
+          start_date,
+          end_date,
+          min_faves,
         };
+        if (screenNames.length) body.screen_name = screenNames;
+        if (keywords.length) body.keyword = keywords;
 
-        const response = await fetch(`${BASE_URL}/search/speed`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${BEARER}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-        });
+        async function callUpstream(path: string) {
+          return fetch(`${BASE_URL}${path}`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${BEARER}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+          });
+        }
 
-        const data = await response.json();
+        const response = await callUpstream("/search/speed");
 
-        if (!data?.success) {
-          write(`❌ Scanner error: ${data?.message || "Unknown error"}`);
+        const data = await response.json().catch(() => ({}) as any);
+
+        if (!response.ok || !data?.success) {
+          write(
+            `❌ Scanner error: ${data?.message || `HTTP ${response.status}`}`,
+          );
           controller.close();
           return;
         }
@@ -96,7 +149,13 @@ export async function POST(req: NextRequest) {
 
         try {
           const queryJson = {
-            input: { projectName, twitterHandle, contractAddress },
+            input: {
+              projectName,
+              twitterHandle,
+              contractAddress,
+              screen_name: screenNames,
+              keyword: keywords,
+            },
             scannerRequest: body,
           };
 
@@ -130,6 +189,7 @@ export async function POST(req: NextRequest) {
     },
   });
 
+  // 匿名会话 cookie
   if (!userId) {
     anonSessionId = await ensureAnonSessionOn(res);
   }

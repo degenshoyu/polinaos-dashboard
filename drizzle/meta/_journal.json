@@ -22,6 +22,13 @@
       "when": 1756610625352,
       "tag": "0002_striped_gideon",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1756719292064,
+      "tag": "0003_rare_captain_marvel",
+      "breakpoints": true
     }
   ]
 }

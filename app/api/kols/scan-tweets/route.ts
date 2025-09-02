@@ -1,0 +1,313 @@
+// app/api/kols/scan-tweets/route.ts
+
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/db/client";
+import { kols, kolTweets } from "@/lib/db/schema";
+import { eq, sql, and, gte, lt } from "drizzle-orm";
+
+const Body = z.object({
+  screen_name: z.string().min(1),
+  windowHours: z.number().int().min(1).max(168).optional().default(24),
+  pollIntervalMs: z.number().int().min(250).max(3000).optional().default(1000),
+  maxWaitMs: z
+    .number()
+    .int()
+    .min(3000)
+    .max(1800000)
+    .optional()
+    .default(1200000),
+});
+
+const norm = (h: string) => h.trim().replace(/^@+/, "").toLowerCase();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const toBig = (v: unknown): bigint => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return BigInt(0);
+  try {
+    return BigInt(Math.trunc(n));
+  } catch {
+    return BigInt(0);
+  }
+};
+const ORIGIN = (req: Request) => {
+  const proto = req.headers.get("x-forwarded-proto") ?? "http";
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+  return `${proto}://${host}`;
+};
+
+function mapTweet(raw: any, fallbackHandle: string) {
+  const id = raw?.tweetId ?? raw?.id_str ?? raw?.id ?? raw?.tweet_id ?? "";
+
+  const text =
+    raw?.textContent ??
+    raw?.full_text ??
+    raw?.text ??
+    raw?.body ??
+    raw?.content ??
+    "";
+
+  const likes = raw?.likes ?? raw?.favorite_count ?? raw?.like_count ?? 0;
+
+  const rts = raw?.retweets ?? raw?.retweet_count ?? 0;
+
+  const replies = raw?.replies ?? raw?.reply_count ?? 0;
+
+  const views = raw?.views ?? raw?.impression_count ?? 0;
+
+  const createdAt =
+    raw?.datetime ??
+    raw?.created_at ??
+    raw?.publish_date ??
+    raw?.timestamp_ms ??
+    raw?.timestamp ??
+    null;
+
+  const screenName =
+    raw?.tweeter ??
+    raw?.user?.screen_name ??
+    raw?.screen_name ??
+    fallbackHandle;
+
+  const uid = raw?.user?.id_str ?? raw?.user?.id ?? raw?.twitter_uid ?? null;
+
+  const link =
+    raw?.statusLink ??
+    raw?.status_link ??
+    raw?.url ??
+    (id && screenName ? `https://x.com/${screenName}/status/${id}` : null);
+
+  const verified = raw?.isVerified ?? raw?.user?.verified ?? null;
+
+  return {
+    twitterUid: uid,
+    twitterUsername: String(screenName || fallbackHandle).toLowerCase(),
+    type: "tweet" as const,
+    textContent: text,
+    views: Number(views ?? 0),
+    likes: Number(likes ?? 0),
+    retweets: Number(rts ?? 0),
+    replies: Number(replies ?? 0),
+    publishDate: createdAt ? new Date(createdAt) : new Date(),
+    tweetId: String(id),
+    statusLink: link ? String(link) : null,
+    authorIsVerified: verified === null ? null : Boolean(verified),
+  };
+}
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/** POST /api/kols/scan-tweets */
+export async function POST(req: Request) {
+  const session = await getServerSession(authOptions);
+  const isAdmin = Boolean((session?.user as any)?.isAdmin);
+  if (!isAdmin) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden" },
+      { status: 403 },
+    );
+  }
+
+  const { screen_name, windowHours, pollIntervalMs, maxWaitMs } = Body.parse(
+    await req.json(),
+  );
+  const handle = norm(screen_name);
+
+  const now = new Date();
+  const since = new Date(now);
+  since.setDate(now.getDate() - 6);
+  const until = new Date(now);
+  until.setDate(now.getDate() + 1);
+  const startDate = since.toISOString().slice(0, 10);
+  const endDate = until.toISOString().slice(0, 10);
+
+  const origin = ORIGIN(req);
+  const cookie = req.headers.get("cookie") ?? "";
+  const ctRes = await fetch(`${origin}/api/ctsearch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { cookie } : {}),
+    },
+
+    body: JSON.stringify({
+      twitterHandle: handle,
+      startDate,
+      endDate,
+    }),
+    cache: "no-store",
+  });
+  const ctText = await ctRes.text();
+  const m = ctText.match(/Job started:\s*([A-Za-z0-9_\-:.]+)/i);
+  const jobId = m?.[1];
+  if (!ctRes.ok || !jobId) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "ctsearch start failed",
+        status: ctRes.status,
+        preview: ctText.slice(0, 400),
+      },
+      { status: 502 },
+    );
+  }
+
+  const begin = Date.now();
+  let last: any = null;
+
+  while (Date.now() - begin < maxWaitMs) {
+    const r = await fetch(
+      `${origin}/api/jobProxy?job_id=${encodeURIComponent(jobId)}`,
+      {
+        cache: "no-store",
+        headers: cookie ? { cookie } : undefined,
+      },
+    );
+    const t = await r.text();
+    try {
+      last = JSON.parse(t);
+    } catch {
+      last = { error: "non-json", preview: t.slice(0, 300) };
+    }
+    const s = String(last?.status || "").toLowerCase();
+    if (s === "completed" || s === "failed") break;
+    await sleep(pollIntervalMs);
+  }
+
+  if (!last || String(last?.status).toLowerCase() !== "completed") {
+    return NextResponse.json(
+      { ok: false, error: "poll timeout or not completed", last },
+      { status: 504 },
+    );
+  }
+
+  const rowsRaw: any[] = Array.isArray(last?.tweets)
+    ? last.tweets
+    : Array.isArray(last?.data?.tweets)
+      ? last.data.tweets
+      : Array.isArray(last?.result?.tweets)
+        ? last.result.tweets
+        : [];
+  const mapped = rowsRaw
+    .map((tw) => mapTweet(tw, handle))
+    .filter((x) => x.tweetId);
+
+  if (mapped.length === 0) {
+    return NextResponse.json({
+      ok: true,
+      handle,
+      job_id: jobId,
+      scanned: rowsRaw.length,
+      inserted: 0,
+      dupes: 0,
+      reason: "no mappable tweets in window",
+    });
+  }
+
+  const kol = await db.query.kols.findFirst({
+    where: eq(kols.twitterUsername, handle),
+  });
+
+  if (!kol?.twitterUid) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "kol missing twitterUid; run resolve-user first",
+        handle,
+      },
+      { status: 400 },
+    );
+  }
+
+  const values = mapped.map((m) => ({
+    twitterUid: String(m.twitterUid ?? kol?.twitterUid ?? ""),
+    twitterUsername: String(kol?.twitterUsername ?? m.twitterUsername ?? ""),
+    type: m.type,
+    textContent: m.textContent,
+    views: toBig(m.views),
+    likes: m.likes,
+    retweets: m.retweets,
+    replies: m.replies,
+    publishDate: m.publishDate,
+    tweetId: String(m.tweetId ?? ""),
+    statusLink: m.statusLink,
+    authorIsVerified: m.authorIsVerified ?? null,
+  }));
+
+  let inserted = 0;
+  let dupes = 0;
+
+  try {
+    const res = await db
+      .insert(kolTweets)
+      .values(values)
+      .onConflictDoUpdate({
+        target: kolTweets.tweetId,
+        set: {
+          views: sql`GREATEST(${kolTweets.views}, EXCLUDED.views)`,
+          likes: sql`GREATEST(${kolTweets.likes}, EXCLUDED.likes)`,
+          retweets: sql`GREATEST(${kolTweets.retweets}, EXCLUDED.retweets)`,
+          replies: sql`GREATEST(${kolTweets.replies}, EXCLUDED.replies)`,
+          textContent: sql`COALESCE(EXCLUDED.text_content, ${kolTweets.textContent})`,
+          statusLink: sql`COALESCE(EXCLUDED.status_link, ${kolTweets.statusLink})`,
+          publishDate: sql`LEAST(${kolTweets.publishDate}, EXCLUDED.publish_date)`,
+          authorIsVerified: sql`COALESCE(EXCLUDED.author_is_verified, ${kolTweets.authorIsVerified})`,
+          lastSeenAt: sql`NOW()`,
+        },
+      })
+      .returning({ tweetId: kolTweets.tweetId });
+
+    inserted = res.length;
+    dupes = values.length - inserted;
+  } catch (e: any) {
+    console.error("insert kolTweets error:", e);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "db insert failed",
+        reason: String(e?.message ?? e).slice(0, 300),
+      },
+      { status: 500 },
+    );
+  }
+
+  // === NEW: aggregate last 7 days from kol_tweets ===
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6); // inclusive
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1); // exclusive upper bound
+
+  // drizzle imports needed: and, gte, lt
+  //   import { eq, sql, and, gte, lt } from "drizzle-orm";
+  const agg = await db
+    .select({
+      totalTweets: sql<number>`COUNT(*)`,
+      totalViews: sql<number>`COALESCE(SUM(${kolTweets.views}), 0)`,
+      totalEngs: sql<number>`
+        COALESCE(SUM(${kolTweets.likes} + ${kolTweets.retweets} + ${kolTweets.replies}), 0)
+      `,
+    })
+    .from(kolTweets)
+    .where(
+      and(
+        eq(kolTweets.twitterUsername, handle),
+        gte(kolTweets.publishDate, sevenDaysAgo),
+        lt(kolTweets.publishDate, tomorrow),
+      ),
+    );
+
+  const totals = agg?.[0] ?? { totalTweets: 0, totalViews: 0, totalEngs: 0 };
+
+  return NextResponse.json({
+    ok: true,
+    handle,
+    job_id: jobId,
+    scanned: rowsRaw.length,
+    inserted,
+    dupes,
+    totals, // <- return computed totals so the UI can update immediately
+  });
+}
