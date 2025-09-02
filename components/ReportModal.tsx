@@ -275,7 +275,7 @@ export default function ReportModal({
       .slice(0, 3);
   }, [rowsAll, aggAll]);
 
-  /** ===== Report text (目标样式) ===== */
+  /** ===== Report text ===== */
   const report = useMemo(() => {
     const execSummary = buildExecutiveSummary(rowsAll, {
       mode: "rich",
@@ -286,7 +286,7 @@ export default function ReportModal({
       endDate: data?.end_date,
     });
 
-    // 1️⃣ Executive Snapshot（严格对齐你的示例）
+    // 1️⃣ Executive Snapshot
     const snapshot = [
       `${aggAll.tweets} total tweets`,
       `${compact(aggAll.views)} total views | ${compact(aggAll.tweets ? aggAll.views / aggAll.tweets : 0)} avg views`,
@@ -296,12 +296,12 @@ export default function ReportModal({
       `✅ ${pct(verShare)} verified views share`,
     ].join("\n");
 
-    // 2️⃣ Verified Leaders ✅ (by top views) — 仅 Top 3，三行块格式
+    // 2️⃣ Verified Leaders ✅
     const verifiedLeaders = users
       .filter((u) => u.verified)
       .sort((a, b) => b.views - a.views);
 
-    // 3️⃣ Shiller Leaderboard 🏆 (Overall Score) — 简易稳定综合分
+    // 3️⃣ Shiller Leaderboard 🏆 (Overall Score)
     const withScore = users
       .map((u) => ({ ...u, _score: u.views * 0.6 + u.engs * 0.3 + (u.er * 100) * 0.1 }))
       .sort((a, b) => b._score - a._score);
@@ -322,10 +322,9 @@ export default function ReportModal({
       ? timeWindows.map((x) => `${String(x.hour).padStart(2, "0")}:00 (ER p50 ${pct(x.er)})`).join(", ")
       : "—";
 
-    // Header（严格对齐：三行括号 + 空行 + exec）
+    // Header）
     const parts: string[] = [
       `${ticker} Weekly X Report`,
-      `[ ${contractAddress} ]`,
       `[ ${fmtDate(data?.start_date)} ~ ${fmtDate(data?.end_date)} ]`,
       "",
       execSummary,
@@ -346,6 +345,9 @@ export default function ReportModal({
       "",
       `- ⏰ Time-of-day lift windows: ${timeTxt}`,
       `- 🔵 Verified contribution trend: ${pct(verShare)} (level)`,
+      ``,
+      // `CA: ${contractAddress}`,
+      `Source: @PolinaAIOS ${deeplink}`
     ];
 
     return parts.join("\n");
