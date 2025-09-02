@@ -49,7 +49,7 @@ export default function ReportModal({
   const copyTimerRef = useRef<number | null>(null);
 
   /** ===== helpers ===== */
-  const n = (x: any) => {
+  const n = (x: any, d = 0) => {
     const v = Number(x);
     return Number.isFinite(v) && v > 0 ? v : 0;
   };
