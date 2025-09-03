@@ -1,0 +1,1 @@
+ALTER TABLE "tweet_token_mentions" ALTER COLUMN "trigger_key" DROP NOT NULL;

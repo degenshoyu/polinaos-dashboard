@@ -1,6 +1,6 @@
 {
-  "id": "aba94568-1398-445c-b1f1-aa7272ff45bb",
-  "prevId": "09efe695-2366-4e4b-9126-3dd1b3453257",
+  "id": "447e787a-0e8f-470e-a4e7-0285a4a11810",
+  "prevId": "f0189d31-c606-4a45-a008-ece9c5b18bc0",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -95,7 +95,7 @@
         "tweet_id": {
           "name": "tweet_id",
           "type": "text",
-          "primaryKey": true,
+          "primaryKey": false,
           "notNull": true
         },
         "twitter_uid": {
@@ -129,7 +129,7 @@
           "type": "bigint",
           "primaryKey": false,
           "notNull": true,
-          "default": "'0'"
+          "default": "0"
         },
         "likes": {
           "name": "likes",
@@ -222,7 +222,7 @@
             {
               "expression": "publish_date",
               "isExpression": false,
-              "asc": false,
+              "asc": true,
               "nulls": "last"
             }
           ],
@@ -243,7 +243,7 @@
             {
               "expression": "publish_date",
               "isExpression": false,
-              "asc": false,
+              "asc": true,
               "nulls": "last"
             }
           ],
@@ -268,7 +268,14 @@
           "onUpdate": "cascade"
         }
       },
-      "compositePrimaryKeys": {},
+      "compositePrimaryKeys": {
+        "pk_kol_tweets_tweet_id": {
+          "name": "pk_kol_tweets_tweet_id",
+          "columns": [
+            "tweet_id"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -308,9 +315,57 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "account_creation_date": {
+          "name": "account_creation_date",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "followers": {
+          "name": "followers",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "following": {
+          "name": "following",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "bio": {
+          "name": "bio",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "profile_img_url": {
+          "name": "profile_img_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "idx_kols_followers": {
+          "name": "idx_kols_followers",
+          "columns": [
+            {
+              "expression": "followers",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
@@ -499,8 +554,27 @@
           "primaryKey": false,
           "notNull": true
         },
+        "trigger_key": {
+          "name": "trigger_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "trigger_text": {
+          "name": "trigger_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -508,8 +582,8 @@
         }
       },
       "indexes": {
-        "uniq_tweet_token": {
-          "name": "uniq_tweet_token",
+        "uniq_tweet_trigger": {
+          "name": "uniq_tweet_trigger",
           "columns": [
             {
               "expression": "tweet_id",
@@ -518,7 +592,7 @@
               "nulls": "last"
             },
             {
-              "expression": "token_key",
+              "expression": "trigger_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -534,6 +608,36 @@
           "columns": [
             {
               "expression": "token_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_mentions_trigger": {
+          "name": "idx_mentions_trigger",
+          "columns": [
+            {
+              "expression": "trigger_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_mentions_trigger_text": {
+          "name": "idx_mentions_trigger_text",
+          "columns": [
+            {
+              "expression": "trigger_text",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

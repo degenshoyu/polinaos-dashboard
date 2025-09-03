@@ -12,12 +12,12 @@ import {
   bigint,
   pgEnum,
   uniqueIndex,
-  primaryKey, // ✅ 新增：用于命名主键
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
 /**
- * ⚠️ One-time extension (handled by migration):
+ * One-time extension (handled by migration):
  *   CREATE EXTENSION IF NOT EXISTS "pgcrypto";
  */
 export const _enablePgcrypto = sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`;
@@ -102,15 +102,7 @@ export const aiRelations = relations(aiUnderstandings, ({ one }) => ({
   }),
 }));
 
-/* ===================== Inferred Types ===================== */
-export type User = typeof users.$inferSelect;
-export type NewUser = typeof users.$inferInsert;
-export type Search = typeof searches.$inferSelect;
-export type NewSearch = typeof searches.$inferInsert;
-export type AIUnderstanding = typeof aiUnderstandings.$inferSelect;
-export type NewAIUnderstanding = typeof aiUnderstandings.$inferInsert;
-
-/* ===================== KOL Leaderboard — enums ===================== */
+/* ===================== Enums (KOL) ===================== */
 export const tweetType = pgEnum("tweet_type", [
   "tweet",
   "retweet",
@@ -175,7 +167,7 @@ export const kolTweets = pgTable(
     publishDate: timestamp("publish_date", { withTimezone: true }).notNull(),
     statusLink: text("status_link"),
 
-    // helpful extras for ranking / filters
+    // extras
     authorIsVerified: boolean("author_is_verified"),
     lang: text("lang"),
 
@@ -197,7 +189,6 @@ export const kolTweets = pgTable(
       name: "pk_kol_tweets_tweet_id",
       columns: [t.tweetId],
     }),
-
     byPublish: index("idx_kol_tweets_pub").on(t.publishDate),
     byUidPublish: index("idx_kol_tweets_uid_pub").on(
       t.twitterUid,
@@ -215,26 +206,49 @@ export const kolTweetsRelations = relations(kolTweets, ({ one, many }) => ({
 }));
 
 /* ===================== tweet_token_mentions ===================== */
+/**
+ * NOTE: We enforce uniqueness per (tweet_id, trigger_key) instead of (tweet_id, token_key).
+ * - trigger_key captures the stable trigger in the tweet (e.g. "ticker:$sol", "ca:0xabc", "phrase:<hash>").
+ * - Upserts on (tweet_id, trigger_key) will update token mapping if we refine resolution later.
+ */
 export const tweetTokenMentions = pgTable(
   "tweet_token_mentions",
   {
     id: uuid("id")
       .primaryKey()
       .default(sql`gen_random_uuid()`),
+
     tweetId: text("tweet_id")
       .notNull()
       .references(() => kolTweets.tweetId, { onDelete: "cascade" }),
-    tokenKey: text("token_key").notNull(), // canonical key (contract or normalized ticker, e.g. "usduc")
-    tokenDisplay: text("token_display"), // for UI ($USDUC or short addr)
+
+    // Canonical token identity after resolution (e.g. contract or normalized ticker)
+    tokenKey: text("token_key").notNull(),
+    tokenDisplay: text("token_display"),
     confidence: integer("confidence").notNull().default(100), // 0..100
     source: mentionSource("source").notNull(), // ca|ticker|phrase|hashtag|upper|llm
+
+    // stable trigger identity found in the tweet
+    triggerKey: text("trigger_key"),
+
+    // human-readable trigger text (e.g. "$usdc", "unstable coin", "0xabc...")
+    triggerText: text("trigger_text"),
+
     createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
   },
   (t) => ({
-    uniqTweetToken: uniqueIndex("uniq_tweet_token").on(t.tweetId, t.tokenKey),
+    uniqTweetTrigger: uniqueIndex("uniq_tweet_trigger").on(
+      t.tweetId,
+      t.triggerKey,
+    ),
     byToken: index("idx_mentions_token").on(t.tokenKey),
+    byTrigger: index("idx_mentions_trigger").on(t.triggerKey),
+    byTriggerText: index("idx_mentions_trigger_text").on(t.triggerText),
   }),
 );
 
@@ -248,7 +262,16 @@ export const tweetTokenMentionsRelations = relations(
   }),
 );
 
-/* ===================== Inferred Types (new) ===================== */
+/* ===================== Inferred Types ===================== */
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+
+export type Search = typeof searches.$inferSelect;
+export type NewSearch = typeof searches.$inferInsert;
+
+export type AIUnderstanding = typeof aiUnderstandings.$inferSelect;
+export type NewAIUnderstanding = typeof aiUnderstandings.$inferInsert;
+
 export type Kol = typeof kols.$inferSelect;
 export type NewKol = typeof kols.$inferInsert;
 

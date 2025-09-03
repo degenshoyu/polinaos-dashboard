@@ -4,123 +4,59 @@ import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db/client";
-import { kolTweets, tweetTokenMentions } from "@/lib/db/schema";
-import { eq, and, gte, lt, sql } from "drizzle-orm";
+import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
+import { eq, and, gte, lt, sql, inArray, desc } from "drizzle-orm";
 import { extractMentions, type Mention } from "@/lib/tokens/extract";
-
-const Body = z.object({
-  screen_name: z.string().min(1),
-  days: z.number().int().min(1).max(30).optional().default(7),
-});
+import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
+import { resolveTickersToContracts } from "@/lib/markets/geckoterminal";
+import { isSolAddr, canonAddr } from "@/lib/chains/address";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const GT_BASE =
-  process.env.GECKOTERMINAL_BASE ?? "https://api.geckoterminal.com/api/v2";
+/* ========== Body ========== */
+const Body = z.object({
+  screen_name: z.string().min(1),
+  days: z.number().int().min(1).max(30).optional().default(7),
+  missingOnly: z.boolean().optional().default(true),
+});
 
-async function resolveTickersToContracts(tickers: string[]) {
-  const out = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-  const NETWORKS = [
-    "eth",
-    "bsc",
-    "base",
-    "polygon",
-    "arbitrum",
-    "optimism",
-    "avalanche",
-    "fantom",
-    "solana",
-  ];
-
-  for (const raw of tickers) {
-    const ticker = raw.replace(/^\$+/, "").toLowerCase();
-    let hit: { addr?: string; display?: string } | null = null;
-
-    for (const net of NETWORKS) {
-      try {
-        const url = `${GT_BASE}/search/pools?query=${encodeURIComponent(ticker)}&network=${encodeURIComponent(net)}&include=base_token,quote_token`;
-        const res = await fetch(url, {
-          headers: { accept: "application/json" },
-          cache: "no-store",
-        });
-        if (!res.ok) continue;
-        const j: any = await res.json();
-
-        const inc: any[] = Array.isArray(j?.included) ? j.included : [];
-        const token = inc.find(
-          (x) =>
-            x?.type?.includes("token") &&
-            String(x?.attributes?.symbol ?? "").toLowerCase() === ticker,
-        );
-
-        if (token?.attributes?.address) {
-          const addr = String(token.attributes.address).toLowerCase();
-          hit = { addr, display: `$${ticker.toUpperCase()}` };
-          break;
-        }
-
-        const addrFromJson = JSON.stringify(inc).match(
-          /\b0x[a-fA-F0-9]{40}\b/,
-        )?.[0];
-        if (addrFromJson) {
-          hit = {
-            addr: addrFromJson.toLowerCase(),
-            display: `$${ticker.toUpperCase()}`,
-          };
-          break;
-        }
-      } catch {
-        /* ignore and try next network */
-      }
-    }
-
-    if (hit?.addr) {
-      out.set(ticker, {
-        tokenKey: hit.addr,
-        tokenDisplay: hit.display ?? `$${ticker.toUpperCase()}`,
-        boostedConf: 98,
-      });
-    } else {
-      out.set(ticker, {
-        tokenKey: ticker,
-        tokenDisplay: `$${ticker.toUpperCase()}`,
-        boostedConf: 95,
-      });
-    }
-  }
-  return out;
+/* ========== Small helpers ========== */
+// Prefer readable input for trigger text
+function triggerInputFor(m: Mention) {
+  if (m.source === "ca") return m.tokenKey || "";
+  if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
+  return `$${String(m.tokenKey || "").toUpperCase()}`;
 }
 
+/* ========== Route ========== */
 export async function POST(req: Request) {
+  // Admin auth
   const session = await getServerSession(authOptions);
   const isAdmin = Boolean((session?.user as any)?.isAdmin);
-  if (!isAdmin)
+  if (!isAdmin) {
     return NextResponse.json(
       { ok: false, error: "forbidden" },
       { status: 403 },
     );
+  }
 
-  const { screen_name, days } = Body.parse(await req.json());
+  const { screen_name, days, missingOnly } = Body.parse(await req.json());
   const handle = screen_name.trim().replace(/^@+/, "").toLowerCase();
 
+  // Time window [since, until)
   const now = new Date();
   const since = new Date(now);
   since.setDate(now.getDate() - (days - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
+  // Load tweets
   const tweets = await db
     .select({
       tweetId: kolTweets.tweetId,
       textContent: kolTweets.textContent,
-      views: kolTweets.views,
-      likes: kolTweets.likes,
-      retweets: kolTweets.retweets,
-      replies: kolTweets.replies,
+      published: kolTweets.publishDate,
     })
     .from(kolTweets)
     .where(
@@ -129,45 +65,108 @@ export async function POST(req: Request) {
         gte(kolTweets.publishDate, since),
         lt(kolTweets.publishDate, until),
       ),
-    );
+    )
+    .orderBy(desc(kolTweets.publishDate));
 
-  const allMentions: { tweetId: string; mention: Mention }[] = [];
-  const uniqueTickers = new Set<string>();
-  for (const t of tweets) {
+  if (!tweets.length) {
+    return NextResponse.json({
+      ok: true,
+      handle,
+      days,
+      scannedTweets: 0,
+      mentionsDetected: 0,
+      inserted: 0,
+      updated: 0,
+    });
+  }
+
+  // When missingOnly=true, skip tweets that already have ANY mentions
+  let candidates = tweets;
+  if (missingOnly) {
+    const existing = await db
+      .select({ tweetId: tweetTokenMentions.tweetId })
+      .from(tweetTokenMentions)
+      .where(
+        inArray(
+          tweetTokenMentions.tweetId,
+          tweets.map((t) => t.tweetId),
+        ),
+      );
+    const has = new Set(existing.map((e) => e.tweetId));
+    candidates = tweets.filter((t) => !has.has(t.tweetId));
+  }
+
+  // Extract mentions; note if any Solana CA exists (to force solana for tickers)
+  const all: {
+    tweetId: string;
+    m: Mention;
+    triggerKey: string;
+    triggerText: string;
+  }[] = [];
+  const uniqueTickers = new Set<string>(); // "$TICKER"
+  let seenSolanaCA = false;
+
+  for (const t of candidates) {
     const ext = extractMentions(t.textContent ?? "");
     for (const m of ext) {
-      allMentions.push({ tweetId: t.tweetId, mention: m });
+      const input = triggerInputFor(m);
+      const { key, text } = buildTriggerKeyWithText({
+        source: m.source as any,
+        value: input,
+      });
+
+      all.push({
+        tweetId: t.tweetId,
+        m,
+        triggerKey: key,
+        triggerText: text,
+      });
+
+      if (m.source === "ca" && isSolAddr(m.tokenKey)) seenSolanaCA = true;
+
       if (m.source !== "ca") {
-        const tk = m.tokenDisplay.startsWith("$")
+        const tk = m.tokenDisplay?.startsWith("$")
           ? m.tokenDisplay
-          : `$${m.tokenKey.toUpperCase()}`;
+          : `$${String(m.tokenKey || "").toUpperCase()}`;
         uniqueTickers.add(tk);
       }
     }
   }
 
-  const resolved = await resolveTickersToContracts([...uniqueTickers]);
+  // Resolve tickers → tokenKey using GeckoTerminal
+  const resolved = await resolveTickersToContracts(
+    [...uniqueTickers],
+    seenSolanaCA ? { forceNetwork: "solana" } : { preferSolana: true },
+  );
 
+  // Build DB rows; de-duplicate by (tweetId, triggerKey)
   type Row = {
     tweetId: string;
     tokenKey: string;
-    tokenDisplay: string;
+    tokenDisplay: string | null;
     confidence: number;
-    source: "ca" | "ticker" | "phrase" | "hashtag" | "upper";
+    source: (typeof mentionSource.enumValues)[number];
+    triggerKey: string;
+    triggerText: string | null;
   };
   const rows: Row[] = [];
-  const seen = new Set<string>();
+  const seenPair = new Set<string>();
 
-  for (const { tweetId, mention } of allMentions) {
-    let tokenKey = mention.tokenKey;
-    let tokenDisplay = mention.tokenDisplay;
-    let confidence = mention.confidence;
+  for (const { tweetId, m, triggerKey, triggerText } of all) {
+    let tokenKey = m.tokenKey;
+    let tokenDisplay = m.tokenDisplay;
+    let confidence = m.confidence;
 
-    if (mention.source !== "ca") {
-      const t = mention.tokenDisplay.startsWith("$")
-        ? mention.tokenDisplay
-        : `$${mention.tokenKey.toUpperCase()}`;
-      const r = resolved.get(t.replace(/^\$+/, "").toLowerCase());
+    if (m.source === "ca") {
+      // For CA: trust address form, no GT lookup
+      tokenKey = canonAddr(String(m.tokenKey || ""));
+      tokenDisplay = tokenDisplay ?? m.tokenKey;
+    } else {
+      // For ticker/phrase: prefer Solana + DEX-priority ranking
+      const disp = m.tokenDisplay?.startsWith("$")
+        ? m.tokenDisplay
+        : `$${String(m.tokenKey || "").toUpperCase()}`;
+      const r = resolved.get(disp.replace(/^\$+/, "").toLowerCase());
       if (r) {
         tokenKey = r.tokenKey;
         tokenDisplay = r.tokenDisplay;
@@ -175,46 +174,88 @@ export async function POST(req: Request) {
       }
     }
 
-    const k = `${tweetId}::${tokenKey}`;
-    if (seen.has(k)) continue;
-    seen.add(k);
+    const pair = `${tweetId}___${triggerKey}`;
+    if (seenPair.has(pair)) continue;
+    seenPair.add(pair);
 
     rows.push({
       tweetId,
-      tokenKey,
-      tokenDisplay,
+      tokenKey: canonAddr(String(tokenKey || "")), // EVM lowercased; Solana preserved
+      tokenDisplay: tokenDisplay ?? (m.tokenDisplay || m.tokenKey),
       confidence: Math.min(100, Math.max(0, Math.round(confidence))),
-      source: mention.source,
+      source: m.source as any as Row["source"],
+      triggerKey,
+      triggerText,
     });
   }
 
-  let inserted = 0;
-  if (rows.length) {
-    const result = await db
-      .insert(tweetTokenMentions)
-      .values(
-        rows.map((r) => ({
-          tweetId: r.tweetId,
-          tokenKey: r.tokenKey,
-          tokenDisplay: r.tokenDisplay,
-          confidence: r.confidence,
-          source: r.source,
-        })),
-      )
-      .onConflictDoNothing({
-        target: [tweetTokenMentions.tweetId, tweetTokenMentions.tokenKey],
-      })
-      .returning({ id: tweetTokenMentions.id });
+  if (!rows.length) {
+    return NextResponse.json({
+      ok: true,
+      handle,
+      days,
+      scannedTweets: candidates.length,
+      mentionsDetected: 0,
+      inserted: 0,
+      updated: 0,
+    });
+  }
 
-    inserted = result.length;
+  // Accurate counts via pre-check (existing pairs)
+  const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
+  const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
+  const existingPairs = await db
+    .select({
+      tweetId: tweetTokenMentions.tweetId,
+      triggerKey: tweetTokenMentions.triggerKey,
+      tokenKey: tweetTokenMentions.tokenKey,
+    })
+    .from(tweetTokenMentions)
+    .where(
+      and(
+        inArray(tweetTokenMentions.tweetId, tweetIds),
+        inArray(tweetTokenMentions.triggerKey, triggers),
+      ),
+    );
+
+  const existsMap = new Map(
+    existingPairs.map((e) => [`${e.tweetId}___${e.triggerKey}`, e.tokenKey]),
+  );
+  const willInsert = rows.filter(
+    (r) => !existsMap.has(`${r.tweetId}___${r.triggerKey}`),
+  ).length;
+  const willUpdate = rows.filter((r) => {
+    const prev = existsMap.get(`${r.tweetId}___${r.triggerKey}`);
+    return prev && prev !== r.tokenKey;
+  }).length;
+
+  // Upsert by (tweet_id, trigger_key), chunked
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    await db
+      .insert(tweetTokenMentions)
+      .values(chunk)
+      .onConflictDoUpdate({
+        target: [tweetTokenMentions.tweetId, tweetTokenMentions.triggerKey],
+        set: {
+          tokenKey: sql`excluded.token_key`,
+          tokenDisplay: sql`excluded.token_display`,
+          confidence: sql`excluded.confidence`,
+          source: sql`excluded.source`,
+          triggerText: sql`excluded.trigger_text`,
+          updatedAt: sql`now()`,
+        },
+      });
   }
 
   return NextResponse.json({
     ok: true,
     handle,
     days,
-    scannedTweets: tweets.length,
+    scannedTweets: candidates.length,
     mentionsDetected: rows.length,
-    inserted,
+    inserted: willInsert,
+    updated: willUpdate,
   });
 }

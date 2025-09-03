@@ -1,6 +1,6 @@
 {
-  "id": "8fc5577d-ddbf-444b-8379-11b358c9d7ed",
-  "prevId": "aba94568-1398-445c-b1f1-aa7272ff45bb",
+  "id": "2cc046ac-01cc-4c21-8845-6b8a6d6e3437",
+  "prevId": "447e787a-0e8f-470e-a4e7-0285a4a11810",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -95,7 +95,7 @@
         "tweet_id": {
           "name": "tweet_id",
           "type": "text",
-          "primaryKey": true,
+          "primaryKey": false,
           "notNull": true
         },
         "twitter_uid": {
@@ -129,7 +129,7 @@
           "type": "bigint",
           "primaryKey": false,
           "notNull": true,
-          "default": "'0'"
+          "default": "0"
         },
         "likes": {
           "name": "likes",
@@ -222,7 +222,7 @@
             {
               "expression": "publish_date",
               "isExpression": false,
-              "asc": false,
+              "asc": true,
               "nulls": "last"
             }
           ],
@@ -243,7 +243,7 @@
             {
               "expression": "publish_date",
               "isExpression": false,
-              "asc": false,
+              "asc": true,
               "nulls": "last"
             }
           ],
@@ -268,7 +268,14 @@
           "onUpdate": "cascade"
         }
       },
-      "compositePrimaryKeys": {},
+      "compositePrimaryKeys": {
+        "pk_kol_tweets_tweet_id": {
+          "name": "pk_kol_tweets_tweet_id",
+          "columns": [
+            "tweet_id"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -349,7 +356,7 @@
             {
               "expression": "followers",
               "isExpression": false,
-              "asc": false,
+              "asc": true,
               "nulls": "last"
             }
           ],
@@ -547,8 +554,27 @@
           "primaryKey": false,
           "notNull": true
         },
+        "trigger_key": {
+          "name": "trigger_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "trigger_text": {
+          "name": "trigger_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -556,8 +582,8 @@
         }
       },
       "indexes": {
-        "uniq_tweet_token": {
-          "name": "uniq_tweet_token",
+        "uniq_tweet_trigger": {
+          "name": "uniq_tweet_trigger",
           "columns": [
             {
               "expression": "tweet_id",
@@ -566,7 +592,7 @@
               "nulls": "last"
             },
             {
-              "expression": "token_key",
+              "expression": "trigger_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -582,6 +608,36 @@
           "columns": [
             {
               "expression": "token_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_mentions_trigger": {
+          "name": "idx_mentions_trigger",
+          "columns": [
+            {
+              "expression": "trigger_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_mentions_trigger_text": {
+          "name": "idx_mentions_trigger_text",
+          "columns": [
+            {
+              "expression": "trigger_text",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
