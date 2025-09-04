@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 const Body = z.object({
   screen_name: z.string().min(1),
   pollIntervalMs: z.number().int().min(200).max(3000).optional().default(1000),
-  maxWaitMs: z.number().int().min(1000).max(60000).optional().default(20000),
+  maxWaitMs: z.number().int().min(1000).max(500000).optional().default(200000),
 });
 
 const norm = (h: string) => h.trim().replace(/^@+/, "").toLowerCase();

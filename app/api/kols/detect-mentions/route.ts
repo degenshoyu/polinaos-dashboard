@@ -8,7 +8,10 @@ import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
 import { eq, and, gte, lt, sql, inArray, desc } from "drizzle-orm";
 import { extractMentions, type Mention } from "@/lib/tokens/extract";
 import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
-import { resolveTickersToContracts } from "@/lib/markets/geckoterminal";
+import {
+  resolveTickersToContracts,
+  resolveContractsToMeta,
+} from "@/lib/markets/geckoterminal";
 import { isSolAddr, canonAddr } from "@/lib/chains/address";
 
 export const runtime = "nodejs";
@@ -96,7 +99,7 @@ export async function POST(req: Request) {
     candidates = tweets.filter((t) => !has.has(t.tweetId));
   }
 
-  // Extract mentions; note if any Solana CA exists (to force solana for tickers)
+  // Extract mentions; record tickers and CA presence
   const all: {
     tweetId: string;
     m: Mention;
@@ -104,6 +107,7 @@ export async function POST(req: Request) {
     triggerText: string;
   }[] = [];
   const uniqueTickers = new Set<string>(); // "$TICKER"
+  const caSet = new Set<string>(); // canon contract addresses
   let seenSolanaCA = false;
 
   for (const t of candidates) {
@@ -122,9 +126,11 @@ export async function POST(req: Request) {
         triggerText: text,
       });
 
-      if (m.source === "ca" && isSolAddr(m.tokenKey)) seenSolanaCA = true;
-
-      if (m.source !== "ca") {
+      if (m.source === "ca") {
+        const addr = canonAddr(String(m.tokenKey || ""));
+        if (addr) caSet.add(addr);
+        if (isSolAddr(m.tokenKey)) seenSolanaCA = true;
+      } else {
         const tk = m.tokenDisplay?.startsWith("$")
           ? m.tokenDisplay
           : `$${String(m.tokenKey || "").toUpperCase()}`;
@@ -133,11 +139,44 @@ export async function POST(req: Request) {
     }
   }
 
-  // Resolve tickers → tokenKey using GeckoTerminal
+  // Resolve tickers -> contracts (prefer Solana if any Sol CA seen)
   const resolved = await resolveTickersToContracts(
     [...uniqueTickers],
     seenSolanaCA ? { forceNetwork: "solana" } : { preferSolana: true },
   );
+
+  // Reverse map: contract -> { tokenDisplay, boostedConf }
+  const byContract = new Map<
+    string,
+    { tokenDisplay: string; boostedConf: number }
+  >();
+  for (const [, r] of resolved.entries()) {
+    const addr = canonAddr(String(r.tokenKey || ""));
+    if (addr)
+      byContract.set(addr, {
+        tokenDisplay: r.tokenDisplay,
+        boostedConf: r.boostedConf,
+      });
+  }
+
+  // CA-only resolution: resolve contracts that have no ticker meta
+  const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
+  if (missingCA.length) {
+    const caMeta = await resolveContractsToMeta(
+      missingCA,
+      seenSolanaCA ? { forceNetwork: "solana" } : undefined,
+    );
+    for (const [addr, meta] of caMeta.entries()) {
+      byContract.set(addr, {
+        tokenDisplay: meta.tokenDisplay,
+        boostedConf: meta.boostedConf,
+      });
+    }
+    console.debug("[detect-mentions] CA resolved via GT", {
+      total: missingCA.length,
+      hit: Array.from(caMeta.keys()).length,
+    });
+  }
 
   // Build DB rows; de-duplicate by (tweetId, triggerKey)
   type Row = {
@@ -158,11 +197,25 @@ export async function POST(req: Request) {
     let confidence = m.confidence;
 
     if (m.source === "ca") {
-      // For CA: trust address form, no GT lookup
-      tokenKey = canonAddr(String(m.tokenKey || ""));
-      tokenDisplay = tokenDisplay ?? m.tokenKey;
+      // CA: always map to a friendly $SYMBOL when possible
+      const addr = canonAddr(String(m.tokenKey || ""));
+      tokenKey = addr;
+      const meta = addr ? byContract.get(addr) : undefined;
+      if (meta?.tokenDisplay) {
+        tokenDisplay = meta.tokenDisplay;
+        confidence = Math.max(confidence, meta.boostedConf ?? 0);
+      } else {
+        // Last resort: synthesize a short tag for visibility
+        const short = addr ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : "????";
+        tokenDisplay = `$${short}`;
+        console.warn("[detect-mentions] CA unresolved by GT", {
+          tweetId,
+          addr,
+          triggerKey,
+        });
+      }
     } else {
-      // For ticker/phrase: prefer Solana + DEX-priority ranking
+      // Ticker/phrase: prefer Solana + DEX-priority ranking
       const disp = m.tokenDisplay?.startsWith("$")
         ? m.tokenDisplay
         : `$${String(m.tokenKey || "").toUpperCase()}`;

@@ -249,3 +249,151 @@ export async function resolveTickersToContracts(
 
   return out;
 }
+
+/** Resolve contract addresses -> { tokenKey, tokenDisplay, boostedConf } */
+export async function resolveContractsToMeta(
+  addrs: string[],
+  opts?: ResolveOpts,
+) {
+  const out = new Map<
+    string,
+    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+  >();
+
+  const uniq = Array.from(
+    new Set(addrs.map((a) => canonAddr(String(a || ""))).filter(Boolean)),
+  );
+
+  // Helper: pick candidate for a single (addr, network)
+  async function searchOne(addr: string, net: string): Promise<Candidate[]> {
+    try {
+      const url = `${GT_BASE}/search/pools?query=${encodeURIComponent(
+        addr,
+      )}&network=${encodeURIComponent(net)}&include=base_token,quote_token,dex`;
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!res.ok) return [];
+
+      const j: any = await res.json();
+      const data = (Array.isArray(j?.data) ? j.data : []) as any[];
+      const included = (Array.isArray(j?.included) ? j.included : []) as any[];
+
+      const tokens: GTToken[] = included
+        .filter((x: any) => String(x?.type || "").includes("token"))
+        .map(
+          (x: any): GTToken => ({
+            id: String(x?.id ?? ""),
+            symbol: String(x?.attributes?.symbol ?? ""),
+            address: canonAddr(String(x?.attributes?.address ?? "")),
+            attrs: {
+              market_cap_usd: (x?.attributes?.market_cap_usd ??
+                x?.attributes?.fdv_usd ??
+                null) as number | null,
+              fdv_usd: (x?.attributes?.fdv_usd ?? null) as number | null,
+            },
+          }),
+        );
+
+      const dexes: GTDex[] = included
+        .filter((x: any) => String(x?.type || "").includes("dex"))
+        .map(
+          (x: any): GTDex => ({
+            id: String(x?.id ?? ""),
+            name: String(x?.attributes?.name ?? x?.attributes?.slug ?? ""),
+          }),
+        );
+      const dexNameById = new Map(dexes.map((d) => [d.id, d.name]));
+
+      const cands: Candidate[] = [];
+      for (const p of data) {
+        const attrs = (p?.attributes ?? {}) as PoolAttrs;
+        const rels = p?.relationships ?? {};
+
+        const baseId: string = String(rels?.base_token?.data?.id ?? "");
+        const quoteId: string = String(rels?.quote_token?.data?.id ?? "");
+        const dexRelId: string = String(rels?.dex?.data?.id ?? "");
+
+        const base = tokens.find((t) => t.id === baseId);
+        const quote = tokens.find((t) => t.id === quoteId);
+
+        const dexName =
+          dexNameById.get(dexRelId) ||
+          String((attrs as any).dex_name ?? attrs.name ?? "");
+
+        const volume24h = pickVolume(attrs.volume_usd as VolUSD | undefined);
+        const reserveUsd = Number(attrs.reserve_in_usd ?? 0);
+
+        // match target addr on either side
+        const side = [base, quote].find((t) => t?.address === addr);
+        if (side?.address) {
+          cands.push({
+            network: net,
+            addr: side.address,
+            symbol: side.symbol, // may be empty, we'll guard later
+            dexName,
+            dexScore: dexPriority(dexName),
+            volume24h,
+            reserveUsd,
+            marketCap: pickMcap(side.attrs),
+          });
+        }
+      }
+      return cands;
+    } catch {
+      return [];
+    }
+  }
+
+  // Resolve each address across networks (Solana-only vs EVM list)
+  for (const addr of uniq) {
+    const nets: readonly string[] =
+      opts?.forceNetwork === "solana" || isSolAddr(addr)
+        ? (["solana"] as const)
+        : opts?.forceNetwork === "evm"
+          ? ([
+              "base",
+              "eth",
+              "bsc",
+              "polygon",
+              "arbitrum",
+              "optimism",
+              "avalanche",
+              "fantom",
+            ] as const)
+          : NETWORKS_PREFERRED;
+
+    const perNet = await Promise.all(nets.map((n) => searchOne(addr, n)));
+    const all = perNet.flat();
+
+    const solBest = all
+      .filter((c) => c.network === "solana")
+      .sort(compareCandidates)[0];
+    const best = solBest || all.sort(compareCandidates)[0];
+
+    if (best) {
+      const sym = String(best.symbol || "").trim();
+      // Fallback: if GT returns empty symbol, synthesize "$ADDR" short tag
+      const tokenDisplay =
+        sym.length > 0
+          ? `$${sym.toUpperCase()}`
+          : `$${addr.slice(0, 4)}…${addr.slice(-4)}`;
+      out.set(addr, {
+        tokenKey: addr,
+        tokenDisplay,
+        boostedConf:
+          (best.network === "solana" ? 99 : 97) + (best.dexScore > 0 ? 1 : 0),
+      });
+    } else {
+      // Hard fallback: still return synthesized tag; caller can log/warn.
+      out.set(addr, {
+        tokenKey: addr,
+        tokenDisplay: `$${addr.slice(0, 4)}…${addr.slice(-4)}`,
+        boostedConf: 90,
+      });
+    }
+  }
+
+  return out;
+}
