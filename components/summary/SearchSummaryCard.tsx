@@ -25,9 +25,9 @@ export default function SearchSummaryCard({
   topShillers,
   className = "",
 }: {
-  ticker: string;           // e.g. $MASK（已确保外层传入为大写+带$）
-  startDate?: string;       // ISO
-  endDate?: string;         // ISO（展示时 -1 天）
+  ticker: string;
+  startDate?: string;
+  endDate?: string;
   contractAddress?: string | null;
   all: Agg;
   ver: Agg;
@@ -40,7 +40,6 @@ export default function SearchSummaryCard({
     return Number.isNaN(d.getTime()) ? s : new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(d);
   };
 
-  // 展示用：end_date - 1 天
   const endMinusOne = (() => {
     if (!endDate) return undefined;
     const d = new Date(endDate);
@@ -54,14 +53,12 @@ export default function SearchSummaryCard({
 
   return (
     <div className={`relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-[#0d1412] via-[#0b100f] to-[#0a0f0e] shadow-2xl ${className}`}>
-      {/* 装饰光晕 */}
       <div aria-hidden className="pointer-events-none absolute -top-24 -left-24 h-64 w-64 rounded-full bg-emerald-500/20 blur-3xl" />
       <div aria-hidden className="pointer-events-none absolute -bottom-20 -right-20 h-72 w-72 rounded-full bg-teal-400/20 blur-3xl" />
-      {/* 渐变描边 */}
       <div className="absolute inset-0 rounded-2xl ring-1 ring-white/10" />
 
       <div className="relative p-5 md:p-6">
-        {/* 标题（animated gradient text） */}
+        {/* Title */}
         <h3 className="text-lg md:text-xl font-extrabold tracking-tight">
           <span className="animated-gradient bg-clip-text text-transparent">{ticker} Weekly Performance on X</span>
         </h3>
@@ -69,13 +66,13 @@ export default function SearchSummaryCard({
           {fmtDate(startDate)} - {fmtDate(endMinusOne)}
         </div>
 
-        {/* 合约地址 */}
+        {/* CA */}
         <div className="mt-3 text-[12px] md:text-sm text-gray-300">
-          <span className="text-gray-400">Contract Address:&nbsp;</span>
+          <span className="text-gray-400">CA:&nbsp;</span>
           <span className="font-mono text-white/90 break-all">{contractAddress || "N/A"}</span>
         </div>
 
-        {/* All / Verified 左右并列（单行紧凑指标） */}
+        {/* All / Verified */}
         <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
             <div className="text-xs uppercase tracking-wide text-emerald-300 font-semibold">Total Tweets</div>
@@ -133,7 +130,6 @@ export default function SearchSummaryCard({
         </div>
       </div>
 
-      {/* 组件内联动画，避免动全局配置 */}
       <style jsx>{`
         .animated-gradient {
           background-image: linear-gradient(90deg, #2fd480, #3ef2ac, #27a567, #2fd480);
@@ -149,7 +145,6 @@ export default function SearchSummaryCard({
   );
 }
 
-/** 奖杯徽章（金/银/铜 + 右上角排名数） */
 function TrophyBadge({ rank }: { rank: 1 | 2 | 3 }) {
   const scheme =
     rank === 1
@@ -176,7 +171,6 @@ function TrophyBadge({ rank }: { rank: 1 | 2 | 3 }) {
   );
 }
 
-/** 单行紧凑指标：Impressions 1.2M / Engagements 34K / ER 3.4% */
 function MetricInline({ label, value, highlight = false }: { label: string; value: string; highlight?: boolean }) {
   return (
     <li
@@ -189,7 +183,6 @@ function MetricInline({ label, value, highlight = false }: { label: string; valu
   );
 }
 
-/** 小胶囊统计（用于 Top shillers 一行内展示） */
 function StatPill({ icon, value }: { icon: string; value: string }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 whitespace-nowrap">
