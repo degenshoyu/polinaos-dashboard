@@ -7,7 +7,7 @@ import { useGeckoSearch, type TokenOption } from "@/hooks/useGeckoSearch";
 
 export default function InputCard({
   onRun,
-  deepLinkUrl, // 仍保留入参，但不显示 Copy 按钮
+  deepLinkUrl,
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;

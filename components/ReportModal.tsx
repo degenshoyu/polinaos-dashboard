@@ -31,6 +31,14 @@ type JobPayload = {
   tweets?: TweetRow[];
 };
 
+function fmtDateMinusOne(s?: string) {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  d.setDate(d.getDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 export default function ReportModal({
   open,
   onClose,
@@ -49,7 +57,7 @@ export default function ReportModal({
   const copyTimerRef = useRef<number | null>(null);
 
   /** ===== helpers ===== */
-  const n = (x: any, d = 0) => {
+  const n = (x: any, _d = 0) => {
     const v = Number(x);
     return Number.isFinite(v) && v > 0 ? v : 0;
   };
@@ -151,7 +159,7 @@ export default function ReportModal({
   const avgAllEngs = useMemo(() => (aggAll.tweets > 0 ? aggAll.engs / aggAll.tweets : 0), [aggAll]);
   const verShare = useMemo(() => (aggAll.views > 0 ? aggVer.views / aggAll.views : 0), [aggAll, aggVer]);
 
-  /** ===== KOL aggregation & helpers for Top-3 blocks ===== */
+  /** ===== KOL aggregation & helpers for blocks ===== */
   type MinimalTweet = Pick<
     TweetRow,
     "tweeter" | "views" | "likes" | "retweets" | "replies" | "statusLink" | "isVerified"
@@ -200,10 +208,11 @@ export default function ReportModal({
 
   const MEDALS = ["🥇", "🥈", "🥉"] as const;
 
-  function buildTop3Block(title: string, list: UserAgg[]) {
-    const top3 = list.slice(0, 3);
+  // 支持自定义数量（3 或 5）
+  function buildTopBlock(title: string, list: UserAgg[], limit: number = 3) {
+    const topN = list.slice(0, limit);
     const lines: string[] = [title, ""];
-    top3.forEach((u, i) => {
+    topN.forEach((u, i) => {
       const medal = MEDALS[i] || "•";
       const handle = "@" + u.handle;
       const line2 = `${compact(u.views)} views | ${compact(u.engs)} engs | ${pct(u.er)} ER`;
@@ -243,7 +252,7 @@ export default function ReportModal({
         if (!r.datetime) return null;
         const d = new Date(r.datetime);
         if (Number.isNaN(d.getTime())) return null;
-        const hour = d.getHours();
+        const hour = d.getUTCHours();
         const v = n(r.views);
         const e = n(r.likes) + n(r.retweets) + n(r.replies);
         const er = v > 0 ? e / v : 0;
@@ -297,55 +306,46 @@ export default function ReportModal({
       `✅ ${pct(verShare)} verified views share`,
     ].join("\n");
 
-    // 2️⃣ Verified Leaders ✅
-    const verifiedLeaders = users
+    // 2️⃣ Top Shillers 🏆  (原 Verified Leaders，保留 verified 过滤，按总观看量排序，前5名)
+    const topShillers = users
       .filter((u) => u.verified)
       .sort((a, b) => b.views - a.views);
 
-    // 3️⃣ Shiller Leaderboard 🏆 (Overall Score)
-    const withScore = users
-      .map((u) => ({ ...u, _score: u.views * 0.6 + u.engs * 0.3 + (u.er * 100) * 0.1 }))
-      .sort((a, b) => b._score - a._score);
-
-    // 4️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)
-    const p50Views = median(users.map((u) => (u.views / Math.max(1, u.tweets))));
+    // 3️⃣ Underdogs 🐾 (low-view baseline, ER ≥ 3%)
+    const p50Views = median(users.map((u) => u.views / Math.max(1, u.tweets)));
     const emerging = users
       .filter((u) => (u.views / Math.max(1, u.tweets)) <= p50Views && u.er >= 0.03)
       .sort((a, b) => b.er - a.er);
 
-    // 5️⃣ Distribution Insights
+    // 4️⃣ Distribution Insights
     const timeTxt = timeWindows.length
       ? timeWindows.map((x) => `${String(x.hour).padStart(2, "0")}:00 (ER p50 ${pct(x.er)})`).join(", ")
       : "—";
 
-    // Header & sections
     const parts: string[] = [
-      // New header line with enforced uppercase ticker
       `My weekly take on ${ticker}’s Twitter performance 👇`,
-      `[ ${fmtDate(data?.start_date)} ~ ${fmtDate(data?.end_date)} ]`,
+      `[ ${fmtDate(data?.start_date)} ~ ${fmtDateMinusOne(data?.end_date)} ]`,
       "",
       "1️⃣ Executive Snapshot",
       "",
       snapshot,
       "",
-      buildTop3Block("2️⃣ Verified Leaders ✅ (by top views)", verifiedLeaders),
+      // Top Shillers → 前5名
+      buildTopBlock("2️⃣ Top Shillers 🏆", topShillers, 5),
       "",
-      buildTop3Block("3️⃣ Shiller Leaderboard 🏆 (Overall Score)", withScore),
+      // Emerging → 前3名
+      buildTopBlock("3️⃣ Emerging 🌱", emerging, 3),
       "",
-      buildTop3Block("4️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)", emerging),
-      "",
-      "5️⃣ Distribution Insights 🚚",
+      "4️⃣ Distribution Insights 🚚",
       "",
       `- ⏰ Time-of-day lift windows: ${timeTxt}`,
       `- 🔵 Verified contribution trend: ${pct(verShare)} (level)`,
       "",
-      // Executive summary moved here with a title
       "🧩 Conclusion",
       "",
       execSummary,
       "",
-      // `CA: ${contractAddress}`,
-      `Source: @PolinaAIOS ${deeplink}`
+      `Source: @PolinaAIOS ${deeplink}`,
     ];
 
     return parts.join("\n");
