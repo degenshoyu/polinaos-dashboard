@@ -323,7 +323,7 @@ export default function ReportModal({
       : "—";
 
     const parts: string[] = [
-      `My weekly take on ${ticker}’s Twitter performance 👇`,
+      `My weekly take on ${ticker} ’s Twitter performance 👇`,
       `[ ${fmtDate(data?.start_date)} ~ ${fmtDateMinusOne(data?.end_date)} ]`,
       "",
       "1️⃣ Executive Snapshot",
