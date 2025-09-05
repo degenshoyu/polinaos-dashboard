@@ -336,15 +336,6 @@ export default function ReportModal({
       // Emerging → 前3名
       buildTopBlock("3️⃣ Emerging 🌱", emerging, 3),
       "",
-      "4️⃣ Distribution Insights 🚚",
-      "",
-      `- ⏰ Time-of-day lift windows: ${timeTxt}`,
-      `- 🔵 Verified contribution trend: ${pct(verShare)} (level)`,
-      "",
-      "🧩 Conclusion",
-      "",
-      execSummary,
-      "",
       `Source: @PolinaAIOS ${deeplink}`,
     ];
 

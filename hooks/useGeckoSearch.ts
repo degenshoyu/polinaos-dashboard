@@ -84,6 +84,8 @@ export type TokenOption = {
   /** misc display */
   pairName: string;
   poolAge?: string | null;
+
+  createdAt?: string | number;
 };
 
 export type UseGeckoSearchOptions = {
@@ -325,6 +327,8 @@ export function useGeckoSearch(options?: UseGeckoSearchOptions) {
 
             pairName: p.attributes.name,
             poolAge: humanAge(p.attributes.pool_created_at),
+
+            createdAt: p.attributes.pool_created_at,
           };
 
           return opt;

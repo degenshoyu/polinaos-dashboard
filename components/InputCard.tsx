@@ -1,7 +1,7 @@
 // components/InputCard.tsx
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState, useEffect } from "react";
 import type { AnalysisInput } from "./types";
 import { useGeckoSearch, type TokenOption } from "@/hooks/useGeckoSearch";
 
@@ -35,9 +35,8 @@ export default function InputCard({
     marketCapUsd?: number;
     reserveUsd?: number;
     volume24hUsd?: number;
-    createdAt?: string;
+    createdAt?: string | number;
     dex?: string;
-    // 新增：外链
     dexUrl?: string;
     twitter?: string | null;
     telegram?: string | null;
@@ -52,6 +51,12 @@ export default function InputCard({
   const [localQuery, setLocalQuery] = useState(hookQuery ?? "");
   const listRef = useRef<HTMLDivElement | null>(null);
   const [activeIdx, setActiveIdx] = useState(0);
+
+  useEffect(() => {
+    if (results?.length) {
+      console.log("[GECKO] sample result", results[0]);
+    }
+  }, [results]);
 
   const canRun = useMemo(() => Boolean(form.tokenAddress?.trim()), [form.tokenAddress]);
 
@@ -69,7 +74,8 @@ export default function InputCard({
     setForm(next);
     setLocalQuery(`${opt.symbol} · ${shortAddr(opt.tokenAddress)}`);
 
-    // 先乐观设置基础元信息
+    console.log("[GECKO] raw opt.createdAt =", (opt as any).createdAt, typeof (opt as any).createdAt);
+
     setSelectedMeta({
       networkId: opt.chain,
       symbol: opt.symbol,
@@ -79,20 +85,33 @@ export default function InputCard({
       marketCapUsd: (opt as any).marketCap ?? (opt as any).fdv ?? undefined,
       reserveUsd: (opt as any).liquidity,
       volume24hUsd: (opt as any).vol24h,
-      createdAt: (opt as any).createdAt ?? undefined,
+      createdAt: normalizeCreatedAt((opt as any).createdAt),
       dex: opt.dex ?? undefined,
     });
 
     onRun(next);
     setMode("frozen");
 
-    // 抓 socials（不阻塞 UI）
     try {
       const qs = new URLSearchParams({ chain: opt.chain, address: opt.tokenAddress || "" });
       const r = await fetch(`/api/dexscreener/info?${qs.toString()}`);
-      if (r.ok) {
-        const data = await r.json();
-        setSelectedMeta((prev) => ({
+    if (r.ok) {
+      const data = await r.json();
+      console.log("[DEXSCR] info.createdAt =", data?.createdAt, typeof data?.createdAt);
+
+      const bestPairCreated = pickBestPairCreatedAt(data);
+      if (bestPairCreated != null) {
+        console.log("[DEXSCR] bestPairCreated =", bestPairCreated);
+      }
+
+      setSelectedMeta((prev) => {
+        const fixedTop  = normalizeCreatedAt(data?.createdAt, { allowFutureDays: 3 });
+        const fixedPair = normalizeCreatedAt(bestPairCreated, { allowFutureDays: 3 });
+
+    // 选择优先级：顶层有效 > pairs 有效 > 维持原值（比如 GECKO 的）
+        const nextCreated = fixedTop || fixedPair || prev?.createdAt;
+
+        return {
           ...(prev || {}),
           dexUrl:
             data?.dexUrl ||
@@ -102,13 +121,12 @@ export default function InputCard({
           twitter: data?.twitter ?? null,
           telegram: data?.telegram ?? null,
           website: data?.website ?? null,
-          createdAt: data?.createdAt || prev?.createdAt,
-        }));
-      } else {
-        // 失败时静默
+          createdAt: nextCreated,
+        };
+       });
+     } else {
       }
     } catch {
-      // 静默
     }
   };
 
@@ -204,7 +222,7 @@ export default function InputCard({
           meta={selectedMeta || undefined}
         />
       )}
-      {/* 外围重复信息已移除 */}
+      {/* */}
     </div>
   );
 }
@@ -230,7 +248,7 @@ function FrozenView({
     marketCapUsd?: number;
     reserveUsd?: number;
     volume24hUsd?: number;
-    createdAt?: string;
+    createdAt?: string | number;
     dex?: string;
     dexUrl?: string;
     twitter?: string | null;
@@ -340,7 +358,7 @@ type ResultCardProps = {
   marketCapUsd?: number;
   reserveUsd?: number;
   volume24hUsd?: number;
-  createdAt?: string;
+  createdAt?: string | number;
   active?: boolean;
   onClick?: () => void;
   onMouseEnter?: () => void;
@@ -417,6 +435,45 @@ function ResultCard({
 }
 
 /* ----------------- helpers ----------------- */
+
+// ---- unify createdAt no matter seconds/milliseconds/ISO ----
+function normalizeCreatedAt(
+  v: unknown,
+  opts: { allowFutureDays?: number } = {}
+): string | undefined {
+  if (v == null) return undefined;
+
+  const allowFutureDays = opts.allowFutureDays ?? 3;
+  let ms: number | null = null;
+
+  if (typeof v === "number") {
+    ms = v < 2_000_000_000 ? v * 1000 : v;
+  } else if (typeof v === "string") {
+    if (/^\d+$/.test(v)) {
+      const n = Number(v);
+      ms = n < 2_000_000_000 ? n * 1000 : n;
+    } else {
+      const t = Date.parse(v);
+      ms = Number.isNaN(t) ? null : t;
+    }
+  }
+
+  if (ms == null || !Number.isFinite(ms)) return undefined;
+
+  const now = Date.now();
+  const maxFuture = now + allowFutureDays * 86400000;
+
+  if (ms > maxFuture) return undefined;
+
+  if (ms > now) ms = now;
+
+  const min = Date.UTC(2013, 0, 1);
+  if (ms < min) return undefined;
+
+  return new Date(ms).toISOString();
+}
+
+
 function shortAddr(addr?: string) {
   if (!addr) return "-";
   if (addr.length <= 14) return addr;
@@ -432,10 +489,10 @@ function moneyShort(v?: number) {
   return v.toFixed(2);
 }
 
-// 统一年龄文本
-function ageText(createdAt?: string) {
-  if (!createdAt) return "-";
-  const t = new Date(createdAt).getTime();
+function ageText(createdAt?: string | number) {
+  const iso = normalizeCreatedAt(createdAt);
+  if (!iso) return "-";
+  const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return "-";
   const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
   if (days < 1) return "new";
@@ -453,4 +510,37 @@ function chip(label: string, value?: React.ReactNode) {
       <span className="text-gray-200">{value ?? "-"}</span>
     </span>
   );
+}
+
+// 从 Dexscreener info.pairs 里挑“最合理”的创建时间（优先报价币 + 最大流动性）
+function pickBestPairCreatedAt(info: any): number | string | undefined {
+  const ps = Array.isArray(info?.pairs) ? info.pairs : [];
+  if (!ps.length) return undefined;
+
+  const preferredQuotes = new Set(["SOL", "WETH", "ETH", "USDC", "USDT"]);
+
+  const scored = ps
+    .map((p: any) => {
+      const liq =
+        p?.liquidity?.usd ??
+        p?.liquidityUSD ??
+        p?.reserveUsd ??
+        p?.liquidity ??
+        0;
+      const quoteSym = p?.quoteToken?.symbol?.toUpperCase?.();
+      const isPref = quoteSym ? preferredQuotes.has(quoteSym) : false;
+
+      const created = p?.pairCreatedAt ?? p?.createdAtMs ?? p?.createdAt;
+      return { liq: Number(liq) || 0, isPref, created };
+    })
+    .filter((x: any) => x.created != null);
+
+  if (!scored.length) return undefined;
+
+  scored.sort((a: any, b: any) => {
+    if (a.isPref !== b.isPref) return a.isPref ? -1 : 1;
+    return b.liq - a.liq;
+  });
+
+  return scored[0].created;
 }
