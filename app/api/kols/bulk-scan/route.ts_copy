@@ -1,30 +1,23 @@
 // app/api/kols/bulk-scan/route.ts
-// Comments: English only as requested.
-// Purpose: Bulk-scan KOLs by calling /api/kols/scan-tweets in parallel.
-// Cron support: Vercel Cron (GET) -> internally calls POST with secret.
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db/client";
 import { kols } from "@/lib/db/schema";
-import { asc } from "drizzle-orm";
+import { sql, asc } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ========================= Input Schema ========================= */
+/** -------- Input schema -------- */
 const Body = z.object({
   // Optional: explicit list of handles (@ optional, case-insensitive)
   handles: z.array(z.string().min(1)).optional(),
-
   // Scan window for each handle (hours)
   windowHours: z.number().int().min(1).max(168).optional().default(24),
-
-  // Concurrency for parallel scans
+  // Concurrency level for parallel scans
   concurrency: z.number().int().min(1).max(6).optional().default(3),
-
   // Max time to wait for each handle's job inside /scan-tweets
   maxWaitMs: z
     .number()
@@ -33,7 +26,6 @@ const Body = z.object({
     .max(1_800_000)
     .optional()
     .default(1_200_000),
-
   // Poll interval passed to /scan-tweets
   pollIntervalMs: z
     .number()
@@ -42,21 +34,19 @@ const Body = z.object({
     .max(3_000)
     .optional()
     .default(1_000),
-
-  // If handles is empty, pull up to 'limit' KOLs from DB
+  // If handles is empty, pull up to 'limit' KOLs from DB (ordered by recent activity if available)
   limit: z.number().int().min(1).max(2000).optional().default(250),
 });
 
-/* ========================= Helpers ========================= */
+/** -------- Helpers -------- */
 const norm = (h: string) => h.trim().replace(/^@+/, "").toLowerCase();
-
-function originFromReq(req: Request) {
+const ORIGIN = (req: Request) => {
   const proto = req.headers.get("x-forwarded-proto") ?? "http";
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
   return `${proto}://${host}`;
-}
+};
 
-/** Simple mapLimit without external deps */
+/** Basic concurrency control without external deps */
 async function mapLimit<T, R>(
   items: T[],
   limit: number,
@@ -78,29 +68,16 @@ async function mapLimit<T, R>(
   return results;
 }
 
-/** Allow either admin session OR x-cron-secret header to pass */
+/** Allow either admin session OR x-cron-secret header */
 async function ensureAuth(req: Request) {
-  // Allow admin session
-  try {
-    const session = await getServerSession(authOptions);
-    const isAdmin = Boolean((session?.user as any)?.isAdmin);
-    if (isAdmin) return true;
-  } catch {
-    // No-op: fall through to header check
-  }
-
-  // Or allow CRON_SECRET via header
-  const secret = process.env.CRON_SECRET || "";
-  const hdr = req.headers.get("x-cron-secret") || "";
-  return Boolean(
-    secret &&
-      hdr &&
-      secret === secret /* tautology to keep type */ &&
-      hdr === secret,
-  );
+  const session = await getServerSession(authOptions);
+  const isAdmin = Boolean((session?.user as any)?.isAdmin);
+  if (isAdmin) return true;
+  const secret = process.env.CRON_SECRET;
+  const hdr = req.headers.get("x-cron-secret") ?? "";
+  return Boolean(secret && hdr && secret === hdr);
 }
 
-/* ========================= POST Handler ========================= */
 /** POST /api/kols/bulk-scan */
 export async function POST(req: Request) {
   if (!(await ensureAuth(req))) {
@@ -110,7 +87,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const origin = originFromReq(req);
+  const origin = ORIGIN(req);
   const cookie = req.headers.get("cookie") ?? "";
 
   const {
@@ -127,6 +104,7 @@ export async function POST(req: Request) {
   if (inputHandles?.length) {
     handles = Array.from(new Set(inputHandles.map(norm))).filter(Boolean);
   } else {
+    // Pull from DB; prefer recently seen or by id
     const rows = await db
       .select({ handle: kols.twitterUsername })
       .from(kols)
@@ -157,8 +135,6 @@ export async function POST(req: Request) {
     error?: string;
   };
 
-  const forwardSecret = req.headers.get("x-cron-secret") || "";
-
   async function runOne(handle: string): Promise<PerHandleResult> {
     try {
       const res = await fetch(`${origin}/api/kols/scan-tweets`, {
@@ -166,13 +142,18 @@ export async function POST(req: Request) {
         headers: {
           "Content-Type": "application/json",
           ...(cookie ? { cookie } : {}),
-          ...(forwardSecret ? { "x-cron-secret": forwardSecret } : {}),
+          // Forward cron secret too (if this route is called by Cron)
+          ...(req.headers.get("x-cron-secret")
+            ? { "x-cron-secret": req.headers.get("x-cron-secret")! }
+            : {}),
         },
         body: JSON.stringify({
           screen_name: handle,
           windowHours,
           pollIntervalMs,
           maxWaitMs,
+          // NOTE: /scan-tweets Body uses zod: extra fields are ignored by default,
+          // so we don't pass bulk-specific options here to avoid schema mismatch.
         }),
         cache: "no-store",
       });
@@ -234,37 +215,4 @@ export async function POST(req: Request) {
   };
 
   return NextResponse.json({ ok: true, total: handles.length, done, summary });
-}
-
-/* ========================= GET Handler (Vercel Cron) ========================= */
-/**
- * GET /api/kols/bulk-scan
- * - Only for Vercel Cron (x-vercel-cron: 1)
- * - Internally calls POST to reuse logic & auth (with x-cron-secret)
- */
-export async function GET(req: Request) {
-  // Ensure it's actually from Vercel Cron
-  const isCron = req.headers.get("x-vercel-cron") === "1";
-  if (!isCron) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden (GET only allowed for Vercel Cron)" },
-      { status: 403 },
-    );
-  }
-
-  // Forward to POST with CRON_SECRET (if provided)
-  const postReq = new Request(req.url, {
-    method: "POST",
-    headers: new Headers({
-      "content-type": "application/json",
-      // Inject CRON secret so POST auth can pass
-      ...(process.env.CRON_SECRET
-        ? { "x-cron-secret": process.env.CRON_SECRET }
-        : {}),
-    }),
-    // Empty body -> Body.parse(...) falls back to defaults (limit/window/concurrency etc.)
-    body: JSON.stringify({}),
-  });
-
-  return POST(postReq);
 }

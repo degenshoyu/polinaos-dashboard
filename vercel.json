@@ -2,9 +2,8 @@
   "crons": [
     {
       "path": "/api/kols/bulk-scan",
-      "schedule": "0 1 * * *",
-      "httpMethod": "POST",
-      "headers": { "x-cron-secret": "@CRON_SECRET" }
+      "schedule": "0 1 * * *"
     }
   ]
 }
+
