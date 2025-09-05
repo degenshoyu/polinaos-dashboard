@@ -110,14 +110,15 @@ export default function ReportModal({
   );
 
   const coreTicker = useMemo(() => resolveCoreFromJob(data?.keyword), [data]);
-  const ticker = useMemo(() => (coreTicker ? `$${coreTicker}` : "$ASSET"), [coreTicker]);
+  // Force uppercase ticker for display
+  const ticker = useMemo(() => (coreTicker ? `$${String(coreTicker).toUpperCase()}` : "$ASSET"), [coreTicker]);
 
   const contractAddress = useMemo(() => {
     const ca = resolveCAFromJob(data?.keyword, rowsAllRaw);
     return ca || "N/A";
   }, [data, rowsAllRaw]);
 
-  // Spam 过滤
+  // Spam filtering
   const rowsAll = useMemo<TweetRow[]>(() => {
     const rules = {
       coreTicker: coreTicker ?? null,
@@ -129,7 +130,7 @@ export default function ReportModal({
 
   const rowsVer = useMemo<TweetRow[]>(() => rowsAll.filter((t) => t.isVerified), [rowsAll]);
 
-  // 汇总
+  // Aggregates
   const aggAll = useMemo(() => {
     const tweets = rowsAll.length;
     const views = rowsAll.reduce((s, t) => s + n(t.views), 0);
@@ -306,28 +307,22 @@ export default function ReportModal({
       .map((u) => ({ ...u, _score: u.views * 0.6 + u.engs * 0.3 + (u.er * 100) * 0.1 }))
       .sort((a, b) => b._score - a._score);
 
-    // 4️⃣ Volume Grinders 🔁 (≥5 tweets)
-    const grinders = users
-      .filter((u) => u.tweets >= 5)
-      .sort((a, b) => (b.tweets - a.tweets) || (b.views - a.views));
-
-    // 5️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)
+    // 4️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)
     const p50Views = median(users.map((u) => (u.views / Math.max(1, u.tweets))));
     const emerging = users
       .filter((u) => (u.views / Math.max(1, u.tweets)) <= p50Views && u.er >= 0.03)
       .sort((a, b) => b.er - a.er);
 
-    // 6️⃣ Distribution Insights
+    // 5️⃣ Distribution Insights
     const timeTxt = timeWindows.length
       ? timeWindows.map((x) => `${String(x.hour).padStart(2, "0")}:00 (ER p50 ${pct(x.er)})`).join(", ")
       : "—";
 
-    // Header）
+    // Header & sections
     const parts: string[] = [
-      `${ticker} Weekly X Report`,
+      // New header line with enforced uppercase ticker
+      `My weekly take on ${ticker}’s Twitter performance 👇`,
       `[ ${fmtDate(data?.start_date)} ~ ${fmtDate(data?.end_date)} ]`,
-      "",
-      execSummary,
       "",
       "1️⃣ Executive Snapshot",
       "",
@@ -337,21 +332,36 @@ export default function ReportModal({
       "",
       buildTop3Block("3️⃣ Shiller Leaderboard 🏆 (Overall Score)", withScore),
       "",
-      buildTop3Block("4️⃣ Volume Grinders 🔁 (≥5 tweets)", grinders),
+      buildTop3Block("4️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)", emerging),
       "",
-      buildTop3Block("5️⃣ Emerging 🌱 (low-view baseline, ER ≥ 3%)", emerging),
-      "",
-      "6️⃣ Distribution Insights 🚚",
+      "5️⃣ Distribution Insights 🚚",
       "",
       `- ⏰ Time-of-day lift windows: ${timeTxt}`,
       `- 🔵 Verified contribution trend: ${pct(verShare)} (level)`,
-      ``,
+      "",
+      // Executive summary moved here with a title
+      "🧩 Conclusion",
+      "",
+      execSummary,
+      "",
       // `CA: ${contractAddress}`,
       `Source: @PolinaAIOS ${deeplink}`
     ];
 
     return parts.join("\n");
-  }, [rowsAll, data?.start_date, data?.end_date, data?.job_id, jobId, ticker, contractAddress, aggAll, verShare, users, timeWindows]);
+  }, [
+    rowsAll,
+    data?.start_date,
+    data?.end_date,
+    data?.job_id,
+    jobId,
+    ticker,
+    contractAddress,
+    aggAll,
+    verShare,
+    users,
+    timeWindows,
+  ]);
 
   /** ===== handlers ===== */
   const onCopy = async () => {
@@ -421,7 +431,7 @@ export default function ReportModal({
         <div
           ref={panelRef}
           tabIndex={-1}
-          className="analysis-console-body md:max-h-[70vh] overflow-y-auto p-5 text-[13px] leading-relaxed text-white/90"
+          className="analysis-console-body analysis-scrollbar md:max-h-[70vh] overflow-y-auto p-5 text-[13px] leading-relaxed text-white/90"
           onWheelCapture={(e) => e.stopPropagation()}
           onTouchMove={(e) => e.stopPropagation()}
         >
