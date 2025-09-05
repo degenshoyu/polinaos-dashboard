@@ -22,6 +22,16 @@ import { relations, sql } from "drizzle-orm";
  */
 export const _enablePgcrypto = sql`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`;
 
+/* ========== Common timestamps ========== */
+const timestamps = {
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+};
+
 /* ===================== users ===================== */
 export const users = pgTable("users", {
   id: uuid("id")
@@ -31,12 +41,7 @@ export const users = pgTable("users", {
   displayName: text("display_name"),
   avatarUrl: text("avatar_url"),
   lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
+  ...timestamps,
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -57,9 +62,7 @@ export const searches = pgTable(
     queryJson: jsonb("query_json").notNull(),
     jobId: text("job_id").notNull(),
     source: text("source").default("ctsearch"),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
+    ...timestamps,
   },
   (t) => ({
     byUserCreated: index("idx_searches_user_created").on(t.userId, t.createdAt),
@@ -90,9 +93,7 @@ export const aiUnderstandings = pgTable("ai_understandings", {
   tokensInput: integer("tokens_input"),
   tokensOutput: integer("tokens_output"),
   costUsd: numeric("cost_usd", { precision: 10, scale: 4 }),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
+  ...timestamps,
 });
 
 export const aiRelations = relations(aiUnderstandings, ({ one }) => ({
@@ -134,6 +135,7 @@ export const kols = pgTable(
     following: integer("following").notNull().default(0),
     bio: text("bio"),
     profileImgUrl: text("profile_img_url"),
+    ...timestamps,
   },
   (t) => ({
     byFollowers: index("idx_kols_followers").on(t.followers),
@@ -183,6 +185,7 @@ export const kolTweets = pgTable(
       .defaultNow(),
 
     rawJson: jsonb("raw_json"),
+    ...timestamps,
   },
   (t) => ({
     pkTweetId: primaryKey({
@@ -206,11 +209,6 @@ export const kolTweetsRelations = relations(kolTweets, ({ one, many }) => ({
 }));
 
 /* ===================== tweet_token_mentions ===================== */
-/**
- * NOTE: We enforce uniqueness per (tweet_id, trigger_key) instead of (tweet_id, token_key).
- * - trigger_key captures the stable trigger in the tweet (e.g. "ticker:$sol", "ca:0xabc", "phrase:<hash>").
- * - Upserts on (tweet_id, trigger_key) will update token mapping if we refine resolution later.
- */
 export const tweetTokenMentions = pgTable(
   "tweet_token_mentions",
   {
@@ -222,24 +220,14 @@ export const tweetTokenMentions = pgTable(
       .notNull()
       .references(() => kolTweets.tweetId, { onDelete: "cascade" }),
 
-    // Canonical token identity after resolution (e.g. contract or normalized ticker)
     tokenKey: text("token_key").notNull(),
     tokenDisplay: text("token_display"),
-    confidence: integer("confidence").notNull().default(100), // 0..100
-    source: mentionSource("source").notNull(), // ca|ticker|phrase|hashtag|upper|llm
+    confidence: integer("confidence").notNull().default(100),
+    source: mentionSource("source").notNull(),
 
-    // stable trigger identity found in the tweet
     triggerKey: text("trigger_key"),
-
-    // human-readable trigger text (e.g. "$usdc", "unstable coin", "0xabc...")
     triggerText: text("trigger_text"),
-
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
+    ...timestamps,
   },
   (t) => ({
     uniqTweetTrigger: uniqueIndex("uniq_tweet_trigger").on(
