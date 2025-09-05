@@ -1,9 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/kols/bulk-scan",
-      "schedule": "0 1 * * *"
-    }
-  ]
-}
-
