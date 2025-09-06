@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarDays, ArrowUpDown, RotateCcw } from "lucide-react";
+import { CalendarDays, ArrowUpDown } from "lucide-react";
 import { Dropdown, MenuItem } from "./primitives";
 
 type SortKey =
@@ -18,24 +18,12 @@ export function KolsHeaderControls({
   sortKey,
   onSetDays,
   onSetSortKey,
-  onReloadAndRefreshAll,
-  batching,
-  progressCur,
-  progressTotal,
-  disabled,
 }: {
   days: 7 | 30;
   sortKey: SortKey;
   onSetDays: (d: 7 | 30) => void;
   onSetSortKey: (k: SortKey) => void;
-  onReloadAndRefreshAll: () => void;
-  batching: boolean;
-  progressCur: number;
-  progressTotal: number;
-  disabled: boolean;
 }) {
-  const progressText =
-    batching && progressTotal > 0 ? `${progressCur}/${progressTotal}` : "";
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -61,24 +49,6 @@ export function KolsHeaderControls({
         <MenuItem active={sortKey === "shillEngs"} onClick={() => onSetSortKey("shillEngs")}>Shill Engagements</MenuItem>
         <MenuItem active={sortKey === "shillsER"} onClick={() => onSetSortKey("shillsER")}>Shill ER</MenuItem>
       </Dropdown>
-
-      <button
-        onClick={onReloadAndRefreshAll}
-        disabled={disabled || batching}
-        className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60"
-        title="Reload page data, then recompute all KOL totals in batches"
-      >
-        {batching ? (
-          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-emerald-300 border-t-transparent" />
-        ) : (
-          <RotateCcw size={16} />
-        )}
-        Reload & Refresh All
-      </button>
-
-      {progressText && (
-        <span className="text-xs text-gray-400 tabular-nums">{progressText}</span>
-      )}
     </div>
   );
 }

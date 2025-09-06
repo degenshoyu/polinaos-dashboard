@@ -1,0 +1,2815 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import type { KolRow as Row } from "@/components/types";
+import { mergeDisplayCoins, totalsFromRow, normalized } from "@/lib/kols";
+import { useKolAggregations } from "@/hooks/useKolAggregations";
+import { useScanTimeline } from "@/hooks/useScanTimeline";
+
+import KolToolbar from "./KolToolbar";
+import Pagination from "./Pagination";
+import CoinsChipList from "./CoinsChipList";
+import KolRow from "./KolRow";
+import SortableHeader, { type SortDir } from "./SortableHeader";
+
+/** Sort keys supported by this table */
+type SortKey =
+  | "handle"
+  | "followers"
+  | "tweets7d"
+  | "views7d"
+  | "engs7d"
+  | "er7d"
+  | "shills7d"
+  | "coinsCount";
+
+/** Column config for the table header */
+type Column = {
+  id: "kol" | "totals" | "shills" | "coins" | "actions";
+  label: string;
+  widthClass?: string;
+  /** Make column sortable by providing a SortKey */
+  sortKey?: SortKey;
+  align?: "left" | "center" | "right";
+};
+
+export type KolTableProps = {
+  rows: Row[];
+  loading?: boolean;
+  onRefresh?: () => void;
+  onUpdateOne?: (handle: string) => void;
+  updatingMap?: Record<string, boolean>;
+  /** Optional default sorting (keeps backward-compat without changing defaults) */
+  defaultSortKey?: SortKey | null;
+  defaultSortDir?: SortDir;
+};
+
+export default function KolTable({
+  rows,
+  loading = false,
+  onRefresh,
+  onUpdateOne,
+  updatingMap = {},
+  defaultSortKey = null,
+  defaultSortDir = "desc",
+}: KolTableProps) {
+  /* ---------- local UI state ---------- */
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Sorting state (opt-in via props)
+  const [sortKey, setSortKey] = useState<SortKey | null>(defaultSortKey);
+  const [sortDir, setSortDir] = useState<SortDir>(defaultSortDir);
+
+  /* ---------- hooks: aggregations + scan ---------- */
+  const {
+    refreshing,
+    refreshVisible,
+    getTotals,
+    getShillAgg,
+    setTotalsOverride,
+    setShillOverride,
+  } = useKolAggregations();
+
+  const { scanning, scanMsg, scan } = useScanTimeline({
+    onTotals: setTotalsOverride,
+    onShills: setShillOverride,
+    onAfterScan: async () => {
+      await onRefresh?.();
+    },
+  });
+
+  /* ---------- filter first ---------- */
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((r) => {
+      const u = (r.twitterUsername || "").toLowerCase();
+      const d = (r.displayName || "").toLowerCase();
+      return u.includes(q) || d.includes(q);
+    });
+  }, [rows, query]);
+
+  /* ---------- columns config ---------- */
+  const columns: Column[] = useMemo(
+    () => [
+      { id: "kol", label: "KOL", sortKey: "handle" },
+      { id: "totals", label: "Totals (7d)", widthClass: "w-[20%]", sortKey: "views7d" },
+      { id: "shills", label: "Shills (7d)", widthClass: "w-[20%]", sortKey: "shills7d" },
+      { id: "coins", label: "Coins", widthClass: "w-[28%]", sortKey: "coinsCount" },
+      { id: "actions", label: "Actions", widthClass: "w-[22%]" },
+    ],
+    []
+  );
+
+  /* ---------- derive enriched rows (for sorting/pagination) ---------- */
+  type Enriched = {
+    row: Row;
+    totals: ReturnType<typeof totalsFromRow>;
+    sh: ReturnType<typeof getShillAgg>;
+    coins: ReturnType<typeof mergeDisplayCoins>;
+    er7d: number;
+    coinsCount: number;
+  };
+
+  const enriched: Enriched[] = useMemo(() => {
+    return filtered.map((r) => {
+      const totals = getTotals(r) ?? totalsFromRow(r);
+      const sh = getShillAgg(r.twitterUsername, r);
+      const coins = mergeDisplayCoins(
+        sh?.coins ?? (r.coinsShilled || []).map((c) => ({ tokenDisplay: c, count: 1 }))
+      );
+      const er7d = totals.totalViews > 0 ? totals.totalEngs / totals.totalViews : 0;
+      return { row: r, totals, sh, coins, er7d, coinsCount: coins.length };
+    });
+    // Note: getTotals/getShillAgg values update via overrides; we keep this list dependent on filtered only
+    // and rely on re-render triggered by state updates above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered]);
+
+  /* ---------- sort then paginate ---------- */
+  const sorted: Enriched[] = useMemo(() => {
+    if (!sortKey) return enriched;
+    const dirMul = sortDir === "asc" ? 1 : -1;
+
+    const value = (e: Enriched): number | string => {
+      switch (sortKey) {
+        case "handle":     return (e.row.twitterUsername || "").toLowerCase();
+        case "followers":  return e.row.followers ?? 0;
+        case "tweets7d":   return e.totals.totalTweets;
+        case "views7d":    return e.totals.totalViews;
+        case "engs7d":     return e.totals.totalEngs;
+        case "er7d":       return e.er7d;
+        case "shills7d":   return e.sh?.totalShills || 0;
+        case "coinsCount": return e.coinsCount;
+      }
+    };
+
+    return [...enriched].sort((a, b) => {
+      const va = value(a);
+      const vb = value(b);
+      if (typeof va === "string" || typeof vb === "string") {
+        return String(va).localeCompare(String(vb)) * dirMul;
+      }
+      return ((va as number) - (vb as number)) * dirMul;
+    });
+  }, [enriched, sortKey, sortDir]);
+
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const start = (safePage - 1) * pageSize;
+  const visible = sorted.slice(start, start + pageSize);
+
+  /* ---------- handlers ---------- */
+  const handleRefreshVisible = async () => {
+    await refreshVisible(visible.map((e) => e.row.twitterUsername));
+    await onRefresh?.();
+  };
+
+  const toggleSort = (k?: SortKey) => {
+    if (!k) return;
+    if (sortKey !== k) {
+      setSortKey(k);
+      setSortDir("desc"); // default new column sort to desc
+    } else {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    }
+    setPage(1); // jump back to first page when sorting changes
+  };
+
+  /* ---------- render ---------- */
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur">
+      <KolToolbar
+        query={query}
+        onQueryChange={(v) => {
+          setQuery(v);
+          setPage(1);
+        }}
+        pageSize={pageSize}
+        onPageSizeChange={(n) => {
+          setPageSize(n);
+          setPage(1);
+        }}
+        onRefreshVisible={handleRefreshVisible}
+        onReloadList={onRefresh}
+        refreshing={refreshing}
+        loading={loading}
+        canRefresh={visible.length > 0}
+      />
+
+      <div className="overflow-x-auto border-t border-white/10">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-gray-400">
+            <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+              {columns.map((c) => (
+                <th
+                  key={c.id}
+                  className={c.widthClass}
+                  aria-sort={
+                    c.sortKey
+                      ? sortKey === c.sortKey
+                        ? sortDir === "asc"
+                          ? "ascending"
+                          : "descending"
+                        : "none"
+                      : undefined
+                  }
+                >
+                  <SortableHeader
+                    label={c.label}
+                    sortable={!!c.sortKey}
+                    active={!!c.sortKey && sortKey === c.sortKey}
+                    dir={sortDir}
+                    onSort={() => toggleSort(c.sortKey)}
+                    align={c.id === "actions" ? "right" : "left"}
+                  />
+                </th>
+              ))}
+            </tr>
+          </thead>
+
+          <tbody className="divide-y divide-white/10">
+            {visible.map((e) => (
+              <KolRow
+                key={e.row.twitterUsername}
+                row={e.row}
+                totals={e.totals}
+                shills={e.sh}
+                coinsEl={<CoinsChipList coins={e.coins} max={6} />}
+                updating={!!updatingMap[normalized(e.row.twitterUsername)]}
+                scanning={!!scanning[normalized(e.row.twitterUsername)]}
+                scanMsg={scanMsg[normalized(e.row.twitterUsername)]}
+                onScan={(h) => scan(h)}
+                onUpdate={onUpdateOne}
+              />
+            ))}
+
+            {visible.length === 0 && (
+              <tr>
+                <td colSpan={columns.length} className="px-3 py-6 text-center text-gray-500">
+                  {loading ? "Loading…" : query ? "No results" : "No data"}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <Pagination
+        page={safePage}
+        pageCount={pageCount}
+        totalCount={sorted.length}
+        onPageChange={setPage}
+      />
+    </div>
+  );
+}
+"use client";
+
+import { RefreshCw, History } from "lucide-react";
+
+type Props = {
+  query: string;
+  onQueryChange: (v: string) => void;
+  pageSize: number;
+  onPageSizeChange: (n: number) => void;
+  onRefreshVisible: () => void;
+  onReloadList?: () => void;
+  refreshing?: boolean;
+  loading?: boolean;
+  canRefresh?: boolean;
+};
+
+export default function KolToolbar({
+  query,
+  onQueryChange,
+  pageSize,
+  onPageSizeChange,
+  onRefreshVisible,
+  onReloadList,
+  refreshing = false,
+  loading = false,
+  canRefresh = true,
+}: Props) {
+  return (
+    <div className="p-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-center gap-2">
+        <input
+          className="px-3 py-2 rounded-md bg-black/30 border border-white/10 outline-none text-sm"
+          placeholder="Search handle or name…"
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+        />
+        <select
+          className="px-2 py-2 rounded-md bg-black/30 border border-white/10 outline-none text-sm"
+          value={pageSize}
+          onChange={(e) => onPageSizeChange(parseInt(e.target.value, 10))}
+          aria-label="Rows per page"
+        >
+          {[10, 20, 50].map((n) => (
+            <option key={n} value={n}>
+              {n}/page
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onRefreshVisible}
+          disabled={refreshing || loading || !canRefresh}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/10 text-sm disabled:opacity-60"
+          aria-busy={refreshing}
+        >
+          <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+          {refreshing ? "Refreshing…" : "Refresh visible"}
+        </button>
+        <button
+          onClick={() => onReloadList?.()}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/10 hover:bg-white/10 text-sm disabled:opacity-60"
+          title="Reload list from server"
+        >
+          <History className={`w-4 h-4 ${loading ? "animate-pulse" : ""}`} />
+          Reload list
+        </button>
+      </div>
+    </div>
+  );
+}
+"use client";
+
+import { useState } from "react";
+import type { KolRow, Totals, ShillAgg } from "@/components/types";
+import { normalized, toNum, totalsFromRow } from "@/lib/kols";
+
+type TotalsMap = Record<string, Totals>;
+type ShillMap = Record<string, ShillAgg>;
+
+export function useKolAggregations() {
+  const [refreshing, setRefreshing] = useState(false);
+  const [overridesTotals, setOverridesTotals] = useState<TotalsMap>({});
+  const [shillOverrides, setShillOverrides] = useState<ShillMap>({});
+
+  /** Read merged totals (override -> row fallback) */
+  function getTotals(rowOrHandle: KolRow | string, row?: KolRow): Totals {
+    const handle =
+      typeof rowOrHandle === "string"
+        ? rowOrHandle
+        : rowOrHandle.twitterUsername;
+    const h = normalized(handle);
+    const base =
+      typeof rowOrHandle === "string"
+        ? totalsFromRow(row!)
+        : totalsFromRow(rowOrHandle);
+    const o = overridesTotals[h];
+    return {
+      totalTweets: o?.totalTweets ?? base.totalTweets,
+      totalViews: o?.totalViews ?? base.totalViews,
+      totalEngs: o?.totalEngs ?? base.totalEngs,
+    };
+  }
+
+  /** Read merged shill agg (override -> lightweight fallback from row) */
+  function getShillAgg(handle: string, row?: KolRow): ShillAgg | null {
+    const h = normalized(handle);
+    const o = shillOverrides[h];
+    if (o) return o;
+
+    if (!row) return null;
+    const sTotal = toNum(
+      row.totalShills ?? (row as any).shills_total ?? (row as any).total_shills,
+    );
+    const sViews = toNum(
+      row.shillViews ?? (row as any).shills_views ?? (row as any).shillsViews,
+    );
+    const sEngs = toNum(
+      row.shillEngagements ??
+        (row as any).shills_engagements ??
+        (row as any).shillsEngagements,
+    );
+
+    return {
+      totalShills: sTotal,
+      shillsViews: sViews,
+      shillsEngs: sEngs,
+      coins: Array.isArray(row.coinsShilled)
+        ? (row.coinsShilled as string[]).map((d) => ({
+            tokenKey: d.toLowerCase(),
+            tokenDisplay: String(d).toUpperCase(),
+            count: 1,
+          }))
+        : [],
+    };
+  }
+
+  /**
+   * Refresh aggregations for visible handles (sequential, gentle on backend).
+   * Order matters:
+   *  1) detect-mentions (missingOnly) => avoid duplicate inserts
+   *  2) aggregate totals
+   *  3) aggregate shills (coins + shill counters)
+   */
+  async function refreshVisible(handles: string[], days = 7) {
+    if (!handles?.length || refreshing) return;
+    setRefreshing(true);
+
+    try {
+      for (const raw of handles) {
+        const h = normalized(raw);
+        if (!h) continue;
+
+        // 1) detect mentions for missing tweets only (server will upsert by trigger_key)
+        try {
+          await fetch(`/api/kols/detect-mentions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ screen_name: h, days, missingOnly: true }),
+          });
+        } catch {}
+
+        // 2) aggregate totals (tweets/views/engs do not depend on detection)
+        try {
+          const r = await fetch(
+            `/api/kols/aggregate?screen_name=${encodeURIComponent(h)}&days=${days}`,
+            { cache: "no-store" },
+          );
+          const j = await r.json().catch(() => ({}));
+          if (r.ok && j?.ok) {
+            setOverridesTotals((m) => ({
+              ...m,
+              [h]: {
+                totalTweets: toNum(j?.totals?.totalTweets),
+                totalViews: toNum(j?.totals?.totalViews),
+                totalEngs: toNum(j?.totals?.totalEngs),
+              },
+            }));
+          }
+        } catch {}
+
+        // 3) aggregate shills (depends on mentions; run after detection)
+        try {
+          const r2 = await fetch(
+            `/api/kols/aggregate-shills?screen_name=${encodeURIComponent(h)}&days=${days}`,
+            { cache: "no-store" },
+          );
+          const j2 = await r2.json().catch(() => ({}));
+          if (r2.ok && j2?.ok) {
+            setShillOverrides((m) => ({
+              ...m,
+              [h]: {
+                totalShills: toNum(j2?.totals?.totalShills),
+                shillsViews: toNum(j2?.totals?.shillsViews),
+                shillsEngs: toNum(j2?.totals?.shillsEngs),
+                coins: Array.isArray(j2?.coins) ? j2.coins : [],
+              },
+            }));
+          }
+        } catch {}
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  /** Allow external write (used by scan hook) */
+  function setTotalsOverride(handle: string, totals: Totals) {
+    const h = normalized(handle);
+    setOverridesTotals((m) => ({ ...m, [h]: totals }));
+  }
+  function setShillOverride(handle: string, sh: ShillAgg) {
+    const h = normalized(handle);
+    setShillOverrides((m) => ({ ...m, [h]: sh }));
+  }
+
+  return {
+    refreshing,
+    refreshVisible,
+    getTotals,
+    getShillAgg,
+    setTotalsOverride,
+    setShillOverride,
+  };
+}
+"use client";
+
+import { useRef, useState } from "react";
+import { normalized, toNum } from "@/lib/kols";
+import type { Totals, ShillAgg } from "@/components/types";
+
+export function useScanTimeline(opts?: {
+  days?: number;
+  onTotals?: (handle: string, totals: Totals) => void; // write into useKolAggregations
+  onShills?: (handle: string, sh: ShillAgg) => void; // write into useKolAggregations
+  onAfterScan?: (handle: string) => Promise<void> | void; // parent reload
+}) {
+  const days = opts?.days ?? 7;
+  const [scanning, setScanning] = useState<Record<string, boolean>>({});
+  const [scanMsg, setScanMsg] = useState<Record<string, string | null>>({});
+  const pollRef = useRef<Record<string, number | null>>({});
+
+  async function pollTotalsOnce(handle: string) {
+    try {
+      const r = await fetch(
+        `/api/kols/aggregate?screen_name=${encodeURIComponent(handle)}&days=${days}`,
+        { cache: "no-store" },
+      );
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j?.ok && opts?.onTotals) {
+        opts.onTotals(handle, {
+          totalTweets: toNum(j?.totals?.totalTweets),
+          totalViews: toNum(j?.totals?.totalViews),
+          totalEngs: toNum(j?.totals?.totalEngs),
+        });
+      }
+    } catch {}
+  }
+
+  function startPolling(handle: string) {
+    stopPolling(handle);
+    pollRef.current[handle] = window.setInterval(
+      () => pollTotalsOnce(handle),
+      2000,
+    );
+  }
+  function stopPolling(handle: string) {
+    const id = pollRef.current[handle];
+    if (id) window.clearInterval(id);
+    pollRef.current[handle] = null;
+  }
+
+  /**
+   * Scan timeline then:
+   *  - detect mentions with missingOnly=true (server upserts by trigger_key)
+   *  - aggregate shills
+   */
+  async function scan(rawHandle: string) {
+    const h = normalized(rawHandle);
+    if (!h) return;
+
+    setScanning((m) => ({ ...m, [h]: true }));
+    setScanMsg((m) => ({ ...m, [h]: null }));
+
+    startPolling(h);
+    await pollTotalsOnce(h);
+
+    try {
+      const res = await fetch("/api/kols/scan-tweets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ screen_name: h }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok)
+        throw new Error(data?.error ?? `Scan failed: ${res.status}`);
+
+      // After scan: only detect missing mentions, then aggregate shills
+      try {
+        await fetch("/api/kols/detect-mentions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ screen_name: h, days, missingOnly: true }),
+        });
+
+        const aggRes = await fetch(
+          `/api/kols/aggregate-shills?screen_name=${encodeURIComponent(h)}&days=${days}`,
+          { cache: "no-store" },
+        );
+        const aggJson = await aggRes.json().catch(() => ({}));
+        if (aggRes.ok && aggJson?.ok && opts?.onShills) {
+          opts.onShills(h, {
+            totalShills: toNum(aggJson?.totals?.totalShills),
+            shillsViews: toNum(aggJson?.totals?.shillsViews),
+            shillsEngs: toNum(aggJson?.totals?.shillsEngs),
+            coins: Array.isArray(aggJson?.coins) ? aggJson.coins : [],
+          });
+        }
+      } catch {}
+
+      const inserted = toNum(data?.inserted);
+      const updated = toNum(data?.updated);
+      const scanned = toNum(data?.scanned);
+      setScanMsg((m) => ({
+        ...m,
+        [h]: `✅ scanned=${scanned}; inserted=${inserted}; updated=${updated}`,
+      }));
+
+      await opts?.onAfterScan?.(h);
+    } catch (e: any) {
+      setScanMsg((m) => ({ ...m, [h]: `❌ ${e?.message ?? String(e)}` }));
+    } finally {
+      stopPolling(h);
+      setScanning((m) => ({ ...m, [h]: false }));
+    }
+  }
+
+  // expose
+  return {
+    scanning,
+    scanMsg,
+    scan,
+    _stopAll: () => Object.keys(pollRef.current).forEach(stopPolling),
+  };
+}
+// lib/tokens/extract.ts
+export type MentionSource = "ca" | "ticker" | "hashtag" | "upper" | "phrase";
+export type Mention = {
+  tokenKey: string;
+  tokenDisplay: string;
+  source: MentionSource;
+  confidence: number; // 0..100
+};
+
+const EVM_CA = /\b0x[a-fA-F0-9]{40}\b/g;
+const SOL_CA = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
+
+const DOLLAR_TICKER = /\$[A-Za-z][A-Za-z0-9]{1,9}\b/g;
+const HASH_TICKER = /#[A-Z0-9]{2,10}\b/g;
+const UPPER_TOKEN = /\b[A-Z]{2,6}\b/g;
+
+const SHILL_HINTS = /\b(buy|ape|shill|moon|pump|launch|alpha)\b/i;
+
+const PHRASE_MAP: Record<
+  string,
+  { key: string; display: string; conf?: number }
+> = {
+  "unstable coin": { key: "usduc", display: "$USDUC", conf: 95 },
+};
+
+function uniq<T>(arr: T[], key: (x: T) => string) {
+  const m = new Set<string>();
+  const out: T[] = [];
+  for (const x of arr) {
+    const k = key(x);
+    if (!m.has(k)) {
+      m.add(k);
+      out.push(x);
+    }
+  }
+  return out;
+}
+const normTicker = (s: string) => s.replace(/^[#$]+/, "").toLowerCase();
+
+export function extractMentions(text: string): Mention[] {
+  const m: Mention[] = [];
+  if (!text) return m;
+
+  const evm = text.match(EVM_CA) ?? [];
+  for (const a of evm)
+    m.push({
+      tokenKey: a.toLowerCase(),
+      tokenDisplay: a,
+      source: "ca",
+      confidence: 100,
+    });
+
+  const sol = text.match(SOL_CA) ?? [];
+  for (const a of sol) {
+    const conf = a.length >= 36 ? 75 : 60;
+    m.push({ tokenKey: a, tokenDisplay: a, source: "ca", confidence: conf });
+  }
+
+  // $ticker
+  const dollars = text.match(DOLLAR_TICKER) ?? [];
+  for (const t of dollars)
+    m.push({
+      tokenKey: normTicker(t),
+      tokenDisplay: t,
+      source: "ticker",
+      confidence: 95,
+    });
+
+  // #TICKER
+  const tags = text.match(HASH_TICKER) ?? [];
+  for (const t of tags)
+    m.push({
+      tokenKey: normTicker(t),
+      tokenDisplay: t.replace(/^#/, "$"),
+      source: "hashtag",
+      confidence: 85,
+    });
+
+  const lower = text.toLowerCase();
+  for (const k of Object.keys(PHRASE_MAP)) {
+    if (lower.includes(k)) {
+      const { key, display, conf = 90 } = PHRASE_MAP[k];
+      m.push({
+        tokenKey: key,
+        tokenDisplay: display,
+        source: "phrase",
+        confidence: conf,
+      });
+    }
+  }
+
+  if (SHILL_HINTS.test(text) && false) {
+    const uppers = text.match(UPPER_TOKEN) ?? [];
+    for (const u of uppers) {
+      if (u.length < 2 || u.length > 6) continue;
+      if (["USD", "BTC", "ETH"].includes(u)) continue;
+      m.push({
+        tokenKey: u.toLowerCase(),
+        tokenDisplay: `$${u}`,
+        source: "upper",
+        confidence: 60,
+      });
+    }
+  }
+
+  const grouped = new Map<string, Mention[]>();
+  for (const x of m)
+    grouped.set(x.tokenKey, [...(grouped.get(x.tokenKey) ?? []), x]);
+  const deduped: Mention[] = [];
+  for (const [key, arr] of grouped) {
+    arr.sort(
+      (a, b) =>
+        (a.source === "ca" ? -1 : 0) - (b.source === "ca" ? -1 : 0) ||
+        b.confidence - a.confidence,
+    );
+    deduped.push(arr[0]);
+  }
+  return deduped;
+}
+// lib/tokens/triggerKey.ts
+import { createHash } from "crypto";
+
+type Source = "ca" | "ticker" | "phrase" | "hashtag" | "upper" | "llm";
+
+const normTicker = (s: string) => {
+  let x = (s || "").trim();
+  if (!x) return "";
+  x = x.replace(/^[#$]/, "");
+  return `$${x}`.toLowerCase();
+};
+const normCA = (s: string) => (s || "").trim().toLowerCase();
+export const normalizePhrase = (s: string) =>
+  (s || "").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 256);
+
+export function buildTriggerKeyWithText(input: {
+  source: Source;
+  value: string;
+}) {
+  switch (input.source) {
+    case "ticker":
+    case "upper":
+    case "hashtag": {
+      const txt = normTicker(input.value);
+      return { key: `ticker:${txt}`, text: txt };
+    }
+    case "ca": {
+      const txt = normCA(input.value);
+      return { key: `ca:${txt}`, text: txt };
+    }
+    case "phrase":
+    case "llm": {
+      const norm = normalizePhrase(input.value);
+      const key = "phrase:" + createHash("sha1").update(norm).digest("hex");
+      return { key, text: norm };
+    }
+    default: {
+      const norm = normalizePhrase(input.value);
+      return {
+        key: "unknown:" + createHash("sha1").update(norm).digest("hex"),
+        text: norm,
+      };
+    }
+  }
+}
+
+export const buildTriggerKey = (input: { source: Source; value: string }) =>
+  buildTriggerKeyWithText(input).key;
+// lib/markets/geckoterminal.ts
+// Query GeckoTerminal pools on multiple networks and pick best candidate
+// by: DEX priority (PumpSwap > Raydium > Meteora > others) > 24h volume > liquidity > market cap
+
+import { canonAddr, isEvmAddr, isSolAddr } from "@/lib/chains/address";
+
+const GT_BASE =
+  process.env.GECKOTERMINAL_BASE ?? "https://api.geckoterminal.com/api/v2";
+
+// Non-CA detection prefers Solana first
+const NETWORKS_PREFERRED = [
+  "solana",
+  "base",
+  "eth",
+  "bsc",
+  "polygon",
+  "arbitrum",
+  "optimism",
+  "avalanche",
+  "fantom",
+] as const;
+
+// DEX priority: PumpSwap > Raydium > Meteora > others
+const dexPriority = (name?: string) => {
+  const s = String(name || "").toLowerCase();
+  if (s.includes("pump")) return 3; // PumpSwap / pump.fun routers etc.
+  if (s.includes("raydium")) return 2; // Raydium
+  if (s.includes("meteora")) return 1; // Meteora
+  return 0;
+};
+
+type VolUSD = { m5?: number; h1?: number; h6?: number; h24?: number };
+type PoolAttrs = {
+  reserve_in_usd?: number;
+  volume_usd?: VolUSD;
+  name?: string;
+};
+type TokenAttrs = {
+  market_cap_usd?: number | null;
+  fdv_usd?: number | null;
+};
+
+type Candidate = {
+  network: string;
+  addr: string;
+  symbol: string;
+  dexName: string;
+  dexScore: number;
+  volume24h: number;
+  reserveUsd: number;
+  marketCap: number;
+};
+
+type GTToken = {
+  id: string;
+  symbol: string;
+  address: string;
+  attrs: TokenAttrs;
+};
+
+type GTDex = {
+  id: string;
+  name: string;
+};
+
+function pickVolume(v?: VolUSD): number {
+  if (!v) return 0;
+  return (
+    (typeof v.h24 === "number" && v.h24) ||
+    (typeof v.h6 === "number" && v.h6) ||
+    (typeof v.h1 === "number" && v.h1) ||
+    (typeof v.m5 === "number" && v.m5) ||
+    0
+  );
+}
+function pickMcap(t?: TokenAttrs): number {
+  if (!t) return 0;
+  if (typeof t.market_cap_usd === "number") return t.market_cap_usd;
+  if (typeof t.fdv_usd === "number") return t.fdv_usd;
+  return 0;
+}
+
+/** Sort: DEX priority > 24h volume > liquidity > market cap */
+function compareCandidates(a: Candidate, b: Candidate): number {
+  if (b.dexScore !== a.dexScore) return b.dexScore - a.dexScore;
+  if (b.volume24h !== a.volume24h) return b.volume24h - a.volume24h;
+  if (b.reserveUsd !== a.reserveUsd) return b.reserveUsd - a.reserveUsd;
+  if (b.marketCap !== a.marketCap) return b.marketCap - a.marketCap;
+  return 0;
+}
+
+export type ResolveOpts = {
+  forceNetwork?: "solana" | "evm";
+  preferSolana?: boolean;
+};
+
+/**
+ * Resolve `$tickers` → best tokenKey per ticker.
+ * - forceNetwork: "solana" | "evm"
+ * - preferSolana: default true for non-CA detection
+ */
+export async function resolveTickersToContracts(
+  tickers: string[],
+  opts?: ResolveOpts,
+) {
+  const out = new Map<
+    string,
+    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+  >();
+
+  const networks = (() => {
+    if (opts?.forceNetwork === "solana") return ["solana"] as const;
+    if (opts?.forceNetwork === "evm") {
+      return [
+        "base",
+        "eth",
+        "bsc",
+        "polygon",
+        "arbitrum",
+        "optimism",
+        "avalanche",
+        "fantom",
+      ] as const;
+    }
+    return NETWORKS_PREFERRED;
+  })();
+
+  for (const raw of tickers) {
+    const ticker = raw.replace(/^\$+/, "").toLowerCase();
+    const symbol = `$${ticker.toUpperCase()}`;
+
+    const perNet = await Promise.all(
+      networks.map(async (net) => {
+        try {
+          const url = `${GT_BASE}/search/pools?query=${encodeURIComponent(
+            ticker,
+          )}&network=${encodeURIComponent(net)}&include=base_token,quote_token,dex`;
+          const res = await fetch(url, {
+            headers: { accept: "application/json" },
+            cache: "no-store",
+          });
+          if (!res.ok) return [] as Candidate[];
+
+          const j: any = await res.json();
+          const data = (Array.isArray(j?.data) ? j.data : []) as any[];
+          const included = (
+            Array.isArray(j?.included) ? j.included : []
+          ) as any[];
+
+          // tokens
+          const tokens: GTToken[] = included
+            .filter((x: any) => String(x?.type || "").includes("token"))
+            .map(
+              (x: any): GTToken => ({
+                id: String(x?.id ?? ""),
+                symbol: String(x?.attributes?.symbol ?? ""),
+                address: String(x?.attributes?.address ?? ""),
+                attrs: {
+                  market_cap_usd: (x?.attributes?.market_cap_usd ??
+                    x?.attributes?.fdv_usd ??
+                    null) as number | null,
+                  fdv_usd: (x?.attributes?.fdv_usd ?? null) as number | null,
+                },
+              }),
+            );
+
+          // dex (id -> name)
+          const dexes: GTDex[] = included
+            .filter((x: any) => String(x?.type || "").includes("dex"))
+            .map(
+              (x: any): GTDex => ({
+                id: String(x?.id ?? ""),
+                name: String(x?.attributes?.name ?? x?.attributes?.slug ?? ""),
+              }),
+            );
+          const dexNameById = new Map(dexes.map((d) => [d.id, d.name]));
+
+          const cands: Candidate[] = [];
+          for (const p of data) {
+            const attrs = (p?.attributes ?? {}) as PoolAttrs;
+            const rels = p?.relationships ?? {};
+
+            const baseId: string = String(rels?.base_token?.data?.id ?? "");
+            const quoteId: string = String(rels?.quote_token?.data?.id ?? "");
+            const dexRelId: string = String(rels?.dex?.data?.id ?? "");
+
+            const base = tokens.find((t: GTToken) => t.id === baseId);
+            const quote = tokens.find((t: GTToken) => t.id === quoteId);
+
+            const dexName =
+              dexNameById.get(dexRelId) ||
+              String((attrs as any).dex_name ?? attrs.name ?? "");
+
+            const volume24h = pickVolume(
+              attrs.volume_usd as VolUSD | undefined,
+            );
+            const reserveUsd = Number(attrs.reserve_in_usd ?? 0);
+
+            // prefer exact symbol match on either side
+            const side = [base, quote].find(
+              (t: GTToken | undefined) =>
+                String(t?.symbol || "").toLowerCase() === ticker,
+            );
+
+            if (
+              side?.address &&
+              (isEvmAddr(side.address) || isSolAddr(side.address))
+            ) {
+              cands.push({
+                network: net,
+                addr: canonAddr(side.address),
+                symbol,
+                dexName,
+                dexScore: dexPriority(dexName),
+                volume24h,
+                reserveUsd,
+                marketCap: pickMcap(side.attrs),
+              });
+            }
+          }
+          return cands;
+        } catch {
+          return [] as Candidate[];
+        }
+      }),
+    );
+
+    const all = perNet.flat();
+    const solBest = all
+      .filter((c) => c.network === "solana")
+      .sort(compareCandidates)[0];
+    const best = solBest || all.sort(compareCandidates)[0];
+
+    if (best) {
+      out.set(ticker, {
+        tokenKey: best.addr,
+        tokenDisplay: symbol,
+        boostedConf:
+          (best.network === "solana" ? 98 : 96) + (best.dexScore > 0 ? 1 : 0),
+      });
+    } else {
+      out.set(ticker, {
+        tokenKey: ticker,
+        tokenDisplay: symbol,
+        boostedConf: 95,
+      });
+    }
+  }
+
+  return out;
+}
+
+/** Resolve contract addresses -> { tokenKey, tokenDisplay, boostedConf } */
+export async function resolveContractsToMeta(
+  addrs: string[],
+  opts?: ResolveOpts,
+) {
+  const out = new Map<
+    string,
+    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+  >();
+
+  const uniq = Array.from(
+    new Set(addrs.map((a) => canonAddr(String(a || ""))).filter(Boolean)),
+  );
+
+  // Helper: pick candidate for a single (addr, network)
+  async function searchOne(addr: string, net: string): Promise<Candidate[]> {
+    try {
+      const url = `${GT_BASE}/search/pools?query=${encodeURIComponent(
+        addr,
+      )}&network=${encodeURIComponent(net)}&include=base_token,quote_token,dex`;
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!res.ok) return [];
+
+      const j: any = await res.json();
+      const data = (Array.isArray(j?.data) ? j.data : []) as any[];
+      const included = (Array.isArray(j?.included) ? j.included : []) as any[];
+
+      const tokens: GTToken[] = included
+        .filter((x: any) => String(x?.type || "").includes("token"))
+        .map(
+          (x: any): GTToken => ({
+            id: String(x?.id ?? ""),
+            symbol: String(x?.attributes?.symbol ?? ""),
+            address: canonAddr(String(x?.attributes?.address ?? "")),
+            attrs: {
+              market_cap_usd: (x?.attributes?.market_cap_usd ??
+                x?.attributes?.fdv_usd ??
+                null) as number | null,
+              fdv_usd: (x?.attributes?.fdv_usd ?? null) as number | null,
+            },
+          }),
+        );
+
+      const dexes: GTDex[] = included
+        .filter((x: any) => String(x?.type || "").includes("dex"))
+        .map(
+          (x: any): GTDex => ({
+            id: String(x?.id ?? ""),
+            name: String(x?.attributes?.name ?? x?.attributes?.slug ?? ""),
+          }),
+        );
+      const dexNameById = new Map(dexes.map((d) => [d.id, d.name]));
+
+      const cands: Candidate[] = [];
+      for (const p of data) {
+        const attrs = (p?.attributes ?? {}) as PoolAttrs;
+        const rels = p?.relationships ?? {};
+
+        const baseId: string = String(rels?.base_token?.data?.id ?? "");
+        const quoteId: string = String(rels?.quote_token?.data?.id ?? "");
+        const dexRelId: string = String(rels?.dex?.data?.id ?? "");
+
+        const base = tokens.find((t) => t.id === baseId);
+        const quote = tokens.find((t) => t.id === quoteId);
+
+        const dexName =
+          dexNameById.get(dexRelId) ||
+          String((attrs as any).dex_name ?? attrs.name ?? "");
+
+        const volume24h = pickVolume(attrs.volume_usd as VolUSD | undefined);
+        const reserveUsd = Number(attrs.reserve_in_usd ?? 0);
+
+        // match target addr on either side
+        const side = [base, quote].find((t) => t?.address === addr);
+        if (side?.address) {
+          cands.push({
+            network: net,
+            addr: side.address,
+            symbol: side.symbol, // may be empty, we'll guard later
+            dexName,
+            dexScore: dexPriority(dexName),
+            volume24h,
+            reserveUsd,
+            marketCap: pickMcap(side.attrs),
+          });
+        }
+      }
+      return cands;
+    } catch {
+      return [];
+    }
+  }
+
+  // Resolve each address across networks (Solana-only vs EVM list)
+  for (const addr of uniq) {
+    const nets: readonly string[] =
+      opts?.forceNetwork === "solana" || isSolAddr(addr)
+        ? (["solana"] as const)
+        : opts?.forceNetwork === "evm"
+          ? ([
+              "base",
+              "eth",
+              "bsc",
+              "polygon",
+              "arbitrum",
+              "optimism",
+              "avalanche",
+              "fantom",
+            ] as const)
+          : NETWORKS_PREFERRED;
+
+    const perNet = await Promise.all(nets.map((n) => searchOne(addr, n)));
+    const all = perNet.flat();
+
+    const solBest = all
+      .filter((c) => c.network === "solana")
+      .sort(compareCandidates)[0];
+    const best = solBest || all.sort(compareCandidates)[0];
+
+    if (best) {
+      const sym = String(best.symbol || "").trim();
+      // Fallback: if GT returns empty symbol, synthesize "$ADDR" short tag
+      const tokenDisplay =
+        sym.length > 0
+          ? `$${sym.toUpperCase()}`
+          : `$${addr.slice(0, 4)}…${addr.slice(-4)}`;
+      out.set(addr, {
+        tokenKey: addr,
+        tokenDisplay,
+        boostedConf:
+          (best.network === "solana" ? 99 : 97) + (best.dexScore > 0 ? 1 : 0),
+      });
+    } else {
+      // Hard fallback: still return synthesized tag; caller can log/warn.
+      out.set(addr, {
+        tokenKey: addr,
+        tokenDisplay: `$${addr.slice(0, 4)}…${addr.slice(-4)}`,
+        boostedConf: 90,
+      });
+    }
+  }
+
+  return out;
+}
+// lib/chains/address.ts
+// Helpers to detect & canonicalize addresses across chains.
+
+export const isEvmAddr = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
+export const isSolAddr = (s: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
+
+/** Lowercase only for EVM; keep Solana base58 as-is */
+export const canonAddr = (s: string) => (isEvmAddr(s) ? s.toLowerCase() : s);
+// app/api/kols/detect-mentions/route.ts
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { db } from "@/lib/db/client";
+import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
+import { eq, and, gte, lt, sql, inArray, desc } from "drizzle-orm";
+import { extractMentions, type Mention } from "@/lib/tokens/extract";
+import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
+import {
+  resolveTickersToContracts,
+  resolveContractsToMeta,
+} from "@/lib/markets/geckoterminal";
+import { isSolAddr, canonAddr } from "@/lib/chains/address";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+/* ========== Body ========== */
+const Body = z.object({
+  screen_name: z.string().min(1),
+  days: z.number().int().min(1).max(30).optional().default(7),
+  missingOnly: z.boolean().optional().default(true),
+});
+
+/* ========== Small helpers ========== */
+// Prefer readable input for trigger text
+function triggerInputFor(m: Mention) {
+  if (m.source === "ca") return m.tokenKey || "";
+  if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
+  return `$${String(m.tokenKey || "").toUpperCase()}`;
+}
+
+/* ========== Route ========== */
+export async function POST(req: Request) {
+  // Admin auth
+  const session = await getServerSession(authOptions);
+  const isAdmin = Boolean((session?.user as any)?.isAdmin);
+  if (!isAdmin) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden" },
+      { status: 403 },
+    );
+  }
+
+  const { screen_name, days, missingOnly } = Body.parse(await req.json());
+  const handle = screen_name.trim().replace(/^@+/, "").toLowerCase();
+
+  // Time window [since, until)
+  const now = new Date();
+  const since = new Date(now);
+  since.setDate(now.getDate() - (days - 1));
+  const until = new Date(now);
+  until.setDate(now.getDate() + 1);
+
+  // Load tweets
+  const tweets = await db
+    .select({
+      tweetId: kolTweets.tweetId,
+      textContent: kolTweets.textContent,
+      published: kolTweets.publishDate,
+    })
+    .from(kolTweets)
+    .where(
+      and(
+        eq(kolTweets.twitterUsername, handle),
+        gte(kolTweets.publishDate, since),
+        lt(kolTweets.publishDate, until),
+      ),
+    )
+    .orderBy(desc(kolTweets.publishDate));
+
+  if (!tweets.length) {
+    return NextResponse.json({
+      ok: true,
+      handle,
+      days,
+      scannedTweets: 0,
+      mentionsDetected: 0,
+      inserted: 0,
+      updated: 0,
+    });
+  }
+
+  // When missingOnly=true, skip tweets that already have ANY mentions
+  let candidates = tweets;
+  if (missingOnly) {
+    const existing = await db
+      .select({ tweetId: tweetTokenMentions.tweetId })
+      .from(tweetTokenMentions)
+      .where(
+        inArray(
+          tweetTokenMentions.tweetId,
+          tweets.map((t) => t.tweetId),
+        ),
+      );
+    const has = new Set(existing.map((e) => e.tweetId));
+    candidates = tweets.filter((t) => !has.has(t.tweetId));
+  }
+
+  // Extract mentions; record tickers and CA presence
+  const all: {
+    tweetId: string;
+    m: Mention;
+    triggerKey: string;
+    triggerText: string;
+  }[] = [];
+  const uniqueTickers = new Set<string>(); // "$TICKER"
+  const caSet = new Set<string>(); // canon contract addresses
+  let seenSolanaCA = false;
+
+  for (const t of candidates) {
+    const ext = extractMentions(t.textContent ?? "");
+    for (const m of ext) {
+      const input = triggerInputFor(m);
+      const { key, text } = buildTriggerKeyWithText({
+        source: m.source as any,
+        value: input,
+      });
+
+      all.push({
+        tweetId: t.tweetId,
+        m,
+        triggerKey: key,
+        triggerText: text,
+      });
+
+      if (m.source === "ca") {
+        const addr = canonAddr(String(m.tokenKey || ""));
+        if (addr) caSet.add(addr);
+        if (isSolAddr(m.tokenKey)) seenSolanaCA = true;
+      } else {
+        const tk = m.tokenDisplay?.startsWith("$")
+          ? m.tokenDisplay
+          : `$${String(m.tokenKey || "").toUpperCase()}`;
+        uniqueTickers.add(tk);
+      }
+    }
+  }
+
+  // Resolve tickers -> contracts (prefer Solana if any Sol CA seen)
+  const resolved = await resolveTickersToContracts(
+    [...uniqueTickers],
+    seenSolanaCA ? { forceNetwork: "solana" } : { preferSolana: true },
+  );
+
+  // Reverse map: contract -> { tokenDisplay, boostedConf }
+  const byContract = new Map<
+    string,
+    { tokenDisplay: string; boostedConf: number }
+  >();
+  for (const [, r] of resolved.entries()) {
+    const addr = canonAddr(String(r.tokenKey || ""));
+    if (addr)
+      byContract.set(addr, {
+        tokenDisplay: r.tokenDisplay,
+        boostedConf: r.boostedConf,
+      });
+  }
+
+  // CA-only resolution: resolve contracts that have no ticker meta
+  const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
+  if (missingCA.length) {
+    const caMeta = await resolveContractsToMeta(
+      missingCA,
+      seenSolanaCA ? { forceNetwork: "solana" } : undefined,
+    );
+    for (const [addr, meta] of caMeta.entries()) {
+      byContract.set(addr, {
+        tokenDisplay: meta.tokenDisplay,
+        boostedConf: meta.boostedConf,
+      });
+    }
+    console.debug("[detect-mentions] CA resolved via GT", {
+      total: missingCA.length,
+      hit: Array.from(caMeta.keys()).length,
+    });
+  }
+
+  // Build DB rows; de-duplicate by (tweetId, triggerKey)
+  type Row = {
+    tweetId: string;
+    tokenKey: string;
+    tokenDisplay: string | null;
+    confidence: number;
+    source: (typeof mentionSource.enumValues)[number];
+    triggerKey: string;
+    triggerText: string | null;
+  };
+  const rows: Row[] = [];
+  const seenPair = new Set<string>();
+
+  for (const { tweetId, m, triggerKey, triggerText } of all) {
+    let tokenKey = m.tokenKey;
+    let tokenDisplay = m.tokenDisplay;
+    let confidence = m.confidence;
+
+    if (m.source === "ca") {
+      // CA: always map to a friendly $SYMBOL when possible
+      const addr = canonAddr(String(m.tokenKey || ""));
+      tokenKey = addr;
+      const meta = addr ? byContract.get(addr) : undefined;
+      if (meta?.tokenDisplay) {
+        tokenDisplay = meta.tokenDisplay;
+        confidence = Math.max(confidence, meta.boostedConf ?? 0);
+      } else {
+        // Last resort: synthesize a short tag for visibility
+        const short = addr ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : "????";
+        tokenDisplay = `$${short}`;
+        console.warn("[detect-mentions] CA unresolved by GT", {
+          tweetId,
+          addr,
+          triggerKey,
+        });
+      }
+    } else {
+      // Ticker/phrase: prefer Solana + DEX-priority ranking
+      const disp = m.tokenDisplay?.startsWith("$")
+        ? m.tokenDisplay
+        : `$${String(m.tokenKey || "").toUpperCase()}`;
+      const r = resolved.get(disp.replace(/^\$+/, "").toLowerCase());
+      if (r) {
+        tokenKey = r.tokenKey;
+        tokenDisplay = r.tokenDisplay;
+        confidence = Math.max(confidence, r.boostedConf);
+      }
+    }
+
+    const pair = `${tweetId}___${triggerKey}`;
+    if (seenPair.has(pair)) continue;
+    seenPair.add(pair);
+
+    rows.push({
+      tweetId,
+      tokenKey: canonAddr(String(tokenKey || "")), // EVM lowercased; Solana preserved
+      tokenDisplay: tokenDisplay ?? (m.tokenDisplay || m.tokenKey),
+      confidence: Math.min(100, Math.max(0, Math.round(confidence))),
+      source: m.source as any as Row["source"],
+      triggerKey,
+      triggerText,
+    });
+  }
+
+  if (!rows.length) {
+    return NextResponse.json({
+      ok: true,
+      handle,
+      days,
+      scannedTweets: candidates.length,
+      mentionsDetected: 0,
+      inserted: 0,
+      updated: 0,
+    });
+  }
+
+  // Accurate counts via pre-check (existing pairs)
+  const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
+  const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
+  const existingPairs = await db
+    .select({
+      tweetId: tweetTokenMentions.tweetId,
+      triggerKey: tweetTokenMentions.triggerKey,
+      tokenKey: tweetTokenMentions.tokenKey,
+    })
+    .from(tweetTokenMentions)
+    .where(
+      and(
+        inArray(tweetTokenMentions.tweetId, tweetIds),
+        inArray(tweetTokenMentions.triggerKey, triggers),
+      ),
+    );
+
+  const existsMap = new Map(
+    existingPairs.map((e) => [`${e.tweetId}___${e.triggerKey}`, e.tokenKey]),
+  );
+  const willInsert = rows.filter(
+    (r) => !existsMap.has(`${r.tweetId}___${r.triggerKey}`),
+  ).length;
+  const willUpdate = rows.filter((r) => {
+    const prev = existsMap.get(`${r.tweetId}___${r.triggerKey}`);
+    return prev && prev !== r.tokenKey;
+  }).length;
+
+  // Upsert by (tweet_id, trigger_key), chunked
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK);
+    await db
+      .insert(tweetTokenMentions)
+      .values(chunk)
+      .onConflictDoUpdate({
+        target: [tweetTokenMentions.tweetId, tweetTokenMentions.triggerKey],
+        set: {
+          tokenKey: sql`excluded.token_key`,
+          tokenDisplay: sql`excluded.token_display`,
+          confidence: sql`excluded.confidence`,
+          source: sql`excluded.source`,
+          triggerText: sql`excluded.trigger_text`,
+          updatedAt: sql`now()`,
+        },
+      });
+  }
+
+  return NextResponse.json({
+    ok: true,
+    handle,
+    days,
+    scannedTweets: candidates.length,
+    mentionsDetected: rows.length,
+    inserted: willInsert,
+    updated: willUpdate,
+  });
+}
+./tailwind.config.js
+./.env.local
+./app/dashboard/layout.tsx
+./app/dashboard/page.tsx
+./app/layout.tsx
+./app/api/ctsearch/route.ts
+./app/api/jobProxy/route.ts
+./app/api/analyzeWithGemini/route.ts
+./app/api/analyzeWithGemini/route.ts_copy
+./app/api/campaigns/route.ts
+./app/page.tsx
+./app/globals.css
+./app/providers.tsx
+./postcss.config.mjs
+./project_files.txt
+./next-env.d.ts
+./README.md
+./components/ui/button.tsx
+./components/CampaignLeftPane.tsx_copy
+./components/AnalysisConsole.tsx
+./components/SignInWithSolana.tsx
+./components/CampaignLeftPane.tsx
+./components/dashboard/Navbar.tsx
+./components/dashboard/navLinks.config.ts
+./components/dashboard/NavLinks.tsx
+./components/dashboard/Navbar.tsx_copy
+./components/dashboard/Sidebar.tsx
+./components/dashboard/MobileMenu.tsx
+./components/dashboard/Sidebar.tsx_copy
+./components/types.ts
+./components/AnalysisConsole.tsx_copy
+./type/next-auth.d.ts
+./public/logo-polina.png
+./public/favicon.ico
+./public/file.svg
+./public/polina-final.png
+./public/polina-icon.png
+./public/polina-join.png
+./public/vercel.svg
+./public/next.svg
+./public/polina-og.png
+./public/globe.svg
+./public/polina_vision.png
+./public/phantom.svg
+./public/window.svg
+./.gitignore
+./package-lock.json
+./package.json
+./hooks/useLocalDraft.ts
+./lib/errors.ts
+./lib/utils.ts
+./lib/prompts/analyzeWithGeminiPrompt.ts
+./components.json
+./tsconfig.json
+./app_tree.txt
+./postcss.config.js
+./eslint.config.mjs
+./next.config.ts
+app
+├── api
+│   ├── analyzeWithGemini
+│   │   ├── route.ts
+│   │   └── route.ts_copy
+│   ├── auth
+│   │   └── [...nextauth]
+│   │       └── route.ts
+│   ├── campaigns
+│   │   └── route.ts
+│   ├── ctsearch
+│   │   └── route.ts
+│   └── jobProxy
+│       └── route.ts
+├── dashboard
+│   ├── campaign
+│   │   └── analysis
+│   │       └── page.tsx
+│   ├── layout.tsx
+│   └── page.tsx
+├── globals.css
+├── layout.tsx
+├── page.tsx
+└── providers.tsx
+
+11 directories, 13 files
+{
+  "name": "polinaos-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@radix-ui/react-slot": "^1.2.3",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@solana/wallet-adapter-base": "^0.9.27",
+    "@solana/wallet-adapter-react": "^0.15.39",
+    "@solana/wallet-adapter-react-ui": "^0.9.39",
+    "@solana/wallet-adapter-wallets": "^0.19.37",
+    "@solana/web3.js": "^1.98.4",
+    "@tailwindcss/typography": "^0.5.16",
+    "@vercel/postgres": "^0.10.0",
+    "autoprefixer": "^10.4.21",
+    "bs58": "^6.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.23.12",
+    "html-to-image": "^1.11.13",
+    "lucide-react": "^0.539.0",
+    "next": "^15.4.6",
+    "next-auth": "^4.24.11",
+    "pg": "^8.16.3",
+    "postcss": "^8.5.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "recharts": "^3.1.2",
+    "rehype-highlight": "^7.0.2",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.3.1",
+    "tailwindcss-animate": "^1.0.7",
+    "tweetnacl": "^1.0.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
+    "@eslint/js": "^9.33.0",
+    "@next/eslint-plugin-next": "^15.4.6",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.4",
+    "drizzle-orm": "^0.44.5",
+    "eslint": "^9",
+    "eslint-config-next": "15.4.6",
+    "eslint-p": "^0.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^16.3.0",
+    "tailwindcss": "^3.4.17",
+    "tw-animate-css": "^1.3.6",
+    "typescript": "^5",
+    "typescript-eslint": "^8.39.1"
+  }
+}
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+  darkMode: ["class"],
+  content: [
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      keyframes: {
+        float: {
+          "0%, 100%": {
+            transform: "translateY(0)",
+          },
+          "50%": {
+            transform: "translateY(-8px)",
+          },
+        },
+      },
+      animation: {
+        float: "float 4s ease-in-out infinite",
+      },
+      fontFamily: {
+        sora: ["Sora", "sans-serif"],
+      },
+      borderRadius: {
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)",
+      },
+      colors: {
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))",
+        },
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        chart: {
+          1: "hsl(var(--chart-1))",
+          2: "hsl(var(--chart-2))",
+          3: "hsl(var(--chart-3))",
+          4: "hsl(var(--chart-4))",
+          5: "hsl(var(--chart-5))",
+        },
+      },
+    },
+  },
+  plugins: [require("@tailwindcss/typography"), require("tailwindcss-animate")],
+};
+/* app/globals.css */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 100%;
+
+    --card: 0 0% 3.9%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 0 0% 3.9%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+
+    --secondary: 0 0% 14.9%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 0 0% 14.9%;
+    --muted-foreground: 0 0% 63.9%;
+
+    --accent: 0 0% 14.9%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+
+    --radius: 0.5rem;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+}
+
+@layer components {
+  .container {
+    @apply mx-auto px-4 sm:px-6 lg:px-8;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow hover:bg-primary/90;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-md bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground shadow hover:bg-secondary/90;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+.gradient-text {
+  background: linear-gradient(90deg, #ff0080, #7928ca);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.bg-gradient {
+  background: linear-gradient(135deg, #ff0080, #7928ca);
+}
+
+.font-sora {
+  font-family: var(--font-sora), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ===== Scrollbar styling for AnalysisConsole ===== */
+.analysis-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.analysis-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.analysis-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #2fd480, #27a567);
+  border-radius: 8px;
+}
+
+.analysis-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #3ef2ac, #239e5d);
+}
+
+/* Firefox */
+.analysis-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #27a567 transparent;
+}
+// components/AnalysisConsole.tsx
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import Image from "next/image";
+import polinaIcon from "@/public/polina-icon.png";
+import type { AnalysisInput } from "./types";
+import type { AnalysisResult } from "@/components/types";
+import ReportModal from "@/components/ReportModal";
+
+export default function AnalysisConsole({
+  inputs,
+  onTweetCountUpdate,
+  onAnalysisResult,
+  onJobIdChange,
+  className = "",
+}: {
+  inputs?: AnalysisInput | null;
+  onTweetCountUpdate?: (n: number) => void;
+  onAnalysisResult?: (res: AnalysisResult) => void;
+  onJobIdChange?: (id: string | null) => void;
+  className?: string;
+}) {
+  // UI + status states
+  const [status, setStatus] = useState<"idle" | "scanning" | "complete" | "error">("idle");
+
+  type ConsoleMsg = { text: string; time?: string; tag?: "ai-gen" };
+  const [messages, setMessages] = useState<ConsoleMsg[]>([]);
+
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [tweetCount, setTweetCount] = useState<number>(0);
+
+  // Report modal states
+  const [reportJobId, setReportJobId] = useState<string | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
+
+  // Collapsible card state (persisted)
+  const [collapsed, setCollapsed] = useState<boolean>(false);
+
+  // Refs for effects and timers
+  const containerRef = useRef<HTMLDivElement>(null);
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // const genMsgIndexRef = useRef<number | null>(null);
+  const totalBatchesRef = useRef<number>(0);
+  const foundTweetsRef = useRef<number>(0);
+
+  // One-shot gates & live status mirrors
+  const jobStartedRef = useRef<string | null>(null);
+  const analysisStartedRef = useRef(false);
+  const statusRef = useRef(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+  const deepLinkJobRef = useRef<string | null>(null);
+
+  // Restore collapsed preference on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("analysisConsoleCollapsed");
+      if (raw != null) setCollapsed(JSON.parse(raw) === true);
+    } catch {/* ignore */}
+  }, []);
+
+  // Persist collapsed preference when it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem("analysisConsoleCollapsed", JSON.stringify(collapsed));
+    } catch {/* ignore */}
+  }, [collapsed]);
+
+  // Auto scroll to latest message
+  useEffect(() => {
+    containerRef.current?.scrollTo({ top: containerRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages]);
+
+  // Welcome text on idle
+  useEffect(() => {
+    if (status === "idle" && messages.length === 0) {
+      append(
+        `👋 Hi, I’m Analyst Agent, Polina – your crypto intelligence co-pilot
+
+1️⃣ Search a coin you care about 💎
+2️⃣ I’ll collect 7 days of tweets and analyze sentiment ❤️‍🔥, trends 📈, and engagement 🤝
+3️⃣ Get a concise, shareable report 📑 with actionable insights 🚀
+
+✨ Demo version · Twitter only 🛠 — multi-channel intelligence coming soon 🌐`
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
+  // ---------- NEW: Deeplink intake ----------
+   useEffect(() => {
+     const u = typeof window !== "undefined" ? new URL(window.location.href) : null;
+     const deepJob = u?.searchParams.get("job");
+     if (!deepJob) return;
+     deepLinkJobRef.current = deepJob;
+     if (pollTimer.current) clearInterval(pollTimer.current);
+     setStatus("scanning");
+     setMessages([]);
+     setJobId(deepJob);
+     onJobIdChange?.(deepJob);
+     append("🔗 Shared link detected. Resuming job status…");
+     startPolling(deepJob);
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, []);
+
+  // Trigger a new scan when inputs change (projectName/xProfile/tokenAddress) — only if NOT deeplink mode
+  useEffect(() => {
+    if (!inputs) return;
+    if (deepLinkJobRef.current) return;
+    runScan(inputs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputs?.projectName, inputs?.xProfile, inputs?.tokenAddress]);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current) clearInterval(pollTimer.current);
+    };
+  }, []);
+
+  // Utilities
+  function timeStr() {
+    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function append(text: string) {
+    // Deduplicate adjacent identical lines
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]?.text;
+      if (last === text) return prev;
+      return [...prev, { text, time: timeStr() }];
+    });
+  }
+
+  function replaceAt(index: number, text: string) {
+    setMessages((prev) => {
+      if (index < 0 || index >= prev.length) return prev;
+      const next = prev.slice();
+      next[index] = { ...next[index], text };
+      return next;
+    });
+  }
+
+  function findAiGenIndex(list: ConsoleMsg[]) {
+    const tagged = list.findIndex((m) => m.tag === "ai-gen");
+    if (tagged >= 0) return tagged;
+
+    const legacy = list.findIndex((m) =>
+      /^(🧠\s|let me analyze\b)/i.test(m.text)
+    );
+    return legacy;
+  }
+
+  function updateGenerating(text: string) {
+    setMessages((prev) => {
+      const idx = findAiGenIndex(prev);
+      if (idx >= 0) {
+        const next = prev.slice();
+        next[idx] = { ...next[idx], text };
+        return next;
+      }
+      return [...prev, { text, time: timeStr(), tag: "ai-gen" }];
+    });
+  }
+
+  function percent(n: number, d: number) {
+    if (!d) return "0%";
+    const p = Math.min(100, Math.max(0, (n / d) * 100));
+    return `${Math.round(p * 10) / 10}%`;
+  }
+
+  // Make raw backend logs more user friendly
+  const toFriendly = (line: string) => {
+    if (line.includes("Scanning for keywords"))
+      return "I’m looking through Twitter for mentions like: " + line.split(":")[1]?.trim();
+    if (line.includes("Job started")) return "Okay! I’ve kicked off the scan. Give me a moment...";
+    if (line.includes("Scanning in progress")) return line.replace("⏳", "⌛") + " Almost there!";
+    if (line.includes("Completed"))
+      return "All done! I found " + (line.match(/\d+/)?.[0] ?? "?") + " relevant tweets for you 💫";
+    return line;
+  };
+
+   /**
+   * POST to /api/analyzeWithGemini/stream, parse SSE events and update the console in real time
+   */
+  async function startAIStreamByJobId(jobId: string) {
+    setMessages((prev) => {
+      const idx = findAiGenIndex(prev);
+      if (idx < 0) return prev;
+      const next = prev.slice();
+      next.splice(idx, 1);
+      return next;
+    });
+
+    updateGenerating("🧠 Analyzing… loading AI configuration");
+
+    try {
+      const res = await fetch("/api/analyzeWithGemini/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      if (!res.body) throw new Error("No SSE body");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const parts = buf.split("\n\n");
+        buf = parts.pop() || "";
+
+        for (const block of parts) {
+          let ev = "";
+          let dataLine = "";
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event:")) ev = line.slice(6).trim();
+            if (line.startsWith("data:")) dataLine = line.slice(5).trim();
+          }
+          let payload: any = {};
+          try { payload = dataLine ? JSON.parse(dataLine) : {}; } catch {}
+
+          switch (ev) {
+            case "init": {
+              break;
+            }
+            case "input": {
+              const raw = Number(payload?.raw || 0);
+              foundTweetsRef.current = raw;
+              updateGenerating(`🧠 Analyzing… found ${raw} relevant tweets.`);
+              break;
+            }
+            case "normalized": {
+              break;
+            }
+            case "cleaned": {
+              break;
+            }
+            case "chunked": {
+              const n = Number(payload?.batchCount || 0);
+              totalBatchesRef.current = n;
+              const raw = foundTweetsRef.current || 0;
+              updateGenerating(`🧠 Analyzing… segmenting ${raw} tweets into ${n} batches`);
+              break;
+            }
+            case "batch_llm_start": {
+              const i = Number(payload?.i ?? 0);
+              const idx = i + 1;
+              const total = totalBatchesRef.current || 0;
+              updateGenerating(`🧠 Analyzing… batch ${idx} of ${total} (${percent(idx, total)})`);
+              break;
+            }
+            case "synthesis_start": {
+              break;
+            }
+            case "synthesis_ok": {
+              updateGenerating("🧠 Analyzing… synthesis complete");
+              break;
+            }
+            case "emotions_compute": {
+              break;
+            }
+            case "emotions_llm_ok":
+            case "emotions_llm_fail": {
+              updateGenerating("🧠 Analyzing… emotional landscape computed");
+              break;
+            }
+            case "persist_ok":
+            case "persist_skip": {
+              break;
+            }
+            case "done": {
+              const text: string = payload?.text || "";
+              const emotions = payload?.emotions ?? null;
+              const emotionsInsight: string | null | undefined = payload?.emotionsInsight ?? null;
+              onAnalysisResult?.({ summary: text, emotions, emotionsInsight });
+              replaceGenerating("📊 I’ve completed the analysis. Please check the full summary on the AI Understanding card.");
+              return;
+            }
+            case "error": {
+              replaceGenerating(`❌ AI stream error: ${payload?.message || "Unknown error"}`);
+              return;
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      replaceGenerating(`❌ AI stream failed: ${e?.message || "Unknown error"}`);
+    }
+  }
+
+  // Mark a job as ready for "View report" button
+  function markReport(id: string | null) {
+    if (id && id.trim()) setReportJobId(id.trim());
+  }
+
+  // Launch a scan flow
+  async function runScan(input: AnalysisInput) {
+    if (pollTimer.current) clearInterval(pollTimer.current);
+
+    setStatus("scanning");
+    setMessages([]); // clear welcome
+    setJobId(null);
+    onJobIdChange?.(null);
+    setTweetCount(0);
+    jobStartedRef.current = null;
+    analysisStartedRef.current = false;
+
+    append("🔍 Starting analysis of your project…");
+
+    try {
+      const res = await fetch("/api/ctsearch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectName: input.projectName
+            ? (input.projectName.startsWith("$") ? input.projectName : `$${input.projectName}`)
+            : "",
+          twitterHandle: input.xProfile || "",
+          contractAddress: input.tokenAddress || "",
+        }),
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      if (!reader) throw new Error("No response stream");
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        const lines = chunk.split("\n").filter(Boolean);
+
+        for (const raw of lines) {
+          const line = raw;
+
+          // Ignore submission hint
+          if (line.includes("Job submitted")) continue;
+
+          // Drop "Scanning in progress" when not scanning or after analysis started
+          if (
+            line.includes("Scanning in progress") &&
+            (statusRef.current !== "scanning" || analysisStartedRef.current)
+          ) {
+            continue;
+          }
+
+          // "Completed" is handled by poller to avoid duplicates
+          if (line.includes("Completed")) continue;
+
+          // Friendly display
+          append(toFriendly(line));
+
+          // Only record the first "Job started"
+          const m = line.match(/Job started:\s*(.+)/i);
+          if (m) {
+            const id = m[1].trim();
+            if (!jobStartedRef.current) {
+              jobStartedRef.current = id;
+              setJobId(id);
+              onJobIdChange?.(id);
+              startPolling(id);
+              // ✍️ Persist "scanning" row to DB
+              try {
+                await fetch("/api/campaigns", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                  jobId: id,
+                  queryJson: {
+                    projectName: input.projectName || input.xProfile || input.tokenAddress || "Untitled",
+                    twitterHandle: input.xProfile || "",
+                    contractAddress: input.tokenAddress || "",
+                  },
+                  source: "ctsearch"
+                  }),
+                });
+              } catch {/* ignore */}
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      setStatus("error");
+      append("❌ Scan failed to start. " + (e?.message || "Unknown error"));
+    }
+  }
+
+  // ---------- Helper: resolve jobId from a searchId ----------
+  async function resolveJobIdBySearch(searchId: string): Promise<string | null> {
+    // Try /api/searches?id=... first
+    const tryFetch = async (path: string) => {
+      const r = await fetch(path, { cache: "no-store" });
+      if (!r.ok) return null;
+      const j = await r.json().catch(() => ({}));
+      const id = (j?.jobId || j?.job_id || j?.search?.jobId || j?.search?.job_id) as string | undefined;
+      return (typeof id === "string" && id.trim()) ? id.trim() : null;
+    };
+
+    // 1) /api/searches?id=<uuid>
+    const a = await tryFetch(`/api/searches?id=${encodeURIComponent(searchId)}`);
+    if (a) return a;
+
+    // 2) /api/searches/<uuid>
+    const b = await tryFetch(`/api/searches/${encodeURIComponent(searchId)}`);
+    if (b) return b;
+
+    return null;
+  }
+
+  // Poll job status and then trigger AI analysis
+  function startPolling(id: string) {
+    if (pollTimer.current) clearInterval(pollTimer.current);
+
+    pollTimer.current = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/jobProxy?job_id=${encodeURIComponent(id)}`, { cache: "no-store" });
+        const data = await r.json();
+
+        // Completed first, to avoid writing progress after done
+        if (data?.status === "completed") {
+          if (pollTimer.current) {
+            clearInterval(pollTimer.current);
+            pollTimer.current = null;
+          }
+          if (analysisStartedRef.current) return;
+          analysisStartedRef.current = true;
+
+          setStatus("complete");
+          append(toFriendly(`✅ Completed: ${data?.tweets_count || 0} tweets found.`));
+          markReport(id);
+          // ✍️ Update DB to "completed" with final count
+          try {
+            await fetch("/api/campaigns", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                jobId: id,
+                queryJson: {},
+                source: "ctsearch",
+                tweetsCount: typeof data?.tweets_count === "number" ? data.tweets_count : 0,
+              }),
+            });
+          } catch {/* ignore */}
+
+          try {
+            const hit = await fetch(`/api/ai-understanding?job_id=${encodeURIComponent(id)}`, { cache: "no-store" });
+            const hitJson = await hit.json().catch(() => ({}));
+            if (hit.ok && hitJson?.found && (hitJson.summaryText || hitJson.resultJson)) {
+              const summary =
+                String(
+                  hitJson.summaryText ||
+                  hitJson.resultJson?.final?.text ||
+                  ""
+              );
+              const emotions = hitJson?.resultJson?.emotions ?? null;
+              const emotionsInsight = hitJson?.resultJson?.emotionsInsight ?? null;
+              onAnalysisResult?.({ summary, emotions, emotionsInsight });
+              replaceGenerating("📊 Loaded existing AI understanding from database.");
+              markReport(id);
+              return;
+            }
+          } catch { /* ignore and fallback to AI */ }
+
+          startAIStreamByJobId(id);
+
+          return;
+        }
+
+        // Fail → show invalid link / failed job
+        if (data?.status === "fail" || data?.status === "failed" || data?.error) {
+          if (pollTimer.current) {
+            clearInterval(pollTimer.current);
+            pollTimer.current = null;
+          }
+          setStatus("error");
+          append(`❌ This link is not available (job failed).`);
+          return;
+        }
+
+        // Progress while scanning (not yet analyzing)
+        if (statusRef.current === "scanning" && !analysisStartedRef.current && typeof data?.tweets_count === "number") {
+          setTweetCount(data.tweets_count);
+          onTweetCountUpdate?.(data.tweets_count);
+
+          setMessages((prev) => {
+            const msg = `⏳ Scanning in progress... ${data.tweets_count} tweets collected.`;
+            const friendly = toFriendly(msg);
+            const last = prev[prev.length - 1]?.text || "";
+            if (last.startsWith("⌛ Scanning in progress")) {
+              const copy = prev.slice(0, -1);
+              return [...copy, { text: friendly, time: timeStr() }];
+            }
+            return [...prev, { text: friendly, time: timeStr() }];
+          });
+        }
+      } catch {
+        // Swallow transient poll errors silently
+      }
+    }, 3000);
+  }
+
+  // Replace the temporary "generating" placeholder with final text
+  function replaceGenerating(text: string) {
+    setMessages((prev) => {
+      const idx = findAiGenIndex(prev);
+      if (idx >= 0) {
+        const next = prev.slice();
+        next[idx] = { ...next[idx], text };
+        delete next[idx].tag;
+        return next;
+      }
+      return [...prev, { text, time: timeStr() }];
+    });
+  }
+
+  // Toggle collapsed state (accessible + persisted)
+  function toggleCollapsed() {
+    setCollapsed((prev) => !prev);
+  }
+
+  return (
+    <div
+      className={`p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5 ${className}`}
+    >
+      {/* Header acts as the collapse/expand trigger */}
+      <button
+        type="button"
+        onClick={toggleCollapsed}
+        aria-expanded={!collapsed}
+        aria-controls="analysis-console-body"
+        className="
+          w-full flex items-center justify-between
+          text-left group outline-none
+          focus-visible:ring-2 focus-visible:ring-emerald-400/60 rounded-xl
+        "
+        title={collapsed ? "Expand Analysis Console" : "Collapse Analysis Console"}
+      >
+        <span className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+          Analysis Console
+        </span>
+        <span
+          className={`
+            ml-3 inline-flex h-6 w-6 items-center justify-center rounded-md border border-white/10 bg-white/5
+            text-white/80 transition-transform duration-200
+            ${collapsed ? "" : "rotate-180"}
+            group-hover:bg-white/10
+          `}
+          aria-hidden
+        >
+          ▾
+        </span>
+      </button>
+
+      {/* Body (hidden when collapsed). Keep logic running; just don't render the UI. */}
+      {!collapsed && (
+        <>
+          {/* Scrollable feed */}
+          <div
+            id="analysis-console-body"
+            ref={containerRef}
+            className="analysis-scrollbar px-4 py-3 space-y-4 text-sm h-[240px] overflow-y-auto border-t border-white/10 mt-3"
+          >
+            {messages.map((m, i) => {
+              const isScanningLine = m.text.startsWith("⌛ Scanning in progress");
+              const isCompletedLine = m.text.startsWith("📊 I’ve completed the analysis");
+              const isAnalyzingLine = m.text.startsWith("🧠");
+
+              const textNormalized = isScanningLine
+                ? m.text.replace(/^⌛\s*/, "")
+                : isCompletedLine
+                ? m.text.replace(/^📊\s*/, "")
+                : isAnalyzingLine
+                ? m.text.replace(/^🧠\s*/, "")
+                : m.text;
+
+              return (
+                <div key={i} className="flex items-start gap-3">
+                  <Image src={polinaIcon} alt="Polina" width={28} height={28} className="rounded-full" />
+                  <div>
+                    <div className="text-xs text-gray-400 mb-1">Polina{m.time ? ` · ${m.time}` : ""}</div>
+
+                    <div className="text-gray-200 font-mono leading-snug whitespace-pre-wrap">
+                      {isScanningLine || isCompletedLine || isAnalyzingLine ? (
+                        <span className="inline-flex items-center gap-2">
+                          <LotusIcon
+                            className={`w-12 h-12 shrink-0 ${
+                              (isScanningLine && status === "scanning") || isAnalyzingLine
+                                ? "animate-spin motion-reduce:animate-none"
+                                : ""
+                            }`}
+                            style={
+                              (isScanningLine && status === "scanning") || isAnalyzingLine
+                                ? { animationDuration: "2.2s" }
+                                : undefined
+                            }
+                            title={
+                              isAnalyzingLine ? "Analyzing" : isScanningLine ? "Scanning" : "Completed"
+                            }
+                          />
+                          <span>{textNormalized}</span>
+                        </span>
+                      ) : (
+                        textNormalized
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Meta info */}
+          <div className="mt-4 text-xs text-gray-400 space-y-1">
+            <div className="truncate">
+              <span className="text-gray-400">Job ID: </span>
+              <span className="text-gray-200 break-all">{jobId || "-"}</span>
+            </div>
+            <div>
+              <span className="text-gray-400">Tweets: </span>
+              <span className="text-gray-200">{tweetCount}</span>
+            </div>
+            <div>
+              <span className="text-gray-400">Status: </span>
+              <span className="text-gray-200">{status}</span>
+            </div>
+            {/* View report CTA */}
+            {reportJobId && (
+              <div className="pt-2 flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => setReportOpen(true)}
+                  className="px-3 py-1.5 rounded-md bg-gradient-to-r from-[#27a567] to-[#2fd480] text-white/90 text-xs font-semibold shadow hover:brightness-110"
+                >
+                  📄 View report
+                </button>
+              </div>
+            )}
+          </div>
+          {/* Modal */}
+          {reportJobId && (
+            <ReportModal
+              open={reportOpen}
+              onClose={() => setReportOpen(false)}
+              jobId={reportJobId}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Top-view lotus icon: symmetric petals so rotation looks centered & balanced. */
+function LotusIcon({
+  className,
+  style,
+  title,
+}: {
+  className?: string;
+  style?: React.CSSProperties;
+  title?: string;
+}) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      style={style}
+      role="img"
+      aria-hidden={title ? undefined : true}
+    >
+      {title ? <title>{title}</title> : null}
+      <defs>
+        <linearGradient id="lotusGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#3ef2ac" />
+          <stop offset="100%" stopColor="#27a567" />
+        </linearGradient>
+      </defs>
+
+      <circle cx="12" cy="12" r="2" fill="url(#lotusGrad)" opacity="0.95" />
+      <g fill="url(#lotusGrad)" opacity="0.95">
+        {Array.from({ length: 8 }).map((_, idx) => (
+          <g key={idx} transform={`rotate(${idx * 45} 12 12)`}>
+            <path d="M12 4 C 13.8 6.8, 14.2 9.2, 12 11 C 9.8 9.2, 10.2 6.8, 12 4 Z" />
+          </g>
+        ))}
+      </g>
+    </svg>
+  );
+}
+// components/CampaignLeftPane.tsx
+"use client";
+
+import { useState } from "react";
+import { AiUnderstanding } from "@/components/AiUnderstanding";
+import InputCard from "@/components/InputCard";
+import type { AnalysisInput } from "@/components/types";
+import EmotionalLandscapeCard from "@/components/EmotionalLandscapeCard";
+import type { EmotionalLandscape } from "@/lib/analysis/emotionalLandscape";
+import type { AnalysisResult } from "@/components/types";
+import CommitmentIndex from "@/components/CommitmentIndex";
+
+export default function CampaignLeftPane({
+  onRun,
+  aiSummary,
+  emotions,
+  emotionsInsight,
+  deepLinkUrl,
+  ticker,
+  contractAddress,
+  className = "",
+}: {
+  onRun: (input: AnalysisInput) => void;
+  aiSummary?: string | null;
+  emotions?: EmotionalLandscape | null;
+  emotionsInsight?: string | null;
+  deepLinkUrl?: string;
+  ticker?: string | null;
+  contractAddress?: string | null;
+  className?: string;
+}) {
+  return (
+    <div className={`flex flex-col gap-6 w-full ${className}`}>
+      <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+            Search
+          </h2>
+          {deepLinkUrl ? <CopyLinkButton url={deepLinkUrl} /> : null}
+        </div>
+
+        <InputCard onRun={onRun} deepLinkUrl={deepLinkUrl} />
+      </div>
+
+      <AiUnderstanding aiSummary={aiSummary} />
+
+      {emotions ? (
+        <div className="p-0">
+          <EmotionalLandscapeCard
+            data={emotions}
+            insight={emotionsInsight ?? undefined}
+            ticker={ticker}
+            contractAddress={contractAddress}
+          />
+        </div>
+      ) : (
+        <EmptyEmotionsCard
+          deepLinkUrl={deepLinkUrl}
+          ticker={ticker}
+          contractAddress={contractAddress}
+        />
+      )}
+
+      {/* Commitment Index  */}
+      <CommitmentIndex
+        deepLinkUrl={deepLinkUrl}
+        ticker={ticker}
+        contractAddress={contractAddress}
+      />
+    </div>
+  );
+}
+
+function EmptyEmotionsCard({
+  deepLinkUrl,
+  ticker,
+  contractAddress,
+}: {
+  deepLinkUrl?: string;
+  ticker?: string | null;
+  contractAddress?: string | null;
+}) {
+  return (
+    <div className="p-6 w-full rounded-2xl shadow-2xl bg-gradient-to-br from-[#101c1b] via-[#0c1111] to-[#0a0f0e] border border-white/5">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
+          Emotional Landscape
+        </h2>
+      </div>
+      <p className="text-sm text-gray-500">
+        Waiting for AI analysis… it appears here once tweets are collected.
+      </p>
+      {(ticker || contractAddress || deepLinkUrl) && (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {ticker && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Ticker</span>
+              <span className="px-2 py-0.5 text-sm rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono">
+                {ticker}
+              </span>
+            </div>
+          )}
+          {contractAddress && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Contract</span>
+                <span className="px-2 py-0.5 text-xs md:text-[13px] rounded-md border border-white/10 bg-white/10 text-emerald-200 font-mono break-all">
+                  {shortenAddress(contractAddress)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function shortenAddress(addr?: string, head = 6, tail = 6): string {
+  if (!addr) return "";
+  const len = addr.length;
+  if (len <= head + tail) return addr;
+  return `${addr.slice(0, head)}…${addr.slice(-tail)}`;
+}
+
+function CopyLinkButton({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      window.prompt("Copy this link:", url);
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={url}
+      className="px-2.5 py-1.5 rounded-md border border-emerald-400/20 bg-emerald-400/10 hover:bg-emerald-400/15 text-[12px] font-medium text-emerald-200"
+      aria-label="Copy sharable link"
+    >
+      {copied ? "Copied ✓" : "Copy link"}
+    </button>
+  );
+}
+// components/dashboard/Navbar.tsx
+"use client";
+
+import Image from "next/image";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import dynamic from "next/dynamic";
+import NavLinks from "./NavLinks";
+import MobileMenu from "./MobileMenu";
+import { useSession, signOut } from "next-auth/react";
+
+const WalletButton = dynamic(() => import("../SignInWithSolana"), { ssr: false });
+
+/** Safely pick a wallet-like identifier from NextAuth session.
+ *  Returns "" when absent, never the literal "undefined"/"null".
+ */
+function pickWalletFromSession(session: any): string {
+  const u = (session && session.user) || {};
+  const raw = u.address || u.id || u.name || "";
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!s) return "";
+  if (s === "undefined" || s === "null") return "";
+  return s;
+}
+
+function shorten(addr?: string) {
+  if (!addr) return "";
+  if (addr.length <= 10) return addr;
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
+
+export default function Navbar() {
+  const pathname = usePathname();
+  const { data: session, status } = useSession();
+
+  const sessionWallet = pickWalletFromSession(session);
+  const isLoggedIn = status === "authenticated" && !!sessionWallet;
+
+  return (
+    <header className="sticky top-0 z-50 flex justify-center px-3 py-4 md:px-4">
+      <div
+        className="
+          w-full max-w-6xl rounded-full
+          bg-white/[0.06] border border-white/10 backdrop-blur-xl
+          shadow-[0_8px_30px_rgba(0,0,0,0.12)]
+          px-4 md:px-6 py-2 md:py-2.5
+          flex items-center justify-between
+        "
+      >
+        {/* Logo */}
+        <Link href="https://www.polinaos.com/" prefetch={false} className="flex items-center gap-2">
+          <Image
+            src="/logo-polina.png"
+            alt="PolinaOS"
+            width={32}
+            height={32}
+            className="rounded-full"
+            priority
+          />
+          <span className="hidden sm:inline-block text-white font-bold text-base md:text-lg">
+            PolinaOS
+          </span>
+        </Link>
+
+        {/* Desktop nav */}
+        <nav className="hidden md:flex items-center gap-6">
+          <NavLinks active={pathname || ""} />
+        </nav>
+
+        {/* Right actions (desktop) */}
+        <div className="hidden md:flex items-center gap-2">
+          {isLoggedIn ? (
+            <>
+              <Link
+                href="/dashboard/profile"
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium hover:bg-white/10 transition-colors"
+                title={sessionWallet}
+                aria-label="Open profile"
+                prefetch={false}
+              >
+                {shorten(sessionWallet)}
+              </Link>
+              <button
+                onClick={() => signOut()}
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
+              >
+                Sign out
+              </button>
+            </>
+          ) : status === "loading" ? (
+            // tiny skeleton to avoid flicker
+            <div className="h-8 w-24 rounded-full bg-white/10 animate-pulse" aria-hidden />
+          ) : (
+            <WalletButton />
+          )}
+        </div>
+
+        {/* Mobile */}
+        <div className="md:hidden flex items-center gap-2">
+          {isLoggedIn ? (
+            <>
+              <Link
+                href="/dashboard/profile"
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 text-sm font-medium hover:bg-white/10 transition-colors"
+                title={sessionWallet}
+                prefetch={false}
+              >
+                {shorten(sessionWallet)}
+              </Link>
+              <button
+                onClick={() => signOut()}
+                className="px-3 py-1.5 rounded-full border border-white/15 bg-white/5 hover:bg-white/10 text-sm font-medium"
+              >
+                Sign out
+              </button>
+            </>
+          ) : status === "loading" ? (
+            <div className="h-8 w-20 rounded-full bg-white/10 animate-pulse" aria-hidden />
+          ) : (
+            <WalletButton />
+          )}
+          <MobileMenu active={pathname || ""} />
+        </div>
+      </div>
+    </header>
+  );
+}
+// app/dashboard/page.tsx
+
+import { redirect } from "next/navigation";
+
+export default function Page() {
+  redirect("/dashboard/campaign/analysis");
+}
+

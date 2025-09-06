@@ -140,10 +140,7 @@ export async function POST(req: Request) {
   }
 
   // Resolve tickers -> contracts (prefer Solana if any Sol CA seen)
-  const resolved = await resolveTickersToContracts(
-    [...uniqueTickers],
-    seenSolanaCA ? { forceNetwork: "solana" } : { preferSolana: true },
-  );
+  const resolved = await resolveTickersToContracts([...uniqueTickers]);
 
   // Reverse map: contract -> { tokenDisplay, boostedConf }
   const byContract = new Map<
@@ -162,10 +159,7 @@ export async function POST(req: Request) {
   // CA-only resolution: resolve contracts that have no ticker meta
   const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
   if (missingCA.length) {
-    const caMeta = await resolveContractsToMeta(
-      missingCA,
-      seenSolanaCA ? { forceNetwork: "solana" } : undefined,
-    );
+    const caMeta = await resolveContractsToMeta(missingCA);
     for (const [addr, meta] of caMeta.entries()) {
       byContract.set(addr, {
         tokenDisplay: meta.tokenDisplay,

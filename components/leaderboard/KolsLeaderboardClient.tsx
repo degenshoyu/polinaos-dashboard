@@ -11,9 +11,6 @@ import { KolsHeaderControls } from "./KolsHeaderControls";
 import { LeaderboardHeader } from "./LeaderboardHeader";
 import { LeaderboardRow, type CoinStat } from "./LeaderboardRow";
 
-const CHUNK_SIZE = 25;
-const MICRO_PAUSE = 200;
-
 /* ---------- local utils ---------- */
 
 type SortKey =
@@ -43,8 +40,6 @@ export default function KolsLeaderboardClient({
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("shills");
   const { refreshing, refreshVisible } = useKolAggregations();
-  const [batching, setBatching] = useState(false);
-  const [progress, setProgress] = useState({ cur: 0, total: 0 });
 
   const rows = initialRows ?? [];
 
@@ -116,38 +111,6 @@ export default function KolsLeaderboardClient({
   }
 
   // Refresh visible (recompute server-side)
-  function uniqueHandles(list: (string | undefined | null)[]) {
-    return Array.from(new Set(list.filter(Boolean))) as string[];
-  }
-
-  function sleep(ms: number) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  async function refreshAllInChunks(allHandles: string[]) {
-    if (!allHandles.length) return;
-    setBatching(true);
-    setProgress({ cur: 0, total: allHandles.length });
-    for (let i = 0; i < allHandles.length; i += CHUNK_SIZE) {
-      const chunk = allHandles.slice(i, i + CHUNK_SIZE);
-      await refreshVisible(chunk, daysFromUrl);
-      setProgress((p) => ({ cur: Math.min(i + chunk.length, allHandles.length), total: allHandles.length }));
-      await sleep(MICRO_PAUSE);
-    }
-    setBatching(false);
-  }
-
-  async function handleReloadAndRefreshAll() {
-    router.refresh();
-    const prepare = async () => {
-      const list = (ranked.length ? ranked.map((x) => x.row.twitterUsername) : rows.map((r) => r.twitterUsername)) as (string | undefined)[];
-      const all = uniqueHandles(list);
-      await refreshAllInChunks(all);
-      router.refresh();
-    };
-    setTimeout(prepare, 300);
-  }
-
   /* ----- header tooltips (dynamic by days) ----- */
   const totalTooltip = (
     <div className="space-y-1">
@@ -187,11 +150,6 @@ export default function KolsLeaderboardClient({
           sortKey={sortKey}
           onSetDays={setDays}
           onSetSortKey={setSortKey}
-          onReloadAndRefreshAll={handleReloadAndRefreshAll}
-          batching={batching || refreshing}
-          progressCur={progress.cur}
-          progressTotal={progress.total}
-          disabled={empty}
         />
       </div>
 
