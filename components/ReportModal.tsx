@@ -336,7 +336,9 @@ export default function ReportModal({
       // Emerging → 前3名
       buildTopBlock("3️⃣ Emerging 🌱", emerging, 3),
       "",
-      `Source: @PolinaAIOS ${deeplink}`,
+      `Turn raw X (Twitter) chatter about your token and KOLs into decisions. @PolinaAIOS delivers AI-native, actionable insights.`,
+      "",
+      `Full report → ${deeplink}`,
     ];
 
     return parts.join("\n");
