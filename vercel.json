@@ -1,0 +1,5 @@
+{
+  "crons": [
+    { "path": "/api/kols/cron-detect", "schedule": "0 * * * *" }
+  ]
+}

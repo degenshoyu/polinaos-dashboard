@@ -3,23 +3,26 @@
 /**
  * Mention extraction (Solana-only)
  *
- * What we detect from a tweet text:
+ * Detected from tweet text:
  *  1) Contract address (CA): Solana Base58 (length 32–44). Confidence = 100.
  *     - We intentionally ignore EVM (0x...) here.
- *  2) $TICKER: dollar-prefixed alphanumeric (2–10 chars). Confidence = 95.
+ *     - Robust to line breaks/whitespace splits and pump.fun URLs.
+ *  2) $TICKER: dollar-prefixed alphanumeric (2–10 chars, first is a letter). Confidence = 95.
  *     - We intentionally ignore hashtag tokens like #TICKER.
- *  3) Phrase "<name> coin": the 1–2 words immediately before "coin" are treated as the token NAME.
- *     - Confidence = 70 by default. Later pipeline will resolve NAME → ticker/contract via GT.
+ *  3) Phrase "<name> coin": extract the SINGLE token immediately before "coin". Confidence = 80.
+ *     - Filter stopwords like "the/a/that/this/my/your/his/her/its/their" etc.
  *
- * Deduplication rules:
+ * Deduplication:
  *  - Group by tokenKey (normalized).
  *  - Prefer CA over non-CA; for same kind, prefer higher confidence.
  *
  * Output fields:
- *  - tokenKey: normalized key (for CA it's the address as-is; for $ticker it's lowercase w/o "$";
- *              for phrase it's the lowercase name with single spaces)
- *  - tokenDisplay: original display text (e.g. "$BONK", the CA itself, or the original name)
- *  - source: "ca" | "ticker" | "phrase" (we keep "hashtag" | "upper" in the union for compatibility,
+ *  - tokenKey:
+ *      • CA → the address as-is (Solana Base58)
+ *      • $ticker → lowercase without "$" (e.g., "$BONK" → "bonk")
+ *      • phrase  → lowercase single token before "coin" (e.g., "unstable")
+ *  - tokenDisplay: original display text ($TICKER / CA / phrase token with original casing)
+ *  - source: "ca" | "ticker" | "phrase" (union keeps "hashtag" | "upper" for compatibility,
  *            but we do NOT emit them here)
  *  - confidence: integer in [0, 100]
  */
@@ -33,29 +36,52 @@ export type Mention = {
   confidence: number; // 0..100
 };
 
-/** Solana Base58 address: 32–44 chars, no 0/O/I/l and excluding ambiguous chars */
+/** Solana Base58: 32–44 chars, no ambiguous chars (0,O,I,l). */
 const SOL_CA = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 
-/** $TICKER: starts with $, 2–10 total characters (letters/digits), first must be a letter */
+/** $TICKER: starts with $, 2–10 total chars (letters/digits), first must be a letter. */
 const DOLLAR_TICKER = /\$[A-Za-z][A-Za-z0-9]{1,9}\b/g;
 
 /**
- * "<name> coin" phrases:
- *  - allow 1~2 words as the name (letters/digits/hyphen), separated by a single space.
- *  - we match case-insensitively, but keep original casing for display.
- *  - examples: "unstable coin", "my-token coin"
+ * "<name> coin" (SINGLE token immediately before "coin")
+ * - token characters allowed: letters/digits/underscore/hyphen/dot
+ * - case-insensitive match, we still keep original slice for display text
+ * - examples:
+ *    • "buy unstable coin"   -> "unstable"
+ *    • "my-token coin"       -> "my-token"
+ *    • "pepe2.0 coin"        -> "pepe2.0"
+ * - rejected stopwords: "the/a/that/this/my/your/his/her/its/their/..." (see STOPWORDS)
  */
-const NAME_COIN =
-  /\b([a-z][a-z0-9-]{2,20}(?:\s+[a-z][a-z0-9-]{2,20})?)\s+coin\b/gi;
+const NAME_BEFORE_COIN = /\b([A-Za-z][A-Za-z0-9._-]{2,32})\s+coin\b/gi;
 
-/** Normalize $ticker → bare lowercase key (e.g., "$BONK" → "bonk") */
+/** Extended stopwords based on observed data. Keep lowercase. */
+const STOPWORDS = new Set([
+  "the",
+  "a",
+  "that",
+  "this",
+  "my",
+  "your",
+  "his",
+  "her",
+  "its",
+  "their",
+  "every",
+  "insane",
+  "crazy",
+  "real",
+  "mega",
+  "marketcap",
+  "streamer",
+]);
+
+/** Normalize $ticker → bare lowercase key (e.g., "$BONK" → "bonk"). */
 const normTickerKey = (s: string) => s.replace(/^\$+/, "").toLowerCase();
 
-/** Normalize phrase-name key: lowercase and collapse spaces (display keeps original slice) */
-const normPhraseKey = (s: string) =>
-  s.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 64);
+/** Normalize phrase token → lowercase (single token already enforced by regex). */
+const normPhraseKey = (s: string) => s.trim().toLowerCase();
 
-/** Group-by helper used for deduplication */
+/** Group-by helper used for deduplication. */
 function groupBy<T>(arr: T[], key: (x: T) => string) {
   const m = new Map<string, T[]>();
   for (const x of arr) {
@@ -65,54 +91,125 @@ function groupBy<T>(arr: T[], key: (x: T) => string) {
   return m;
 }
 
+/** Join two Base58 chunks and validate Solana length; return null if invalid. */
+function tryJoinBase58(a: string, b: string): string | null {
+  const joined = (a + b).trim();
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(joined)) return joined;
+  return null;
+}
+
+/**
+ * Extract CA candidates from pump.fun URLs, tolerant to line breaks after "/coin/".
+ * Example broken text:
+ *   https://pump.fun/coin/8mznFjdcG
+ *   HhfvxkP1JVC7Ttn2gQJzNWmU8Zuw8cipump
+ * Will re-assemble to a valid Base58 of length 32–44 if possible.
+ */
+function collectFromPumpFun(text: string): string[] {
+  const out: string[] = [];
+  // match "pump.fun/coin/<tail>" capturing up to ~90 chars (can contain breaks)
+  const RE = /pump\.fun\/coin\/([^\s]{1,90})/gi;
+  let m: RegExpExecArray | null;
+  while ((m = RE.exec(text)) !== null) {
+    let tail = m[1] || "";
+    // look ahead a bit and join any subsequent base58 fragments
+    const rest = text.slice(RE.lastIndex, RE.lastIndex + 160);
+    const more = (rest.match(/[1-9A-HJ-NP-Za-km-z]{2,}/g) || []).join("");
+    const candidate = (tail + more).replace(/[^1-9A-HJ-NP-Za-km-z]+/g, "");
+    const clipped = candidate.slice(0, 64); // safety upper bound
+    // choose the longest valid prefix within [32, 44]
+    for (let L = Math.min(44, clipped.length); L >= 32; L--) {
+      const head = clipped.slice(0, L);
+      if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(head)) {
+        out.push(head);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Extract CA by joining two Base58 chunks split by whitespace/newline.
+ * Example: "8mznFjdcG\nHhfvxkP1JVC7Ttn2gQJzNWmU8Zuw8cipump"
+ */
+function collectJoinedPairs(text: string): string[] {
+  const out: string[] = [];
+  const SPLIT2 =
+    /\b([1-9A-HJ-NP-Za-km-z]{8,20})\s+([1-9A-HJ-NP-Za-km-z]{16,44})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = SPLIT2.exec(text)) !== null) {
+    const a = m[1];
+    const b = m[2];
+    const j = tryJoinBase58(a, b);
+    if (j) out.push(j);
+  }
+  return out;
+}
+
+/** Remove zero-width characters that sometimes appear in scraped texts. */
+function stripZeroWidth(s: string) {
+  return s.replace(/[\u200B-\u200D\uFEFF]/g, "");
+}
+
 export function extractMentions(text: string): Mention[] {
   const out: Mention[] = [];
   if (!text) return out;
 
-  // 1) Solana CA (confidence = 100)
-  const sol = text.match(SOL_CA) ?? [];
-  for (const a of sol) {
+  // Pre-clean: remove zero-width characters to avoid regex misalignment.
+  const scanText = stripZeroWidth(text);
+
+  /** ---------------------- 1) Contract addresses (CA) ---------------------- */
+  // 1.a Fix-ups: pump.fun URL reassembly + whitespace-joined Base58
+  const pumpCAs = collectFromPumpFun(scanText);
+  const joinedCAs = collectJoinedPairs(scanText);
+  // 1.b Plain scan for contiguous Base58 CAs
+  const plainCAs = scanText.match(SOL_CA) ?? [];
+  // Merge & dedupe
+  const allCAs = Array.from(
+    new Set<string>([...pumpCAs, ...joinedCAs, ...plainCAs]),
+  );
+  for (const a of allCAs) {
     out.push({
       tokenKey: a, // keep Base58 as-is for Solana
-      tokenDisplay: a, // display the raw address; later pipeline may map to $SYMBOL
+      tokenDisplay: a, // raw address; later pipeline can map to $SYMBOL
       source: "ca",
-      confidence: 100, // per request: boost Solana CA to 100
+      confidence: 100, // Solana CA = 100
     });
   }
 
-  // 2) $ticker (confidence = 95). We do NOT emit hashtag tokens here.
-  const dollars = text.match(DOLLAR_TICKER) ?? [];
+  /** ---------------------- 2) $ticker ---------------------- */
+  const dollars = scanText.match(DOLLAR_TICKER) ?? [];
   for (const t of dollars) {
     out.push({
-      tokenKey: normTickerKey(t), // "bonk"
-      tokenDisplay: t, // "$BONK" (original)
+      tokenKey: normTickerKey(t), // e.g., "bonk"
+      tokenDisplay: t, // original "$BONK"
       source: "ticker",
       confidence: 95,
     });
   }
 
-  // 3) "<name> coin" phrases (confidence = 70)
-  //    We run the regex on a lowercase copy to match case-insensitively,
-  //    but we slice the original text for display fidelity.
-  const lower = text.toLowerCase();
-  let match: RegExpExecArray | null;
-  while ((match = NAME_COIN.exec(lower))) {
-    // Slice the original text at the same span to preserve original casing
-    const fullSpan = text.slice(match.index, match.index + match[0].length);
-    // Remove trailing "coin" from the span to get the display name
-    const displayName = fullSpan.replace(/\s+coin\b/i, "").trim();
-    const key = normPhraseKey(displayName);
+  /** ---------------------- 3) "<name> coin" (single token) ---------------------- */
+  let m: RegExpExecArray | null;
+  while ((m = NAME_BEFORE_COIN.exec(scanText)) !== null) {
+    // m[1] is the token just before "coin"
+    let raw = (m[1] || "").trim();
+    // Drop leading '#' or '$' (avoid misclassifying hashtags/tickers as a phrase name)
+    raw = raw.replace(/^[#$]+/, "");
+
+    const key = normPhraseKey(raw);
     if (!key) continue;
+    if (STOPWORDS.has(key)) continue; // reject common adjectives/pronouns/articles
 
     out.push({
-      tokenKey: key, // e.g., "unstable" or "my-token"
-      tokenDisplay: displayName, // original display (e.g., "unstable" / "my-token")
+      tokenKey: key, // e.g., "unstable"
+      tokenDisplay: raw, // keep original casing; DO NOT prefix "$"
       source: "phrase",
-      confidence: 70,
+      confidence: 80,
     });
   }
 
-  // Deduplicate by tokenKey: prefer CA > higher confidence
+  /** ---------------------- Deduplication ---------------------- */
   const grouped = groupBy(out, (x) => x.tokenKey);
   const deduped: Mention[] = [];
   for (const [, arr] of grouped) {
