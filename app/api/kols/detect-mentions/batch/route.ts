@@ -9,6 +9,10 @@ import { processTweetsToRows } from "@/lib/kols/detectEngine";
 /* ========================= Runtime ========================= */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
+/** Route identifier for ops scripts parity */
+const ROUTE_ID = "/api/kols/detect-mentions/batch";
 
 /* ========================= Auth ========================= */
 function allowByCronSecret(req: Request) {
@@ -132,6 +136,7 @@ async function runDetectPage(
 
   if (page.length === 0) {
     return {
+      routeId: ROUTE_ID,
       ok: true,
       handle: handle ?? "*",
       days,
@@ -143,7 +148,6 @@ async function runDetectPage(
     };
   }
 
-  // missingOnly：跳过已有任何 mentions 的推文
   let candidates = page;
   if (missingOnly) {
     const existing = await db
@@ -160,13 +164,11 @@ async function runDetectPage(
   }
   log({ event: "candidates", count: candidates.length });
 
-  // 复用引擎：抽取 → 解析（ticker/name/CA）→ rows（不写库）
   const { rows, stats } = await processTweetsToRows(
     candidates.map((t) => ({ tweetId: t.tweetId, textContent: t.textContent })),
-    log, // 引擎内部也会输出 resolve_* / extracted 等事件
+    log,
   );
 
-  // 计算 nextCursor（基于本页最后一条，和排序一致）
   const last = page[page.length - 1];
   const nextCursor = last
     ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
@@ -175,6 +177,7 @@ async function runDetectPage(
   if (!rows.length) {
     log({ event: "done", rows: 0, inserted: 0, updated: 0, nextCursor });
     return {
+      routeId: ROUTE_ID,
       ok: true,
       handle: handle ?? "*",
       days,
@@ -186,7 +189,6 @@ async function runDetectPage(
     };
   }
 
-  // 预检：统计将要插入/更新
   const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
   const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
@@ -253,6 +255,7 @@ async function runDetectPage(
   });
 
   return {
+    routeId: ROUTE_ID,
     ok: true,
     handle: handle ?? "*",
     days,
@@ -268,7 +271,7 @@ async function runDetectPage(
 export async function GET(req: Request) {
   if (!allowByCronSecret(req)) {
     return NextResponse.json(
-      { ok: false, error: "forbidden" },
+      { routeId: ROUTE_ID, ok: false, error: "forbidden" },
       { status: 403 },
     );
   }
@@ -283,7 +286,7 @@ export async function GET(req: Request) {
         start(controller) {
           const write = (obj: any) =>
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
-          write({ event: "hello", ts: Date.now() });
+          write({ event: "hello", routeId: ROUTE_ID, ts: Date.now() });
           (async () => {
             try {
               const result = await runDetectPage(
@@ -297,10 +300,14 @@ export async function GET(req: Request) {
                 },
                 write,
               );
-              write({ event: "result", result });
+              write({ event: "result", routeId: ROUTE_ID, result });
               controller.close();
             } catch (e: any) {
-              write({ event: "error", message: e?.message || String(e) });
+              write({
+                event: "error",
+                routeId: ROUTE_ID,
+                message: e?.message || String(e),
+              });
               controller.close();
             }
           })();
@@ -330,11 +337,11 @@ export async function GET(req: Request) {
   return NextResponse.json(result);
 }
 
-/* ========================= POST (body 或 query，同 GET) ========================= */
+/* ========================= POST ========================= */
 export async function POST(req: Request) {
   if (!allowByCronSecret(req)) {
     return NextResponse.json(
-      { ok: false, error: "forbidden" },
+      { routeId: ROUTE_ID, ok: false, error: "forbidden" },
       { status: 403 },
     );
   }
@@ -342,7 +349,6 @@ export async function POST(req: Request) {
   const qs = Object.fromEntries(url.searchParams.entries());
   const isStream = qs.stream === "1" || qs.stream === "true";
 
-  // 允许 body + query 混合；缺省与 GET 对齐
   let body: any = {};
   try {
     body = await req.json();
@@ -365,14 +371,18 @@ export async function POST(req: Request) {
         start(controller) {
           const write = (obj: any) =>
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
-          write({ event: "hello", ts: Date.now() });
+          write({ event: "hello", routeId: ROUTE_ID, ts: Date.now() });
           (async () => {
             try {
               const result = await runDetectPage({ ...parsed, url }, write);
-              write({ event: "result", result });
+              write({ event: "result", routeId: ROUTE_ID, result });
               controller.close();
             } catch (e: any) {
-              write({ event: "error", message: e?.message || String(e) });
+              write({
+                event: "error",
+                routeId: ROUTE_ID,
+                message: e?.message || String(e),
+              });
               controller.close();
             }
           })();
