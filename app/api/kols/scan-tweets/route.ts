@@ -1,4 +1,7 @@
 // app/api/kols/scan-tweets/route.ts
+
+const ROUTE_ID = "/api/kols/scan-tweets";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
@@ -8,6 +11,14 @@ import { kols, kolTweets, tweetTokenMentions } from "@/lib/db/schema";
 import { eq, sql, and, gte, lt, inArray } from "drizzle-orm";
 import { extractMentions } from "@/lib/tokens/extract";
 import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
+
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    routeId: ROUTE_ID,
+    ts: new Date().toISOString(),
+  });
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,7 +46,7 @@ async function ensureAuth(req: Request) {
 /** ===== Input schema ===== */
 const Body = z.object({
   screen_name: z.string().min(1),
-  windowHours: z.number().int().min(1).max(168).optional().default(24),
+  rangeDays: z.number().int().min(1).max(14).optional().default(7),
   pollIntervalMs: z.number().int().min(250).max(3000).optional().default(1000),
   maxWaitMs: z
     .number()
@@ -146,13 +157,13 @@ export async function POST(req: Request) {
   // --- auth ---
   if (!(await ensureAuth(req))) {
     return NextResponse.json(
-      { ok: false, error: "forbidden" },
+      { routeId: ROUTE_ID, ok: false, error: "forbidden" },
       { status: 403 },
     );
   }
 
   // --- parse input ---
-  const { screen_name, windowHours, pollIntervalMs, maxWaitMs } = Body.parse(
+  const { screen_name, rangeDays, pollIntervalMs, maxWaitMs } = Body.parse(
     await req.json(),
   );
   const handle = norm(screen_name);
@@ -160,7 +171,7 @@ export async function POST(req: Request) {
   // --- build ctsearch window: past 6 days ~ tomorrow (inclusive/exclusive) ---
   const now = new Date();
   const since = new Date(now);
-  since.setDate(now.getDate() - 6);
+  since.setDate(now.getDate() - (rangeDays - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
   const startDate = since.toISOString().slice(0, 10);
@@ -184,6 +195,7 @@ export async function POST(req: Request) {
   if (!ctRes.ok || !jobId) {
     return NextResponse.json(
       {
+        routeId: ROUTE_ID,
         ok: false,
         error: "ctsearch start failed",
         status: ctRes.status,
@@ -216,7 +228,12 @@ export async function POST(req: Request) {
   }
   if (!last || String(last?.status).toLowerCase() !== "completed") {
     return NextResponse.json(
-      { ok: false, error: "poll timeout or not completed", last },
+      {
+        routeId: ROUTE_ID,
+        ok: false,
+        error: "poll timeout or not completed",
+        last,
+      },
       { status: 504 },
     );
   }
@@ -235,6 +252,7 @@ export async function POST(req: Request) {
 
   if (mapped.length === 0) {
     return NextResponse.json({
+      routeId: ROUTE_ID,
       ok: true,
       handle,
       job_id: jobId,
@@ -252,6 +270,7 @@ export async function POST(req: Request) {
   if (!kol?.twitterUid) {
     return NextResponse.json(
       {
+        routeId: ROUTE_ID,
         ok: false,
         error: "kol missing twitterUid; run resolve-user first",
         handle,
@@ -296,13 +315,18 @@ export async function POST(req: Request) {
           lastSeenAt: sql`NOW()`,
         },
       })
-      .returning({ tweetId: kolTweets.tweetId });
-    inserted = res.length;
-    dupes = values.length - inserted;
+      .returning({
+        tweetId: kolTweets.tweetId,
+        inserted: sql<boolean>`xmax = 0`,
+      });
+    const upserts = res.length;
+    inserted = res.reduce((n, r) => n + (r.inserted ? 1 : 0), 0);
+    dupes = upserts - inserted;
   } catch (e: any) {
     console.error("insert kolTweets error:", e);
     return NextResponse.json(
       {
+        routeId: ROUTE_ID,
         ok: false,
         error: "db insert failed",
         reason: String(e?.message ?? e).slice(0, 300),
@@ -418,6 +442,7 @@ export async function POST(req: Request) {
   const mentionsRebuilt = needsRebuild.size;
 
   return NextResponse.json({
+    routeId: ROUTE_ID,
     ok: true,
     handle,
     job_id: jobId,
