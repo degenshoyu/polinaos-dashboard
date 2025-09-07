@@ -77,6 +77,11 @@ function AnalysisClient() {
 
   const [ticker, setTicker] = useState<string | null>(null);
   const [contractAddress, setContractAddress] = useState<string | null>(null);
+  const [meta, setMeta] = useState<{
+    marketCapUsd?: number;
+    volume24hUsd?: number;
+    createdAt?: string | number;
+  } | null>(null);
 
   async function handleJobIdChange(jobId: string | null) {
     if (!jobId) {
@@ -156,6 +161,28 @@ function AnalysisClient() {
         const projectName =
           (Array.isArray(j.keyword) && j.keyword[0]) || undefined;
 
+        if (guessContract) {
+          const chain = "solana";
+          try {
+            const qs = new URLSearchParams({ chain, address: guessContract });
+            const r2 = await fetch(`/api/geckoterminal/token?${qs.toString()}`, { cache: "no-store" });
+            if (r2.ok) {
+              const info = await r2.json();
+              setMeta({
+                createdAt: info?.createdAt ?? undefined,
+                marketCapUsd: info?.marketCapUsd ?? undefined,
+                volume24hUsd: info?.volume24hUsd ?? undefined,
+              });
+            } else {
+              setMeta(null);
+            }
+          } catch {
+            setMeta(null);
+          }
+        } else {
+          setMeta(null);
+        }
+
         // 4) 拉最近一次 AI understanding（若有历史 insight 直接使用）
         try {
           const u = await fetch(
@@ -220,6 +247,7 @@ function AnalysisClient() {
           emotionsInsight={emotionsInsight}
           ticker={ticker}
           contractAddress={contractAddress}
+          onMetaUpdate={(m) => setMeta(m || null)}
           onRun={(input) => {
             setSummary(null);
             setEmotions(null);
@@ -233,6 +261,7 @@ function AnalysisClient() {
       <div className="col-span-12 md:col-span-6 md:sticky md:top-20 self-start">
         <CampaignRightPane
           inputs={lastInput}
+          meta={meta || undefined}
           onAnalysisResult={(
             res: {
               summary: string;
@@ -256,6 +285,49 @@ function AnalysisClient() {
       </div>
     </div>
   );
+}
+
+function normalizeCreatedAt(v: unknown, opts: { allowFutureDays?: number } = {}): string | undefined {
+  if (v == null) return undefined;
+  const allowFutureDays = opts.allowFutureDays ?? 3;
+  let ms: number | null = null;
+  if (typeof v === "number") {
+    ms = v < 2_000_000_000 ? v * 1000 : v;
+  } else if (typeof v === "string") {
+    if (/^\d+$/.test(v)) {
+      const n = Number(v);
+      ms = n < 2_000_000_000 ? n * 1000 : n;
+    } else {
+      const t = Date.parse(v);
+      ms = Number.isNaN(t) ? null : t;
+    }
+  }
+  if (ms == null || !Number.isFinite(ms)) return undefined;
+  const now = Date.now();
+  const maxFuture = now + allowFutureDays * 86400000;
+  if (ms > maxFuture) return undefined;
+  if (ms > now) ms = now;
+  const min = Date.UTC(2013, 0, 1);
+  if (ms < min) return undefined;
+  return new Date(ms).toISOString();
+}
+
+function pickBestPairCreatedAt(info: any): number | string | undefined {
+  const ps = Array.isArray(info?.pairs) ? info.pairs : [];
+  if (!ps.length) return undefined;
+  const preferredQuotes = new Set(["SOL", "WETH", "ETH", "USDC", "USDT"]);
+  const scored = ps
+    .map((p: any) => {
+      const liq = p?.liquidity?.usd ?? p?.liquidityUSD ?? p?.reserveUsd ?? p?.liquidity ?? 0;
+      const quoteSym = p?.quoteToken?.symbol?.toUpperCase?.();
+      const isPref = quoteSym ? preferredQuotes.has(quoteSym) : false;
+      const created = p?.pairCreatedAt ?? p?.createdAtMs ?? p?.createdAt;
+      return { liq: Number(liq) || 0, isPref, created };
+    })
+    .filter((x: any) => x.created != null);
+  if (!scored.length) return undefined;
+  scored.sort((a: any, b: any) => (a.isPref !== b.isPref ? (a.isPref ? -1 : 1) : b.liq - a.liq));
+  return scored[0].created;
 }
 
 /** ===== helpers ===== */

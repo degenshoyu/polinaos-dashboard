@@ -5,12 +5,31 @@ import React, { useMemo, useRef, useState, useEffect } from "react";
 import type { AnalysisInput } from "./types";
 import { useGeckoSearch, type TokenOption } from "@/hooks/useGeckoSearch";
 
+export type SelectedMeta = {
+  networkId?: string;
+  symbol?: string;
+  name?: string;
+  imageUrl?: string;
+  priceUsd?: number;
+  marketCapUsd?: number;
+  reserveUsd?: number;
+  volume24hUsd?: number;
+  createdAt?: string | number;
+  dex?: string;
+  dexUrl?: string;
+  twitter?: string | null;
+  telegram?: string | null;
+  website?: string | null;
+};
+
 export default function InputCard({
   onRun,
+  onMetaUpdate,
   deepLinkUrl,
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;
+  onMetaUpdate?: (meta: SelectedMeta | null) => void;
   deepLinkUrl?: string;
   className?: string;
 }) {
@@ -26,22 +45,6 @@ export default function InputCard({
     tokenAddress: "",
   });
 
-  type SelectedMeta = {
-    networkId?: string;
-    symbol?: string;
-    name?: string;
-    imageUrl?: string;
-    priceUsd?: number;
-    marketCapUsd?: number;
-    reserveUsd?: number;
-    volume24hUsd?: number;
-    createdAt?: string | number;
-    dex?: string;
-    dexUrl?: string;
-    twitter?: string | null;
-    telegram?: string | null;
-    website?: string | null;
-  };
   const [selectedMeta, setSelectedMeta] = useState<SelectedMeta | null>(null);
 
   const preferredChains = useMemo(() => ["solana", "ethereum"], []);
@@ -88,6 +91,11 @@ export default function InputCard({
       createdAt: normalizeCreatedAt((opt as any).createdAt),
       dex: opt.dex ?? undefined,
     });
+    onMetaUpdate?.({
+      marketCapUsd: (opt as any).marketCap ?? (opt as any).fdv ?? undefined,
+      volume24hUsd: (opt as any).vol24h,
+      createdAt: normalizeCreatedAt((opt as any).createdAt),
+    });
 
     onRun(next);
     setMode("frozen");
@@ -108,7 +116,6 @@ export default function InputCard({
         const fixedTop  = normalizeCreatedAt(data?.createdAt, { allowFutureDays: 3 });
         const fixedPair = normalizeCreatedAt(bestPairCreated, { allowFutureDays: 3 });
 
-    // 选择优先级：顶层有效 > pairs 有效 > 维持原值（比如 GECKO 的）
         const nextCreated = fixedTop || fixedPair || prev?.createdAt;
 
         return {
@@ -124,6 +131,11 @@ export default function InputCard({
           createdAt: nextCreated,
         };
        });
+       onMetaUpdate?.({
+        marketCapUsd: (opt as any).marketCap ?? (opt as any).fdv ?? undefined,
+        volume24hUsd: (opt as any).vol24h,
+        createdAt: normalizeCreatedAt(data?.createdAt) ?? normalizeCreatedAt(bestPairCreated),
+      });
      } else {
       }
     } catch {

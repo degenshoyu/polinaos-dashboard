@@ -12,11 +12,17 @@ import type { AnalysisResult } from "@/components/types";
  */
 export default function CampaignRightPane({
   inputs,
+  meta,
   onAnalysisResult,
   onJobIdChange,
   className = "",
 }: {
   inputs?: AnalysisInput | null;
+  meta?: {
+    marketCapUsd?: number;
+    volume24hUsd?: number;
+    createdAt?: string | number;
+  };
   onAnalysisResult?: (res: AnalysisResult) => void;
   onJobIdChange?: (id: string | null) => void;
   className?: string;
@@ -36,7 +42,12 @@ export default function CampaignRightPane({
       />
 
       {/* Statistic Summary card will visualize the tweets of the latest job */}
-      <StatisticSummary jobId={jobId} />
+      <StatisticSummary
+        jobId={jobId}
+        marketCapUsd={meta?.marketCapUsd}
+        volume24hUsd={meta?.volume24hUsd}
+        createdAt={meta?.createdAt}
+      />
     </div>
   );
 }

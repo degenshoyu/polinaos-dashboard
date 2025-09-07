@@ -41,9 +41,15 @@ type JobPayload = {
 export default function StatisticSummary({
   jobId,
   className = "",
+  marketCapUsd,
+  volume24hUsd,
+  createdAt,
 }: {
   jobId: string | null;
   className?: string;
+  marketCapUsd?: number;
+  volume24hUsd?: number;
+  createdAt?: string | number;
 }) {
   const [data, setData] = useState<JobPayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -511,10 +517,13 @@ export default function StatisticSummary({
               all={{ tweets: aggAll.tweets, views: aggAll.views, engagements: aggAll.engagements, er: aggAll.er }}
               ver={{ tweets: aggVer.tweets, views: aggVer.views, engagements: aggVer.engagements, er: aggVer.er }}
               topShillers={topShillers}
+              marketCapUsd={marketCapUsd}
+              volume24hUsd={volume24hUsd}
+              createdAt={createdAt}
             />
           </div>
 
-          {/* --- (2) Totals（合并 All + Verified 的细项面板） --- */}
+          {/* --- (2) Totals --- */}
           <div ref={totalsRef}>
             <TotalsCard
               aggAll={aggAll}

@@ -12,6 +12,7 @@ import CommitmentIndex from "@/components/CommitmentIndex";
 
 export default function CampaignLeftPane({
   onRun,
+  onMetaUpdate,
   aiSummary,
   emotions,
   emotionsInsight,
@@ -21,6 +22,11 @@ export default function CampaignLeftPane({
   className = "",
 }: {
   onRun: (input: AnalysisInput) => void;
+  onMetaUpdate?: (meta: {
+    marketCapUsd?: number;
+    volume24hUsd?: number;
+    createdAt?: string | number;
+  } | null) => void;
   aiSummary?: string | null;
   emotions?: EmotionalLandscape | null;
   emotionsInsight?: string | null;
@@ -39,7 +45,11 @@ export default function CampaignLeftPane({
           {deepLinkUrl ? <CopyLinkButton url={deepLinkUrl} /> : null}
         </div>
 
-        <InputCard onRun={onRun} deepLinkUrl={deepLinkUrl} />
+        <InputCard
+          onRun={onRun}
+          deepLinkUrl={deepLinkUrl}
+          onMetaUpdate={onMetaUpdate}
+        />
       </div>
 
       <AiUnderstanding aiSummary={aiSummary} />

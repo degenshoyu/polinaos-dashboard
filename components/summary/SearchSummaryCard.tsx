@@ -96,7 +96,7 @@ export default function SearchSummaryCard({
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           {chip("MktCap", moneyShort(marketCapUsd))}
           {chip("24H Vol", moneyShort(volume24hUsd))}
-          {chip("Age", ageText(createdAt))}
+          {/* {chip("Age", ageText(createdAt))} */}
         </div>
 
         {/* All / Verified */}
@@ -262,7 +262,7 @@ function MetricInline({
             : "border-white/10 bg-white/[0.03]"
         }`}
     >
-      <span className={`${highlight ? "text-emerald-200 font-semibold" : "text-gray-400"}`}>
+      <span className={`text-xs ${highlight ? "text-emerald-200 font-semibold" : "text-gray-400"}`}>
         {label}
       </span>
       <span className={`${highlight ? "text-white font-bold" : "text-white/90 font-semibold"}`}>
@@ -349,4 +349,3 @@ function chip(label: string, value?: React.ReactNode) {
     </span>
   );
 }
-
