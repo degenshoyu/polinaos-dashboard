@@ -1,54 +1,123 @@
 "use client";
 
-import { CalendarDays, ArrowUpDown } from "lucide-react";
+import { CalendarDays, ArrowUpDown, Search, Filter } from "lucide-react";
 import { Dropdown, MenuItem } from "./primitives";
 
-type SortKey =
-  | "views"
-  | "engs"
-  | "tweets"
-  | "totalER"
-  | "shills"
-  | "shillViews"
-  | "shillEngs"
-  | "shillsER";
+export type SortKey = "tweets" | "views" | "engs" | "er";
+export type ScopeKey = "total" | "shills";
+
+export type CoinOpt = { tokenKey: string; tokenDisplay: string; count: number };
 
 export function KolsHeaderControls({
   days,
   sortKey,
+  scope,
+  query,
+  coinKey,
+  coins,
   onSetDays,
   onSetSortKey,
+  onSetScope,
+  onQueryChange,
+  onSetCoinKey,
 }: {
   days: 7 | 30;
   sortKey: SortKey;
+  scope: ScopeKey;
+  query: string;
+  coinKey: string | null;
+  coins: CoinOpt[];
   onSetDays: (d: 7 | 30) => void;
   onSetSortKey: (k: SortKey) => void;
+  onSetScope: (s: ScopeKey) => void;
+  onQueryChange: (q: string) => void;
+  onSetCoinKey: (k: string | null) => void;
 }) {
-
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Dropdown
-        label={`${days === 7 ? "7d" : "30d"} Period`}
-        icon={<CalendarDays size={16} className="text-gray-300" />}
-      >
-        <MenuItem active={days === 7} onClick={() => onSetDays(7)}>7 days</MenuItem>
-        <MenuItem active={days === 30} onClick={() => onSetDays(30)}>30 days</MenuItem>
-      </Dropdown>
+    <div className="flex flex-wrap items-center gap-2 justify-between">
+      {/* Search (controlled width; inline with the rest) */}
+      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 w-full sm:w-auto min-w-[220px] sm:min-w-[260px] md:min-w-[300px] lg:min-w-[340px]">
+        <Search size={16} className="text-gray-400" />
+        <input
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+          placeholder="Search handle or name…"
+          className="w-full bg-transparent text-sm outline-none placeholder:text-gray-500"
+          aria-label="Search KOLs"
+        />
+      </div>
 
-      <Dropdown
-        label="Sort"
-        icon={<ArrowUpDown size={16} className="text-gray-300" />}
-      >
-        <MenuItem active={sortKey === "views"} onClick={() => onSetSortKey("views")}>Total Views</MenuItem>
-        <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Total Engagements</MenuItem>
-        <MenuItem active={sortKey === "tweets"} onClick={() => onSetSortKey("tweets")}>Total Tweets</MenuItem>
-        <MenuItem active={sortKey === "totalER"} onClick={() => onSetSortKey("totalER")}>Total ER</MenuItem>
-        <div className="my-1 h-px bg-white/10" />
-        <MenuItem active={sortKey === "shills"} onClick={() => onSetSortKey("shills")}>Shill Tweets</MenuItem>
-        <MenuItem active={sortKey === "shillViews"} onClick={() => onSetSortKey("shillViews")}>Shill Views</MenuItem>
-        <MenuItem active={sortKey === "shillEngs"} onClick={() => onSetSortKey("shillEngs")}>Shill Engagements</MenuItem>
-        <MenuItem active={sortKey === "shillsER"} onClick={() => onSetSortKey("shillsER")}>Shill ER</MenuItem>
-      </Dropdown>
+      {/* Right group */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Period */}
+        <Dropdown
+          label={`${days === 7 ? "7d" : "30d"} Period`}
+          icon={<CalendarDays size={16} className="text-gray-300" />}
+        >
+          <MenuItem active={days === 7} onClick={() => onSetDays(7)}>7 days</MenuItem>
+          <MenuItem active={days === 30} onClick={() => onSetDays(30)}>30 days</MenuItem>
+        </Dropdown>
+
+        {/* Sort metric (only four options) */}
+        <Dropdown
+          label={
+            sortKey === "tweets" ? "Sort: Tweets" :
+            sortKey === "views" ? "Sort: Views" :
+            sortKey === "engs" ? "Sort: Engagements" :
+            "Sort: ER"
+          }
+          icon={<ArrowUpDown size={16} className="text-gray-300" />}
+        >
+          <MenuItem active={sortKey === "tweets"} onClick={() => onSetSortKey("tweets")}>Tweets</MenuItem>
+          <MenuItem active={sortKey === "views"} onClick={() => onSetSortKey("views")}>Views</MenuItem>
+          <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Engagements</MenuItem>
+          <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
+        </Dropdown>
+
+        {/* Scope toggle: Total | Shills */}
+        <div className="inline-flex rounded-lg border border-white/10 bg-white/5 p-1">
+          <button
+            onClick={() => onSetScope("total")}
+            className={[
+              "px-3 py-1 text-sm rounded-md",
+              scope === "total" ? "bg-emerald-400/15 text-emerald-200" : "text-gray-200 hover:bg-white/5",
+            ].join(" ")}
+            aria-pressed={scope === "total"}
+          >
+            Total
+          </button>
+          <button
+            onClick={() => onSetScope("shills")}
+            className={[
+              "px-3 py-1 text-sm rounded-md",
+              scope === "shills" ? "bg-emerald-400/15 text-emerald-200" : "text-gray-200 hover:bg-white/5",
+            ].join(" ")}
+            aria-pressed={scope === "shills"}
+          >
+            Shills
+          </button>
+        </div>
+
+        {/* Coin filter */}
+        <Dropdown
+          label={coinKey ? `Coin: ${coins.find(c => c.tokenKey === coinKey)?.tokenDisplay ?? "Selected"}` : "Coin: All"}
+          icon={<Filter size={16} className="text-gray-300" />}
+        >
+          <MenuItem active={!coinKey} onClick={() => onSetCoinKey(null)}>All coins</MenuItem>
+          <div className="my-1 h-px bg-white/10" />
+          {coins.slice(0, 100).map((c) => (
+            <MenuItem
+              key={c.tokenKey}
+              active={coinKey === c.tokenKey}
+              onClick={() => onSetCoinKey(c.tokenKey)}
+            >
+              <span className="truncate">{c.tokenDisplay}</span>
+              <span className="text-xs opacity-70">×{c.count}</span>
+            </MenuItem>
+          ))}
+        </Dropdown>
+      </div>
     </div>
   );
 }
+
