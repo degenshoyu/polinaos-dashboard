@@ -257,7 +257,7 @@ async function searchPoolsAsCandidates(
 
       const quoteSymbol = String(quote?.symbol || "").toUpperCase();
       // Hard filter: only accept SOL/WSOL/USDC quote pools
-      if (!["SOL", "WSOL"].includes(quoteSymbol)) continue;
+      if (!["SOL", "WSOL", "USDC"].includes(quoteSymbol)) continue;
 
       // Pick side & match logic
       let chosenAddr: string | null = null;
@@ -371,7 +371,7 @@ export async function resolveTickersToContracts(tickers: string[]) {
       "ticker",
       trendingAddrs,
     );
-    const best = pickBestForTicker(cands); 
+    const best = pickBestForTicker(cands);
 
     if (best) {
       out.set(ticker, {

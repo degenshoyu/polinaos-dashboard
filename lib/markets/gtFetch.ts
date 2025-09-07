@@ -1,65 +1,105 @@
 // lib/markets/gtFetch.ts
-// GeckoTerminal fetch guard: in-memory cache + concurrency gate + 429 retry
+// GeckoTerminal fetch guard: in-memory cache + concurrency + timeout + retries.
+// Prevents "Unexpected end of JSON input" by parsing text with retry on partial bodies.
 
-const GT_MAX_CONC       = Number(process.env.GT_MAX_CONC ?? 4);          // max parallel GT calls
-const GT_CACHE_TTL_MS   = Number(process.env.GT_CACHE_TTL_MS ?? 120_000); // 2 min cache
-const GT_RETRY          = Number(process.env.GT_RETRY ?? 2);              // retry on 429
-const GT_BASE_DELAY_MS  = Number(process.env.GT_BASE_DELAY_MS ?? 500);    // backoff base
+type Opts = {
+  ttlMs?: number;      // cache TTL for successful responses
+  timeoutMs?: number;  // per-request timeout
+  retries?: number;    // retry on 429/5xx/parse errors
+};
 
-type CacheEntry = { t: number; json: any };
-const cache = new Map<string, CacheEntry>();
+const CACHE = new Map<string, { exp: number; data: any }>();
+const INFLIGHT = new Map<string, Promise<any>>();
+let inflightCount = 0;
+const MAX_CONCURRENCY = Number(process.env.GT_MAX_CONCURRENCY ?? 3);
 
-let active = 0;
-const queue: Array<() => void> = [];
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-function acquire(): Promise<void> {
-  return new Promise((resolve) => {
-    if (active < GT_MAX_CONC) { active++; resolve(); }
-    else queue.push(() => { active++; resolve(); });
-  });
-}
-function release() {
-  active = Math.max(0, active - 1);
-  const next = queue.shift();
-  if (next) next();
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Fetch GT JSON with URL-level cache + concurrency + 429 retry */
-export async function fetchGTJson(url: string, init?: RequestInit): Promise<any> {
-  const now = Date.now();
-  const hit = cache.get(url);
-  if (hit && now - hit.t < GT_CACHE_TTL_MS) return hit.json;
-
-  await acquire();
+async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+  while (inflightCount >= MAX_CONCURRENCY) await sleep(25);
+  inflightCount++;
   try {
-    let attempt = 0;
-    while (true) {
-      const res = await fetch(url, {
-        headers: { accept: "application/json" },
-        cache: "no-store",
-        ...(init || {}),
-      });
-
-      if (res.status === 429 && attempt < GT_RETRY) {
-        const retryAfter = Number(res.headers.get("retry-after")) * 1000
-          || GT_BASE_DELAY_MS * Math.pow(2, attempt);
-        await sleep(retryAfter);
-        attempt++;
-        continue;
-      }
-      if (!res.ok) throw new Error(`GT ${res.status} ${res.statusText}`);
-
-      const json = await res.json();
-      cache.set(url, { t: Date.now(), json });
-      return json;
-    }
+    return await fn();
   } finally {
-    release();
+    inflightCount--;
   }
 }
 
-/** Optional helpers */
-export function clearGtCache() { cache.clear(); }
-export function gtCacheSize() { return cache.size; }
+export async function fetchGTJson(url: string, opts: Opts = {}): Promise<any> {
+  const { ttlMs = 30_000, timeoutMs = 8_000, retries = 3 } = opts;
+  const key = url;
+
+  // cache hit
+  const now = Date.now();
+  const c = CACHE.get(key);
+  if (c && c.exp > now) return c.data;
+
+  // de-dupe same URL inflight
+  const existing = INFLIGHT.get(key);
+  if (existing) return existing;
+
+  const p = withSlot(async () => {
+    let attempt = 0;
+    let lastErr: any;
+
+    while (attempt <= retries) {
+      attempt++;
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), timeoutMs);
+
+      try {
+        const res = await fetch(url, {
+          headers: { accept: "application/json" },
+          cache: "no-store",
+          next: { revalidate: 0 },
+          signal: ac.signal,
+        });
+
+        const status = res.status;
+        const text = await res.text().catch(() => "");
+        clearTimeout(t);
+
+        // Success
+        if (status >= 200 && status < 300) {
+          try {
+            const json = text ? JSON.parse(text) : null;
+            CACHE.set(key, { exp: Date.now() + ttlMs, data: json });
+            return json;
+          } catch (e) {
+            // Partial/invalid JSON -> retry
+            lastErr = new Error(
+              `GT JSON parse failed (len=${text?.length || 0})`,
+            );
+          }
+        } else if (status === 204) {
+          CACHE.set(key, { exp: Date.now() + ttlMs, data: null });
+          return null;
+        } else if (status === 429 || status >= 500) {
+          // Retryable
+          lastErr = new Error(`GT HTTP ${status}`);
+        } else {
+          // Non-retryable 4xx: throw with body
+          throw new Error(`GT HTTP ${status}: ${text?.slice(0, 200)}`);
+        }
+      } catch (e: any) {
+        lastErr = e;
+      } finally {
+        clearTimeout(t);
+      }
+
+      // backoff
+      const backoff = Math.min(1500 * attempt, 4000);
+      await sleep(backoff);
+    }
+
+    throw lastErr ?? new Error("fetchGTJson failed");
+  }).finally(() => {
+    INFLIGHT.delete(key);
+  });
+
+  INFLIGHT.set(key, p);
+  return p;
+}
 

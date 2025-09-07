@@ -1,11 +1,11 @@
-// app/api/kols/detect-mentions/route.ts
+// app/api/kols/detect-mentions/batch/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
-import { eq, and, gte, lt, sql, inArray, desc } from "drizzle-orm";
+import { eq, and, gte, lt, inArray, desc, sql } from "drizzle-orm";
 import { extractMentions, type Mention } from "@/lib/tokens/extract";
 import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
 import {
@@ -31,52 +31,60 @@ function allowByCronSecret(req: Request) {
   return q === expected || h === expected;
 }
 
+/* ========================= Cursor helpers ========================= */
+// keyset: (publishDate DESC, tweetId DESC)
+type Cursor = { ts: string; id: string }; // ISO date + tweetId
+
+function encodeCursor(c: Cursor | null): string | null {
+  if (!c) return null;
+  return Buffer.from(JSON.stringify(c), "utf8").toString("base64url");
+}
+function decodeCursor(s?: string | null): Cursor | null {
+  if (!s) return null;
+  try {
+    const j = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
+    if (typeof j?.ts === "string" && typeof j?.id === "string") return j;
+  } catch {}
+  return null;
+}
+
 /* ========================= Body schema ========================= */
 const Body = z.object({
-  screen_name: z.string().min(1),
+  screen_name: z.string().min(1), // handle or "*" | "all"
   days: z.number().int().min(1).max(30).optional().default(7),
   missingOnly: z.boolean().optional().default(true),
+  limit: z.number().int().min(1).max(500).optional().default(200),
+  cursor: z.string().optional(), // base64url Cursor
 });
 
 /* ========================= Trigger helpers ========================= */
-// Prefer readable input for trigger text
 function triggerInputFor(m: Mention) {
   if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
   if (m.source === "ca") return m.tokenKey || "";
   if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
   return `$${String(m.tokenKey || "").toUpperCase()}`;
 }
-
-// Deterministic fallback trigger key that does not depend on in-text offsets
 function makeDeterministicTriggerKey(m: Mention): string {
   if (m.source === "ca") {
     const addr = canonAddr(String(m.tokenKey || ""));
     return addr ? `ca:${addr}` : "ca:unknown";
   }
-  if (m.source === "ticker") {
+  if (m.source === "ticker")
     return `tk:${String(m.tokenKey || "").toLowerCase()}`;
-  }
-  if (m.source === "phrase") {
+  if (m.source === "phrase")
     return `ph:${String(m.tokenKey || "").toLowerCase()}`;
-  }
   return `uk:${String(m.tokenKey || "").toLowerCase()}`;
 }
 
 /* ========================= CA reconstruction (conservative) ========================= */
-/** Base58 (32–44) for plain scan */
 const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 
-/**
- * Extract CA from pump.fun URLs even if broken after "/coin/".
- * We DO NOT remove normal whitespaces globally — only glue base58 fragments around the URL tail.
- */
 function collectFromPumpFun(text: string): string[] {
   const out: string[] = [];
   const RE = /pump\.fun\/coin\/([^\s]{1,90})/gi;
   let m: RegExpExecArray | null;
   while ((m = RE.exec(text)) !== null) {
     const tail = m[1] || "";
-    // Look ahead a bit and glue base58-looking fragments
     const rest = text.slice(RE.lastIndex, RE.lastIndex + 160);
     const more = (rest.match(/[1-9A-HJ-NP-Za-km-z]{2,}/g) || []).join("");
     const candidate = (tail + more).replace(/[^1-9A-HJ-NP-Za-km-z]+/g, "");
@@ -91,28 +99,17 @@ function collectFromPumpFun(text: string): string[] {
   }
   return out;
 }
-
-/**
- * Join TWO base58 chunks split by whitespace/newline:
- *   "8mznFjdcG\nHhfvxkP1JVC7T...cipump" → "8mznFjdcGHhfvxkP1JVC7T...cipump"
- * We do NOT touch any other whitespaces in normal sentences.
- */
 function collectJoinedPairs(text: string): string[] {
   const out: string[] = [];
-  // left chunk 8–20, right chunk 16–44 → joined candidate 32–64, then validate 32–44
   const SPLIT2 =
     /\b([1-9A-HJ-NP-Za-km-z]{8,20})\s+([1-9A-HJ-NP-Za-km-z]{16,44})\b/g;
   let m: RegExpExecArray | null;
   while ((m = SPLIT2.exec(text)) !== null) {
-    const a = m[1];
-    const b = m[2];
-    const joined = (a + b).trim();
+    const joined = (m[1] + m[2]).trim();
     if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(joined)) out.push(joined);
   }
   return out;
 }
-
-/** Keep only maximal/longest CAs: drop any CA that is a strict substring of another CA. */
 function filterCAKeepMaximal(cas: string[]): Set<string> {
   const uniq = Array.from(new Set(cas));
   const keep = new Set<string>();
@@ -129,8 +126,6 @@ function filterCAKeepMaximal(cas: string[]): Set<string> {
   }
   return keep;
 }
-
-/** Plain scan (no global whitespace change) + pump.fun fix + two-chunk join → keep longest */
 function reconstructCAsFromTweet(text: string): Set<string> {
   const plain = (text || "").match(SOL_CA_RE) ?? [];
   const fromPump = collectFromPumpFun(text || "");
@@ -138,18 +133,30 @@ function reconstructCAsFromTweet(text: string): Set<string> {
   return filterCAKeepMaximal([...plain, ...fromPump, ...joined]);
 }
 
-/* ========================= Core runner with injectable logger ========================= */
-async function runDetect(
-  params: { screen_name: string; days: number; missingOnly: boolean; url: URL },
+/* ========================= Core of a single page ========================= */
+async function runDetectPage(
+  params: {
+    screen_name: string;
+    days: number;
+    missingOnly: boolean;
+    limit: number;
+    cursor?: string | null;
+    url: URL;
+  },
   log: (e: any) => void,
 ) {
-  const { screen_name, days, missingOnly, url } = params;
-
+  const { screen_name, days, missingOnly, limit, cursor, url } = params;
   const handleRaw = screen_name.trim().replace(/^@+/, "");
   const handle = handleRaw.toLowerCase();
   const isAll = handle === "*" || handle === "all";
 
-  log({ event: "start", handle: isAll ? "*" : handle, days, missingOnly });
+  log({
+    event: "start",
+    handle: isAll ? "*" : handle,
+    days,
+    missingOnly,
+    limit,
+  });
 
   // Time window [since, until)
   const now = new Date();
@@ -158,7 +165,27 @@ async function runDetect(
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
-  // Load tweets
+  // Keyset pagination cursor
+  const cur = decodeCursor(cursor || url.searchParams.get("cursor"));
+
+  // Base where
+  const baseWhere = isAll
+    ? and(gte(kolTweets.publishDate, since), lt(kolTweets.publishDate, until))
+    : and(
+        eq(kolTweets.twitterUsername, handle),
+        gte(kolTweets.publishDate, since),
+        lt(kolTweets.publishDate, until),
+      );
+
+  // Add keyset predicate: (publish_date, tweet_id) < (cursor.ts, cursor.id) in DESC order
+  const where = cur
+    ? and(
+        baseWhere,
+        sql`(${kolTweets.publishDate}, ${kolTweets.tweetId}) < (${new Date(cur.ts)}, ${cur.id})`,
+      )
+    : baseWhere;
+
+  // Load one page
   const tweets = await db
     .select({
       tweetId: kolTweets.tweetId,
@@ -166,35 +193,27 @@ async function runDetect(
       published: kolTweets.publishDate,
     })
     .from(kolTweets)
-    .where(
-      isAll
-        ? and(
-            gte(kolTweets.publishDate, since),
-            lt(kolTweets.publishDate, until),
-          )
-        : and(
-            eq(kolTweets.twitterUsername, handle),
-            gte(kolTweets.publishDate, since),
-            lt(kolTweets.publishDate, until),
-          ),
-    )
-    .orderBy(desc(kolTweets.publishDate));
+    .where(where)
+    .orderBy(desc(kolTweets.publishDate), desc(kolTweets.tweetId))
+    .limit(limit);
 
   log({ event: "loaded", tweets: tweets.length });
 
   if (!tweets.length) {
-    return {
+    const end = {
       ok: true,
       handle: isAll ? "*" : handle,
-      days,
-      scannedTweets: 0,
+      pageCount: 0,
       mentionsDetected: 0,
       inserted: 0,
       updated: 0,
+      nextCursor: null as string | null,
     };
+    log({ event: "done", ...end });
+    return end;
   }
 
-  // When missingOnly=true, skip tweets that already have ANY mentions
+  // If missingOnly: filter out tweets that already have mentions
   let candidates = tweets;
   if (missingOnly) {
     const existing = await db
@@ -211,28 +230,23 @@ async function runDetect(
   }
   log({ event: "candidates", count: candidates.length });
 
-  // Extract mentions; aggregate tickers/names/CAs, build trigger tuples
+  // Aggregate mentions
   const all: {
     tweetId: string;
     m: Mention;
     triggerKey: string;
     triggerText: string;
   }[] = [];
-  const uniqueTickers = new Set<string>(); // "$TICKER"
-  const phraseNames = new Set<string>(); // "<name> coin"
-  const caSet = new Set<string>(); // canonical contract addresses
+  const uniqueTickers = new Set<string>();
+  const phraseNames = new Set<string>();
+  const caSet = new Set<string>();
 
   let processed = 0;
   const PROGRESS_EVERY = 200;
 
   for (const t of candidates) {
-    // 1) Reconstruct CAs conservatively (NO global whitespace removal)
     const rebuiltCAs = reconstructCAsFromTweet(t.textContent ?? "");
-
-    // 2) Run normal extraction for ticker/phrase (and CA fallback)
     let ext = extractMentions(t.textContent ?? "");
-
-    // 3) Replace CA mentions with reconstructed/longest CAs to avoid half pieces
     if (rebuiltCAs.size) {
       ext = ext.filter((x) => x.source !== "ca");
       for (const addr of rebuiltCAs) {
@@ -245,29 +259,22 @@ async function runDetect(
       }
     }
 
-    // 4) Build trigger tuples
     for (const m of ext) {
       const input = triggerInputFor(m);
-
       let trigKey = "";
       let trigText = "";
 
       if (m.source === "ca") {
-        // Always use deterministic trigger key for CA
         const addr = String(m.tokenKey || "");
         trigKey = makeDeterministicTriggerKey(m); // "ca:<base58>"
-        trigText = addr || input; // show reconstructed full CA
+        trigText = addr || input;
       } else {
         const built = buildTriggerKeyWithText({
           source: m.source as any,
           value: input,
         });
-        trigKey = (built as any)?.key || "";
+        trigKey = (built as any)?.key || makeDeterministicTriggerKey(m);
         trigText = (built as any)?.text || input;
-        if (!trigKey) {
-          // ultimate fallback
-          trigKey = makeDeterministicTriggerKey(m);
-        }
       }
 
       all.push({
@@ -277,7 +284,6 @@ async function runDetect(
         triggerText: trigText,
       });
 
-      // Aggregate for later resolution
       if (m.source === "ca") {
         const addr = canonAddr(String(m.tokenKey || ""));
         if (addr) caSet.add(addr);
@@ -305,7 +311,7 @@ async function runDetect(
     cas: caSet.size,
   });
 
-  // Resolve to contracts (Solana-only): tickers + phrase names
+  // Resolve symbols / names / CA
   let resolved = new Map<
     string,
     { tokenKey: string; tokenDisplay: string; boostedConf: number }
@@ -315,21 +321,22 @@ async function runDetect(
     { tokenKey: string; tokenDisplay: string; boostedConf: number }
   >();
   try {
-    log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
+    if (uniqueTickers.size)
+      log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
     resolved = await resolveTickersToContracts([...uniqueTickers]);
-    log({ event: "resolve_tickers_done" });
+    if (uniqueTickers.size) log({ event: "resolve_tickers_done" });
   } catch (e) {
     log({ event: "resolve_tickers_failed", error: String(e) });
   }
   try {
-    log({ event: "resolve_names_begin", count: phraseNames.size });
+    if (phraseNames.size)
+      log({ event: "resolve_names_begin", count: phraseNames.size });
     resolvedNames = await resolveNamesToContracts([...phraseNames]);
-    log({ event: "resolve_names_done" });
+    if (phraseNames.size) log({ event: "resolve_names_done" });
   } catch (e) {
     log({ event: "resolve_names_failed", error: String(e) });
   }
 
-  // Reverse map: contract -> { tokenDisplay, boostedConf }
   const byContract = new Map<
     string,
     { tokenDisplay: string; boostedConf: number }
@@ -343,32 +350,24 @@ async function runDetect(
       });
   }
 
-  // CA-only resolution: resolve contracts that have no meta yet
   const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
   if (missingCA.length) {
     log({ event: "resolve_ca_begin", count: missingCA.length });
-    let caMeta = new Map<
-      string,
-      { tokenKey: string; tokenDisplay: string; boostedConf: number }
-    >();
     try {
-      caMeta = await resolveContractsToMeta(missingCA);
-      log({
-        event: "resolve_ca_done",
-        hit: Array.from(caMeta.keys()).length,
-      });
+      const caMeta = await resolveContractsToMeta(missingCA);
+      for (const [addr, meta] of caMeta.entries()) {
+        byContract.set(addr, {
+          tokenDisplay: meta.tokenDisplay,
+          boostedConf: meta.boostedConf,
+        });
+      }
+      log({ event: "resolve_ca_done", hit: byContract.size });
     } catch (e) {
       log({ event: "resolve_ca_failed", error: String(e) });
     }
-    for (const [addr, meta] of caMeta.entries()) {
-      byContract.set(addr, {
-        tokenDisplay: meta.tokenDisplay,
-        boostedConf: meta.boostedConf,
-      });
-    }
   }
 
-  // Build DB rows; de-duplicate by (tweetId, triggerKey)
+  // Build rows
   type Row = {
     tweetId: string;
     tokenKey: string;
@@ -387,7 +386,6 @@ async function runDetect(
     let confidence = m.confidence;
 
     if (m.source === "ca") {
-      // CA: map to a friendly $SYMBOL when possible
       const addr = canonAddr(String(m.tokenKey || ""));
       tokenKey = addr;
       const meta = addr ? byContract.get(addr) : undefined;
@@ -395,10 +393,8 @@ async function runDetect(
         tokenDisplay = meta.tokenDisplay;
         confidence = Math.max(confidence, meta.boostedConf ?? 0);
       } else {
-        // Last resort: synthesize a short tag for visibility
         const short = addr ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : "????";
         tokenDisplay = `$${short}`;
-        // keep confidence 100 for direct CA mentions
       }
     } else if (m.source === "ticker") {
       const disp = m.tokenDisplay?.startsWith("$")
@@ -413,10 +409,7 @@ async function runDetect(
     } else if (m.source === "phrase") {
       const q = (m.tokenDisplay || m.tokenKey || "").trim().toLowerCase();
       const r = resolvedNames.get(q);
-      if (!r) {
-        // skip unresolved phrase to keep table clean
-        continue;
-      }
+      if (!r) continue; // keep table clean
       tokenKey = r.tokenKey;
       tokenDisplay = r.tokenDisplay;
       confidence = Math.max(confidence, r.boostedConf);
@@ -438,19 +431,25 @@ async function runDetect(
   }
 
   if (!rows.length) {
-    log({ event: "done", inserted: 0, updated: 0, rows: 0 });
-    return {
+    const next = tweets[tweets.length - 1];
+    const nextCursor = encodeCursor({
+      ts: next.published.toISOString(),
+      id: next.tweetId,
+    });
+    const end = {
       ok: true,
       handle: isAll ? "*" : handle,
-      days,
-      scannedTweets: candidates.length,
+      pageCount: candidates.length,
       mentionsDetected: 0,
       inserted: 0,
       updated: 0,
+      nextCursor,
     };
+    log({ event: "done", ...end });
+    return end;
   }
 
-  // Accurate counts via pre-check (existing pairs)
+  // Upsert
   const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
   const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
@@ -478,14 +477,8 @@ async function runDetect(
     return prev && prev !== r.tokenKey;
   }).length;
 
-  log({
-    event: "upsert_planning",
-    rows: rows.length,
-    willInsert,
-    willUpdate,
-  });
+  log({ event: "upsert_planning", rows: rows.length, willInsert, willUpdate });
 
-  // Upsert by (tweet_id, trigger_key), chunked
   const CHUNK = 200;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK);
@@ -505,27 +498,27 @@ async function runDetect(
       });
   }
 
-  log({
-    event: "done",
-    inserted: willInsert,
-    updated: willUpdate,
-    rows: rows.length,
+  const last = tweets[tweets.length - 1];
+  const nextCursor = encodeCursor({
+    ts: last.published.toISOString(),
+    id: last.tweetId,
   });
 
-  return {
+  const end = {
     ok: true,
     handle: isAll ? "*" : handle,
-    days,
-    scannedTweets: candidates.length,
+    pageCount: candidates.length,
     mentionsDetected: rows.length,
     inserted: willInsert,
     updated: willUpdate,
+    nextCursor,
   };
+  log({ event: "done", ...end });
+  return end;
 }
 
 /* ========================= Route ========================= */
 export async function POST(req: Request) {
-  // Admin or CRON auth
   const session = await getServerSession(authOptions);
   const isAdmin = Boolean((session?.user as any)?.isAdmin);
   const bySecret = allowByCronSecret(req);
@@ -541,8 +534,9 @@ export async function POST(req: Request) {
     url.searchParams.get("stream") === "1" ||
     url.searchParams.get("stream") === "true";
 
-  const body = Body.parse(await req.json());
-  const params = { ...body, url };
+  const { screen_name, days, missingOnly, limit, cursor } = Body.parse(
+    await req.json().catch(() => ({})),
+  );
 
   if (wantStream) {
     const encoder = new TextEncoder();
@@ -553,7 +547,10 @@ export async function POST(req: Request) {
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
           (async () => {
             try {
-              const result = await runDetect(params, write);
+              const result = await runDetectPage(
+                { screen_name, days, missingOnly, limit, cursor, url },
+                write,
+              );
               write({ event: "result", result });
               controller.close();
             } catch (e: any) {
@@ -572,7 +569,9 @@ export async function POST(req: Request) {
     );
   }
 
-  // Non-stream fallback: run to completion and return JSON
-  const result = await runDetect(params, () => {});
+  const result = await runDetectPage(
+    { screen_name, days, missingOnly, limit, cursor, url },
+    () => {},
+  );
   return NextResponse.json(result);
 }

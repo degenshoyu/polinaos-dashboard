@@ -76,7 +76,7 @@ function collectFromPumpFun(text: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = RE.exec(text)) !== null) {
     const tail = m[1] || "";
-    // Look ahead a bit and glue base58-looking fragments
+    // Look ahead a bit and glue base58-looking fragments (no whitespace removal elsewhere)
     const rest = text.slice(RE.lastIndex, RE.lastIndex + 160);
     const more = (rest.match(/[1-9A-HJ-NP-Za-km-z]{2,}/g) || []).join("");
     const candidate = (tail + more).replace(/[^1-9A-HJ-NP-Za-km-z]+/g, "");
@@ -138,18 +138,22 @@ function reconstructCAsFromTweet(text: string): Set<string> {
   return filterCAKeepMaximal([...plain, ...fromPump, ...joined]);
 }
 
-/* ========================= Core runner with injectable logger ========================= */
-async function runDetect(
-  params: { screen_name: string; days: number; missingOnly: boolean; url: URL },
-  log: (e: any) => void,
-) {
-  const { screen_name, days, missingOnly, url } = params;
+/* ========================= Route ========================= */
+export async function POST(req: Request) {
+  // Admin or CRON auth
+  const session = await getServerSession(authOptions);
+  const isAdmin = Boolean((session?.user as any)?.isAdmin);
+  const bySecret = allowByCronSecret(req);
+  if (!isAdmin && !bySecret) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden" },
+      { status: 403 },
+    );
+  }
 
-  const handleRaw = screen_name.trim().replace(/^@+/, "");
-  const handle = handleRaw.toLowerCase();
+  const { screen_name, days, missingOnly } = Body.parse(await req.json());
+  const handle = screen_name.trim().replace(/^@+/, "").toLowerCase();
   const isAll = handle === "*" || handle === "all";
-
-  log({ event: "start", handle: isAll ? "*" : handle, days, missingOnly });
 
   // Time window [since, until)
   const now = new Date();
@@ -180,10 +184,8 @@ async function runDetect(
     )
     .orderBy(desc(kolTweets.publishDate));
 
-  log({ event: "loaded", tweets: tweets.length });
-
   if (!tweets.length) {
-    return {
+    return NextResponse.json({
       ok: true,
       handle: isAll ? "*" : handle,
       days,
@@ -191,7 +193,7 @@ async function runDetect(
       mentionsDetected: 0,
       inserted: 0,
       updated: 0,
-    };
+    });
   }
 
   // When missingOnly=true, skip tweets that already have ANY mentions
@@ -209,7 +211,6 @@ async function runDetect(
     const has = new Set(existing.map((e) => e.tweetId));
     candidates = tweets.filter((t) => !has.has(t.tweetId));
   }
-  log({ event: "candidates", count: candidates.length });
 
   // Extract mentions; aggregate tickers/names/CAs, build trigger tuples
   const all: {
@@ -221,9 +222,6 @@ async function runDetect(
   const uniqueTickers = new Set<string>(); // "$TICKER"
   const phraseNames = new Set<string>(); // "<name> coin"
   const caSet = new Set<string>(); // canonical contract addresses
-
-  let processed = 0;
-  const PROGRESS_EVERY = 200;
 
   for (const t of candidates) {
     // 1) Reconstruct CAs conservatively (NO global whitespace removal)
@@ -291,19 +289,7 @@ async function runDetect(
         if (name) phraseNames.add(name);
       }
     }
-
-    processed++;
-    if (processed % PROGRESS_EVERY === 0) {
-      log({ event: "extract_progress", processed, of: candidates.length });
-    }
   }
-
-  log({
-    event: "extracted",
-    tickers: uniqueTickers.size,
-    names: phraseNames.size,
-    cas: caSet.size,
-  });
 
   // Resolve to contracts (Solana-only): tickers + phrase names
   let resolved = new Map<
@@ -315,18 +301,14 @@ async function runDetect(
     { tokenKey: string; tokenDisplay: string; boostedConf: number }
   >();
   try {
-    log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
     resolved = await resolveTickersToContracts([...uniqueTickers]);
-    log({ event: "resolve_tickers_done" });
   } catch (e) {
-    log({ event: "resolve_tickers_failed", error: String(e) });
+    console.warn("[detect-mentions] resolveTickersToContracts failed", e);
   }
   try {
-    log({ event: "resolve_names_begin", count: phraseNames.size });
     resolvedNames = await resolveNamesToContracts([...phraseNames]);
-    log({ event: "resolve_names_done" });
   } catch (e) {
-    log({ event: "resolve_names_failed", error: String(e) });
+    console.warn("[detect-mentions] resolveNamesToContracts failed", e);
   }
 
   // Reverse map: contract -> { tokenDisplay, boostedConf }
@@ -346,19 +328,14 @@ async function runDetect(
   // CA-only resolution: resolve contracts that have no meta yet
   const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
   if (missingCA.length) {
-    log({ event: "resolve_ca_begin", count: missingCA.length });
     let caMeta = new Map<
       string,
       { tokenKey: string; tokenDisplay: string; boostedConf: number }
     >();
     try {
       caMeta = await resolveContractsToMeta(missingCA);
-      log({
-        event: "resolve_ca_done",
-        hit: Array.from(caMeta.keys()).length,
-      });
     } catch (e) {
-      log({ event: "resolve_ca_failed", error: String(e) });
+      console.warn("[detect-mentions] resolveContractsToMeta failed", e);
     }
     for (const [addr, meta] of caMeta.entries()) {
       byContract.set(addr, {
@@ -366,6 +343,10 @@ async function runDetect(
         boostedConf: meta.boostedConf,
       });
     }
+    console.debug("[detect-mentions] CA resolved via GT", {
+      total: missingCA.length,
+      hit: Array.from(caMeta.keys()).length,
+    });
   }
 
   // Build DB rows; de-duplicate by (tweetId, triggerKey)
@@ -438,16 +419,15 @@ async function runDetect(
   }
 
   if (!rows.length) {
-    log({ event: "done", inserted: 0, updated: 0, rows: 0 });
-    return {
+    return NextResponse.json({
       ok: true,
-      handle: isAll ? "*" : handle,
+      handle,
       days,
       scannedTweets: candidates.length,
       mentionsDetected: 0,
       inserted: 0,
       updated: 0,
-    };
+    });
   }
 
   // Accurate counts via pre-check (existing pairs)
@@ -478,13 +458,6 @@ async function runDetect(
     return prev && prev !== r.tokenKey;
   }).length;
 
-  log({
-    event: "upsert_planning",
-    rows: rows.length,
-    willInsert,
-    willUpdate,
-  });
-
   // Upsert by (tweet_id, trigger_key), chunked
   const CHUNK = 200;
   for (let i = 0; i < rows.length; i += CHUNK) {
@@ -505,74 +478,13 @@ async function runDetect(
       });
   }
 
-  log({
-    event: "done",
-    inserted: willInsert,
-    updated: willUpdate,
-    rows: rows.length,
-  });
-
-  return {
+  return NextResponse.json({
     ok: true,
-    handle: isAll ? "*" : handle,
+    handle,
     days,
     scannedTweets: candidates.length,
     mentionsDetected: rows.length,
     inserted: willInsert,
     updated: willUpdate,
-  };
-}
-
-/* ========================= Route ========================= */
-export async function POST(req: Request) {
-  // Admin or CRON auth
-  const session = await getServerSession(authOptions);
-  const isAdmin = Boolean((session?.user as any)?.isAdmin);
-  const bySecret = allowByCronSecret(req);
-  if (!isAdmin && !bySecret) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden" },
-      { status: 403 },
-    );
-  }
-
-  const url = new URL(req.url);
-  const wantStream =
-    url.searchParams.get("stream") === "1" ||
-    url.searchParams.get("stream") === "true";
-
-  const body = Body.parse(await req.json());
-  const params = { ...body, url };
-
-  if (wantStream) {
-    const encoder = new TextEncoder();
-    return new Response(
-      new ReadableStream({
-        start(controller) {
-          const write = (obj: any) =>
-            controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
-          (async () => {
-            try {
-              const result = await runDetect(params, write);
-              write({ event: "result", result });
-              controller.close();
-            } catch (e: any) {
-              write({ event: "error", message: e?.message || String(e) });
-              controller.close();
-            }
-          })();
-        },
-      }),
-      {
-        headers: {
-          "Content-Type": "application/x-ndjson",
-          "Cache-Control": "no-cache",
-        },
-      },
-    );
-  }
-
-  // Non-stream fallback: run to completion and return JSON
-  const result = await runDetect(params, () => {});
-  return NextResponse.json(result);
+  });
 }
