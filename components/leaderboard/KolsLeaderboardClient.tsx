@@ -1,3 +1,5 @@
+// components/leaderboard/KolsLeaderboardClient.tsx
+
 "use client";
 
 import { useMemo, useState } from "react";
@@ -167,15 +169,16 @@ export default function KolsLeaderboardClient({
 
   return (
     <div className="space-y-4">
-      {/* Top controls (title + all controls in one line) */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">KOL Leaderboard</h1>
-          <p className="text-sm text-gray-400">
-            Ranked by {scopeLabel} {metricLabel} in last {daysFromUrl} days.
-          </p>
-        </div>
+      {/* Title + subtitle (row 1) */}
+      <div>
+        <h1 className="text-xl font-semibold">KOL Leaderboard</h1>
+        <p className="text-sm text-gray-400">
+          Ranked by {scopeLabel} {metricLabel} in last {daysFromUrl} days.
+        </p>
+      </div>
 
+      {/* Full controls bar (row 2) */}
+      <div className="w-full">
         <KolsHeaderControls
           days={daysFromUrl}
           sortKey={sortKey}
@@ -192,7 +195,7 @@ export default function KolsLeaderboardClient({
       </div>
 
       {/* Table container */}
-      <div className="rounded-2xl border border-white/10 bg-white/5 overflow-visible">
+      <div className="relative z-0 rounded-2xl border border-white/10 bg-white/5 overflow-visible">
         <LeaderboardHeader days={daysFromUrl} totalTooltip={totalTooltip} shillTooltip={shillTooltip} />
 
         {/* BODY */}
@@ -226,4 +229,3 @@ export default function KolsLeaderboardClient({
     </div>
   );
 }
-

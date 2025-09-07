@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
+import { createPortal } from "react-dom";
 
 export function Tooltip({
   children,
@@ -46,19 +47,54 @@ export function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!ref.current) return;
       if (!ref.current.contains(e.target as Node)) setOpen(false);
     };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("click", onDoc);
+    return () => document.removeEventListener("click", onDoc);
   }, []);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Compute portal menu position (align-right) when open / on resize / on scroll
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      if (!ref.current) return;
+      const rect = ref.current.getBoundingClientRect();
+      const GAP = 8;
+      const MENU_W = 224; // w-56
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      // align-right to trigger, clamp within viewport with 8px padding
+      const prefLeft = rect.right - MENU_W;
+      const left = Math.max(8, Math.min(prefLeft, vw - 8 - MENU_W));
+      const top = Math.max(8, Math.min(rect.bottom + GAP, vh - 8)); // let height auto
+      setCoords({ top, left });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open]);
+
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative z-[70]">
       <button
+        type="button"
         onClick={() => setOpen((v) => !v)}
         className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-gray-200 hover:bg-white/10"
         aria-expanded={open}
@@ -67,14 +103,20 @@ export function Dropdown({
         {label}
         <ChevronDown size={14} className="opacity-80" />
       </button>
-      {open && (
-        <div
-          className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-xl border border-white/10 bg-[#0b0f0e]/95 p-1 shadow-2xl backdrop-blur"
-          role="menu"
-        >
-          {children}
-        </div>
-      )}
+
+      {open && coords &&
+        createPortal(
+          <div
+            role="menu"
+            // fixed to viewport; portal avoids ancestor overflow/stacking traps
+            style={{ position: "fixed", top: coords.top, left: coords.left }}
+            className="z-[9999] w-56 max-h-[70vh] overflow-auto rounded-xl border border-white/10 bg-[#0b0f0e]/95 p-1 shadow-2xl backdrop-blur"
+          >
+            {children}
+          </div>,
+          document.body
+        )
+      }
     </div>
   );
 }
@@ -90,6 +132,7 @@ export function MenuItem({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       className={[
         "flex w-full items-center justify-between rounded-md px-3 py-2 text-sm",

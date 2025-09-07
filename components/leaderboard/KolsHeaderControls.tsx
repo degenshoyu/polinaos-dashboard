@@ -1,3 +1,5 @@
+// components/leaderboard/KolsHeaderControls.tsx
+
 "use client";
 
 import { CalendarDays, ArrowUpDown, Search, Filter } from "lucide-react";
@@ -34,9 +36,9 @@ export function KolsHeaderControls({
   onSetCoinKey: (k: string | null) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 justify-between">
+    <div className="relative z-[60] w-full flex flex-nowrap items-center gap-2 overflow-x-auto overflow-y-visible [-webkit-overflow-scrolling:touch]">
       {/* Search (controlled width; inline with the rest) */}
-      <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 w-full sm:w-auto min-w-[220px] sm:min-w-[260px] md:min-w-[300px] lg:min-w-[340px]">
+      <div className="relative z-[60] shrink-0 flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 min-w-[240px] max-w-[380px] w-[min(38vw,380px)]">
         <Search size={16} className="text-gray-400" />
         <input
           value={query}
@@ -48,7 +50,7 @@ export function KolsHeaderControls({
       </div>
 
       {/* Right group */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="ml-auto flex flex-wrap items-center gap-2">
         {/* Period */}
         <Dropdown
           label={`${days === 7 ? "7d" : "30d"} Period`}
@@ -120,4 +122,3 @@ export function KolsHeaderControls({
     </div>
   );
 }
-
