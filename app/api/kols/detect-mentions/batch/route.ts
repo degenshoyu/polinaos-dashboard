@@ -4,19 +4,13 @@ import { z } from "zod";
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
 import { and, or, eq, lt, gte, desc, inArray, sql } from "drizzle-orm";
-import { extractMentions, type Mention } from "@/lib/tokens/extract";
-import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
-import {
-  resolveTickersToContracts,
-  resolveContractsToMeta,
-  resolveNamesToContracts,
-} from "@/lib/markets/geckoterminal";
-import { canonAddr, isSolAddr } from "@/lib/chains/address";
+import { processTweetsToRows } from "@/lib/kols/detectEngine";
 
+/* ========================= Runtime ========================= */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ========================= auth ========================= */
+/* ========================= Auth ========================= */
 function allowByCronSecret(req: Request) {
   const expected = (process.env.CRON_SECRET || "").trim();
   if (!expected) return false;
@@ -29,9 +23,9 @@ function allowByCronSecret(req: Request) {
   return q === expected || h === expected;
 }
 
-/* ========================= schema ========================= */
+/* ========================= Query schema ========================= */
 const Q = z.object({
-  screen_name: z.string().min(1).default("*"),
+  screen_name: z.string().min(1).default("*"), // "*" / "all" 表示全库
   days: z.coerce.number().int().min(1).max(30).default(14),
   missingOnly: z
     .union([
@@ -43,12 +37,12 @@ const Q = z.object({
     .optional()
     .transform((v) => (v == null ? true : v === "1" || v === "true")),
   limit: z.coerce.number().int().min(1).max(500).default(200),
-  cursor: z.string().optional(), // base64url of {ts,id}
+  cursor: z.string().optional(), // base64url of { ts: ISOString, id: string }
   stream: z.union([z.literal("1"), z.literal("true")]).optional(),
 });
 
-/* ========================= cursor helpers ========================= */
-type Cursor = { ts: string; id: string }; // ts: ISO
+/* ========================= Cursor helpers ========================= */
+type Cursor = { ts: string; id: string };
 function encCursor(c: Cursor) {
   return Buffer.from(JSON.stringify(c)).toString("base64url");
 }
@@ -56,87 +50,13 @@ function decCursor(s?: string): Cursor | null {
   if (!s) return null;
   try {
     const j = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
-    if (typeof j?.ts === "string" && typeof j?.id === "string") return j;
+    if (typeof j?.ts === "string" && typeof j?.id === "string")
+      return j as Cursor;
   } catch {}
   return null;
 }
 
-/* ========================= CA reconstruct (conservative) ========================= */
-const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
-function collectFromPumpFun(text: string): string[] {
-  const out: string[] = [];
-  const RE = /pump\.fun\/coin\/([^\s]{1,90})/gi;
-  let m: RegExpExecArray | null;
-  while ((m = RE.exec(text)) !== null) {
-    const tail = m[1] || "";
-    const rest = text.slice(RE.lastIndex, RE.lastIndex + 160);
-    const more = (rest.match(/[1-9A-HJ-NP-Za-km-z]{2,}/g) || []).join("");
-    const candidate = (tail + more).replace(/[^1-9A-HJ-NP-Za-km-z]+/g, "");
-    const clipped = candidate.slice(0, 64);
-    for (let L = Math.min(44, clipped.length); L >= 32; L--) {
-      const head = clipped.slice(0, L);
-      if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(head)) {
-        out.push(head);
-        break;
-      }
-    }
-  }
-  return out;
-}
-function collectJoinedPairs(text: string): string[] {
-  const out: string[] = [];
-  const SPLIT2 =
-    /\b([1-9A-HJ-NP-Za-km-z]{8,20})\s+([1-9A-HJ-NP-Za-km-z]{16,44})\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = SPLIT2.exec(text)) !== null) {
-    const joined = (m[1] + m[2]).trim();
-    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(joined)) out.push(joined);
-  }
-  return out;
-}
-function filterCAKeepMaximal(cas: string[]): Set<string> {
-  const uniq = Array.from(new Set(cas));
-  const keep = new Set<string>();
-  for (const a of uniq) {
-    let isSub = false;
-    for (const b of uniq) {
-      if (a === b) continue;
-      if (b.includes(a)) {
-        isSub = true;
-        break;
-      }
-    }
-    if (!isSub) keep.add(a);
-  }
-  return keep;
-}
-function reconstructCAsFromTweet(text: string): Set<string> {
-  const plain = (text || "").match(SOL_CA_RE) ?? [];
-  const fromPump = collectFromPumpFun(text || "");
-  const joined = collectJoinedPairs(text || "");
-  return filterCAKeepMaximal([...plain, ...fromPump, ...joined]);
-}
-
-/* ========================= trigger helpers ========================= */
-function triggerInputFor(m: Mention) {
-  if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
-  if (m.source === "ca") return m.tokenKey || "";
-  if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
-  return `$${String(m.tokenKey || "").toUpperCase()}`;
-}
-function makeDeterministicTriggerKey(m: Mention): string {
-  if (m.source === "ca") {
-    const addr = canonAddr(String(m.tokenKey || ""));
-    return addr ? `ca:${addr}` : "ca:unknown";
-  }
-  if (m.source === "ticker")
-    return `tk:${String(m.tokenKey || "").toLowerCase()}`;
-  if (m.source === "phrase")
-    return `ph:${String(m.tokenKey || "").toLowerCase()}`;
-  return `uk:${String(m.tokenKey || "").toLowerCase()}`;
-}
-
-/* ========================= one-page runner ========================= */
+/* ========================= Page runner ========================= */
 async function runDetectPage(
   params: {
     screen_name: string;
@@ -149,10 +69,10 @@ async function runDetectPage(
   log: (e: any) => void,
 ) {
   const { screen_name, days, missingOnly, limit, cursor } = params;
-  const isAll = screen_name === "*" || screen_name.toLowerCase() === "all";
-  const handle = isAll
-    ? null
-    : screen_name.trim().replace(/^@+/, "").toLowerCase();
+
+  const raw = screen_name.trim().replace(/^@+/, "");
+  const isAll = raw === "*" || raw.toLowerCase() === "all";
+  const handle = isAll ? null : raw.toLowerCase();
 
   log({
     event: "start",
@@ -163,19 +83,18 @@ async function runDetectPage(
     cursor: cursor ?? null,
   });
 
-  // time window
+  // 时间窗口 [since, until)
   const now = new Date();
   const since = new Date(now);
   since.setDate(now.getDate() - (days - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
-  // paging cursor
+  // 解析分页游标（排序：publishDate DESC, tweetId DESC）
   const c = decCursor(cursor || undefined);
   const cursorTs = c ? new Date(c.ts) : null;
   const cursorId = c?.id ?? null;
 
-  // base where
   const baseWhere = isAll
     ? and(gte(kolTweets.publishDate, since), lt(kolTweets.publishDate, until))
     : and(
@@ -184,7 +103,6 @@ async function runDetectPage(
         lt(kolTweets.publishDate, until),
       );
 
-  // cursor where (order: publishDate DESC, tweetId DESC)
   const where = c
     ? and(
         baseWhere,
@@ -198,7 +116,7 @@ async function runDetectPage(
       )
     : baseWhere;
 
-  // fetch one page
+  // 拉一页
   const page = await db
     .select({
       tweetId: kolTweets.tweetId,
@@ -225,7 +143,7 @@ async function runDetectPage(
     };
   }
 
-  // missingOnly: drop tweets that already have mentions
+  // missingOnly：跳过已有任何 mentions 的推文
   let candidates = page;
   if (missingOnly) {
     const existing = await db
@@ -242,211 +160,33 @@ async function runDetectPage(
   }
   log({ event: "candidates", count: candidates.length });
 
-  // collect mentions
-  type Tuple = {
-    tweetId: string;
-    m: Mention;
-    triggerKey: string;
-    triggerText: string;
-  };
-  const all: Tuple[] = [];
-  const uniqueTickers = new Set<string>();
-  const phraseNames = new Set<string>();
-  const caSet = new Set<string>();
+  // 复用引擎：抽取 → 解析（ticker/name/CA）→ rows（不写库）
+  const { rows, stats } = await processTweetsToRows(
+    candidates.map((t) => ({ tweetId: t.tweetId, textContent: t.textContent })),
+    log, // 引擎内部也会输出 resolve_* / extracted 等事件
+  );
 
-  for (const t of candidates) {
-    const rebuiltCAs = reconstructCAsFromTweet(t.textContent ?? "");
-    let ext = extractMentions(t.textContent ?? "");
-    if (rebuiltCAs.size) {
-      ext = ext.filter((x) => x.source !== "ca");
-      for (const addr of rebuiltCAs) {
-        ext.push({
-          tokenKey: addr,
-          tokenDisplay: addr,
-          source: "ca",
-          confidence: 100,
-        } as Mention);
-      }
-    }
-    for (const m of ext) {
-      const input = triggerInputFor(m);
-      let triggerKey = "";
-      let triggerText = "";
-
-      if (m.source === "ca") {
-        const addr = String(m.tokenKey || "");
-        triggerKey = makeDeterministicTriggerKey(m);
-        triggerText = addr || input;
-      } else {
-        const built = buildTriggerKeyWithText({
-          source: m.source as any,
-          value: input,
-        });
-        triggerKey = (built as any)?.key || makeDeterministicTriggerKey(m);
-        triggerText = (built as any)?.text || input;
-      }
-
-      all.push({ tweetId: t.tweetId, m, triggerKey, triggerText });
-
-      if (m.source === "ca") {
-        const addr = canonAddr(String(m.tokenKey || ""));
-        if (addr) caSet.add(addr);
-      } else if (m.source === "ticker") {
-        const tk = m.tokenDisplay?.startsWith("$")
-          ? m.tokenDisplay
-          : `$${String(m.tokenKey || "").toUpperCase()}`;
-        uniqueTickers.add(tk);
-      } else if (m.source === "phrase") {
-        const name = (m.tokenDisplay || m.tokenKey || "").trim();
-        if (name) phraseNames.add(name);
-      }
-    }
-  }
-
-  log({
-    event: "extracted",
-    tickers: uniqueTickers.size,
-    names: phraseNames.size,
-    cas: caSet.size,
-  });
-
-  // resolve
-  let byTicker = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-  let byName = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-
-  try {
-    log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
-    byTicker = await resolveTickersToContracts([...uniqueTickers]);
-    log({ event: "resolve_tickers_done" });
-  } catch (e) {
-    log({ event: "resolve_tickers_failed", error: String(e) });
-  }
-  try {
-    log({ event: "resolve_names_begin", count: phraseNames.size });
-    byName = await resolveNamesToContracts([...phraseNames]);
-    log({ event: "resolve_names_done" });
-  } catch (e) {
-    log({ event: "resolve_names_failed", error: String(e) });
-  }
-
-  const byContract = new Map<
-    string,
-    { tokenDisplay: string; boostedConf: number }
-  >();
-  for (const [, r] of byTicker.entries()) {
-    const addr = canonAddr(String(r.tokenKey || ""));
-    if (addr)
-      byContract.set(addr, {
-        tokenDisplay: r.tokenDisplay,
-        boostedConf: r.boostedConf,
-      });
-  }
-
-  const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
-  if (missingCA.length) {
-    log({ event: "resolve_ca_begin", count: missingCA.length });
-    try {
-      const caMeta = await resolveContractsToMeta(missingCA);
-      for (const [addr, meta] of caMeta.entries()) {
-        byContract.set(addr, {
-          tokenDisplay: meta.tokenDisplay,
-          boostedConf: meta.boostedConf,
-        });
-      }
-      log({ event: "resolve_ca_done", hit: Array.from(caMeta.keys()).length });
-    } catch (e) {
-      log({ event: "resolve_ca_failed", error: String(e) });
-    }
-  }
-
-  // build rows
-  type Row = {
-    tweetId: string;
-    tokenKey: string;
-    tokenDisplay: string | null;
-    confidence: number;
-    source: (typeof mentionSource.enumValues)[number];
-    triggerKey: string;
-    triggerText: string | null;
-  };
-  const rows: Row[] = [];
-  const seen = new Set<string>();
-
-  for (const { tweetId, m, triggerKey, triggerText } of all) {
-    let tokenKey = m.tokenKey;
-    let tokenDisplay = m.tokenDisplay;
-    let confidence = m.confidence;
-
-    if (m.source === "ca") {
-      const addr = canonAddr(String(m.tokenKey || ""));
-      tokenKey = addr;
-      const meta = addr ? byContract.get(addr) : undefined;
-      if (meta?.tokenDisplay) {
-        tokenDisplay = meta.tokenDisplay;
-        confidence = Math.max(confidence, meta.boostedConf ?? 0);
-      } else {
-        tokenDisplay = `$${addr?.slice(0, 4)}…${addr?.slice(-4)}`;
-      }
-    } else if (m.source === "ticker") {
-      const disp = m.tokenDisplay?.startsWith("$")
-        ? m.tokenDisplay
-        : `$${String(m.tokenKey || "").toUpperCase()}`;
-      const r = byTicker.get(disp.replace(/^\$+/, "").toLowerCase());
-      if (r) {
-        tokenKey = r.tokenKey;
-        tokenDisplay = r.tokenDisplay;
-        confidence = Math.max(confidence, r.boostedConf);
-      }
-    } else if (m.source === "phrase") {
-      const q = (m.tokenDisplay || m.tokenKey || "").trim().toLowerCase();
-      const r = byName.get(q) ?? byName.get(`${q} coin`); // 容错
-      if (!r) continue; // 不落库未命中 phrase
-      tokenKey = r.tokenKey;
-      tokenDisplay = r.tokenDisplay;
-      confidence = Math.max(confidence, r.boostedConf);
-    }
-
-    const key = `${tweetId}___${triggerKey}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    rows.push({
-      tweetId,
-      tokenKey: canonAddr(String(tokenKey || "")),
-      tokenDisplay: tokenDisplay ?? (m.tokenDisplay || m.tokenKey),
-      confidence: Math.min(100, Math.max(0, Math.round(confidence))),
-      source: m.source as any,
-      triggerKey,
-      triggerText,
-    });
-  }
+  // 计算 nextCursor（基于本页最后一条，和排序一致）
+  const last = page[page.length - 1];
+  const nextCursor = last
+    ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
+    : null;
 
   if (!rows.length) {
-    // next cursor
-    const last = page[page.length - 1];
-    const nextCursor = last
-      ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
-      : null;
     log({ event: "done", rows: 0, inserted: 0, updated: 0, nextCursor });
     return {
       ok: true,
       handle: handle ?? "*",
       days,
-      scannedTweets: candidates.length,
-      mentionsDetected: 0,
+      scannedTweets: stats.scannedTweets,
+      mentionsDetected: stats.mentionsDetected,
       inserted: 0,
       updated: 0,
       nextCursor,
     };
   }
 
-  // pre-check for counts
+  // 预检：统计将要插入/更新
   const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
   const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
@@ -462,6 +202,7 @@ async function runDetectPage(
         inArray(tweetTokenMentions.triggerKey, triggers),
       ),
     );
+
   const existsMap = new Map(
     existingPairs.map((e) => [`${e.tweetId}___${e.triggerKey}`, e.tokenKey]),
   );
@@ -473,10 +214,20 @@ async function runDetectPage(
     return prev && prev !== r.tokenKey;
   }).length;
 
-  // upsert chunked
-  const CH = 200;
-  for (let i = 0; i < rows.length; i += CH) {
-    const chunk = rows.slice(i, i + CH);
+  log({ event: "upsert_planning", rows: rows.length, willInsert, willUpdate });
+
+  // Upsert（分块）：冲突键 (tweet_id, trigger_key)
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK).map((r) => ({
+      tweetId: r.tweetId,
+      tokenKey: r.tokenKey,
+      tokenDisplay: r.tokenDisplay,
+      confidence: r.confidence,
+      source: r.source as (typeof mentionSource.enumValues)[number],
+      triggerKey: r.triggerKey,
+      triggerText: r.triggerText,
+    }));
     await db
       .insert(tweetTokenMentions)
       .values(chunk)
@@ -493,12 +244,6 @@ async function runDetectPage(
       });
   }
 
-  // next cursor by整个 page 的最后一条（与排序一致）
-  const last = page[page.length - 1];
-  const nextCursor = last
-    ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
-    : null;
-
   log({
     event: "done",
     rows: rows.length,
@@ -511,7 +256,7 @@ async function runDetectPage(
     ok: true,
     handle: handle ?? "*",
     days,
-    scannedTweets: candidates.length,
+    scannedTweets: stats.scannedTweets,
     mentionsDetected: rows.length,
     inserted: willInsert,
     updated: willUpdate,
@@ -538,7 +283,6 @@ export async function GET(req: Request) {
         start(controller) {
           const write = (obj: any) =>
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
-          // 立刻吐一行，避免 Vercel 空闲超时
           write({ event: "hello", ts: Date.now() });
           (async () => {
             try {
@@ -586,7 +330,7 @@ export async function GET(req: Request) {
   return NextResponse.json(result);
 }
 
-/* ========================= POST （可选，同 GET） ========================= */
+/* ========================= POST (body 或 query，同 GET) ========================= */
 export async function POST(req: Request) {
   if (!allowByCronSecret(req)) {
     return NextResponse.json(
@@ -598,7 +342,7 @@ export async function POST(req: Request) {
   const qs = Object.fromEntries(url.searchParams.entries());
   const isStream = qs.stream === "1" || qs.stream === "true";
 
-  // body 支持 JSON；若无 body，走 query fallback
+  // 允许 body + query 混合；缺省与 GET 对齐
   let body: any = {};
   try {
     body = await req.json();

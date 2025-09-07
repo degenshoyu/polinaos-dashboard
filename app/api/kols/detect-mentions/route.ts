@@ -6,15 +6,9 @@ import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
 import { eq, and, gte, lt, sql, inArray, desc } from "drizzle-orm";
-import { extractMentions, type Mention } from "@/lib/tokens/extract";
-import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
-import {
-  resolveTickersToContracts,
-  resolveContractsToMeta,
-  resolveNamesToContracts,
-} from "@/lib/markets/geckoterminal";
-import { canonAddr } from "@/lib/chains/address";
+import { processTweetsToRows } from "@/lib/kols/detectEngine";
 
+/* ========================= Runtime ========================= */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -33,132 +27,32 @@ function allowByCronSecret(req: Request) {
 
 /* ========================= Body schema ========================= */
 const Body = z.object({
-  screen_name: z.string().min(1),
+  screen_name: z.string().min(1), // 支持具体账号或 "*" / "all"
   days: z.number().int().min(1).max(30).optional().default(7),
   missingOnly: z.boolean().optional().default(true),
 });
 
-/* ========================= Trigger helpers ========================= */
-// Prefer readable input for trigger text
-function triggerInputFor(m: Mention) {
-  if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
-  if (m.source === "ca") return m.tokenKey || "";
-  if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
-  return `$${String(m.tokenKey || "").toUpperCase()}`;
-}
-
-// Deterministic fallback trigger key that does not depend on in-text offsets
-function makeDeterministicTriggerKey(m: Mention): string {
-  if (m.source === "ca") {
-    const addr = canonAddr(String(m.tokenKey || ""));
-    return addr ? `ca:${addr}` : "ca:unknown";
-  }
-  if (m.source === "ticker") {
-    return `tk:${String(m.tokenKey || "").toLowerCase()}`;
-  }
-  if (m.source === "phrase") {
-    return `ph:${String(m.tokenKey || "").toLowerCase()}`;
-  }
-  return `uk:${String(m.tokenKey || "").toLowerCase()}`;
-}
-
-/* ========================= CA reconstruction (conservative) ========================= */
-/** Base58 (32–44) for plain scan */
-const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
-
-/**
- * Extract CA from pump.fun URLs even if broken after "/coin/".
- * We DO NOT remove normal whitespaces globally — only glue base58 fragments around the URL tail.
- */
-function collectFromPumpFun(text: string): string[] {
-  const out: string[] = [];
-  const RE = /pump\.fun\/coin\/([^\s]{1,90})/gi;
-  let m: RegExpExecArray | null;
-  while ((m = RE.exec(text)) !== null) {
-    const tail = m[1] || "";
-    // Look ahead a bit and glue base58-looking fragments
-    const rest = text.slice(RE.lastIndex, RE.lastIndex + 160);
-    const more = (rest.match(/[1-9A-HJ-NP-Za-km-z]{2,}/g) || []).join("");
-    const candidate = (tail + more).replace(/[^1-9A-HJ-NP-Za-km-z]+/g, "");
-    const clipped = candidate.slice(0, 64);
-    for (let L = Math.min(44, clipped.length); L >= 32; L--) {
-      const head = clipped.slice(0, L);
-      if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(head)) {
-        out.push(head);
-        break;
-      }
-    }
-  }
-  return out;
-}
-
-/**
- * Join TWO base58 chunks split by whitespace/newline:
- *   "8mznFjdcG\nHhfvxkP1JVC7T...cipump" → "8mznFjdcGHhfvxkP1JVC7T...cipump"
- * We do NOT touch any other whitespaces in normal sentences.
- */
-function collectJoinedPairs(text: string): string[] {
-  const out: string[] = [];
-  // left chunk 8–20, right chunk 16–44 → joined candidate 32–64, then validate 32–44
-  const SPLIT2 =
-    /\b([1-9A-HJ-NP-Za-km-z]{8,20})\s+([1-9A-HJ-NP-Za-km-z]{16,44})\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = SPLIT2.exec(text)) !== null) {
-    const a = m[1];
-    const b = m[2];
-    const joined = (a + b).trim();
-    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(joined)) out.push(joined);
-  }
-  return out;
-}
-
-/** Keep only maximal/longest CAs: drop any CA that is a strict substring of another CA. */
-function filterCAKeepMaximal(cas: string[]): Set<string> {
-  const uniq = Array.from(new Set(cas));
-  const keep = new Set<string>();
-  for (const a of uniq) {
-    let isSub = false;
-    for (const b of uniq) {
-      if (a === b) continue;
-      if (b.includes(a)) {
-        isSub = true;
-        break;
-      }
-    }
-    if (!isSub) keep.add(a);
-  }
-  return keep;
-}
-
-/** Plain scan (no global whitespace change) + pump.fun fix + two-chunk join → keep longest */
-function reconstructCAsFromTweet(text: string): Set<string> {
-  const plain = (text || "").match(SOL_CA_RE) ?? [];
-  const fromPump = collectFromPumpFun(text || "");
-  const joined = collectJoinedPairs(text || "");
-  return filterCAKeepMaximal([...plain, ...fromPump, ...joined]);
-}
-
-/* ========================= Core runner with injectable logger ========================= */
-async function runDetect(
+/* ========================= Core runner (single window) ========================= */
+async function runDetectOnce(
   params: { screen_name: string; days: number; missingOnly: boolean; url: URL },
   log: (e: any) => void,
 ) {
-  const { screen_name, days, missingOnly, url } = params;
+  const { screen_name, days, missingOnly } = params;
 
-  const handleRaw = screen_name.trim().replace(/^@+/, "");
-  const handle = handleRaw.toLowerCase();
-  const isAll = handle === "*" || handle === "all";
+  const raw = screen_name.trim().replace(/^@+/, "");
+  const isAll = raw === "*" || raw.toLowerCase() === "all";
+  const handle = isAll ? null : raw.toLowerCase();
 
-  log({ event: "start", handle: isAll ? "*" : handle, days, missingOnly });
+  log({ event: "start", handle: handle ?? "*", days, missingOnly });
 
-  // Time window [since, until)
+  // 时间窗口 [since, until)
   const now = new Date();
   const since = new Date(now);
   since.setDate(now.getDate() - (days - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
-  // Load tweets
+  // 读取推文（按时间倒序）
   const tweets = await db
     .select({
       tweetId: kolTweets.tweetId,
@@ -173,7 +67,7 @@ async function runDetect(
             lt(kolTweets.publishDate, until),
           )
         : and(
-            eq(kolTweets.twitterUsername, handle),
+            eq(kolTweets.twitterUsername, handle!),
             gte(kolTweets.publishDate, since),
             lt(kolTweets.publishDate, until),
           ),
@@ -185,7 +79,7 @@ async function runDetect(
   if (!tweets.length) {
     return {
       ok: true,
-      handle: isAll ? "*" : handle,
+      handle: handle ?? "*",
       days,
       scannedTweets: 0,
       mentionsDetected: 0,
@@ -194,7 +88,7 @@ async function runDetect(
     };
   }
 
-  // When missingOnly=true, skip tweets that already have ANY mentions
+  // 当 missingOnly=true：排除已有任何 mentions 的推文
   let candidates = tweets;
   if (missingOnly) {
     const existing = await db
@@ -211,246 +105,26 @@ async function runDetect(
   }
   log({ event: "candidates", count: candidates.length });
 
-  // Extract mentions; aggregate tickers/names/CAs, build trigger tuples
-  const all: {
-    tweetId: string;
-    m: Mention;
-    triggerKey: string;
-    triggerText: string;
-  }[] = [];
-  const uniqueTickers = new Set<string>(); // "$TICKER"
-  const phraseNames = new Set<string>(); // "<name> coin"
-  const caSet = new Set<string>(); // canonical contract addresses
-
-  let processed = 0;
-  const PROGRESS_EVERY = 200;
-
-  for (const t of candidates) {
-    // 1) Reconstruct CAs conservatively (NO global whitespace removal)
-    const rebuiltCAs = reconstructCAsFromTweet(t.textContent ?? "");
-
-    // 2) Run normal extraction for ticker/phrase (and CA fallback)
-    let ext = extractMentions(t.textContent ?? "");
-
-    // 3) Replace CA mentions with reconstructed/longest CAs to avoid half pieces
-    if (rebuiltCAs.size) {
-      ext = ext.filter((x) => x.source !== "ca");
-      for (const addr of rebuiltCAs) {
-        ext.push({
-          tokenKey: addr,
-          tokenDisplay: addr,
-          source: "ca",
-          confidence: 100,
-        } as Mention);
-      }
-    }
-
-    // 4) Build trigger tuples
-    for (const m of ext) {
-      const input = triggerInputFor(m);
-
-      let trigKey = "";
-      let trigText = "";
-
-      if (m.source === "ca") {
-        // Always use deterministic trigger key for CA
-        const addr = String(m.tokenKey || "");
-        trigKey = makeDeterministicTriggerKey(m); // "ca:<base58>"
-        trigText = addr || input; // show reconstructed full CA
-      } else {
-        const built = buildTriggerKeyWithText({
-          source: m.source as any,
-          value: input,
-        });
-        trigKey = (built as any)?.key || "";
-        trigText = (built as any)?.text || input;
-        if (!trigKey) {
-          // ultimate fallback
-          trigKey = makeDeterministicTriggerKey(m);
-        }
-      }
-
-      all.push({
-        tweetId: t.tweetId,
-        m,
-        triggerKey: trigKey,
-        triggerText: trigText,
-      });
-
-      // Aggregate for later resolution
-      if (m.source === "ca") {
-        const addr = canonAddr(String(m.tokenKey || ""));
-        if (addr) caSet.add(addr);
-      } else if (m.source === "ticker") {
-        const tk = m.tokenDisplay?.startsWith("$")
-          ? m.tokenDisplay
-          : `$${String(m.tokenKey || "").toUpperCase()}`;
-        uniqueTickers.add(tk);
-      } else if (m.source === "phrase") {
-        const name = (m.tokenDisplay || m.tokenKey || "").trim();
-        if (name) phraseNames.add(name);
-      }
-    }
-
-    processed++;
-    if (processed % PROGRESS_EVERY === 0) {
-      log({ event: "extract_progress", processed, of: candidates.length });
-    }
-  }
-
-  log({
-    event: "extracted",
-    tickers: uniqueTickers.size,
-    names: phraseNames.size,
-    cas: caSet.size,
-  });
-
-  // Resolve to contracts (Solana-only): tickers + phrase names
-  let resolved = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-  let resolvedNames = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-  try {
-    log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
-    resolved = await resolveTickersToContracts([...uniqueTickers]);
-    log({ event: "resolve_tickers_done" });
-  } catch (e) {
-    log({ event: "resolve_tickers_failed", error: String(e) });
-  }
-  try {
-    log({ event: "resolve_names_begin", count: phraseNames.size });
-    resolvedNames = await resolveNamesToContracts([...phraseNames]);
-    log({ event: "resolve_names_done" });
-  } catch (e) {
-    log({ event: "resolve_names_failed", error: String(e) });
-  }
-
-  // Reverse map: contract -> { tokenDisplay, boostedConf }
-  const byContract = new Map<
-    string,
-    { tokenDisplay: string; boostedConf: number }
-  >();
-  for (const [, r] of resolved.entries()) {
-    const addr = canonAddr(String(r.tokenKey || ""));
-    if (addr)
-      byContract.set(addr, {
-        tokenDisplay: r.tokenDisplay,
-        boostedConf: r.boostedConf,
-      });
-  }
-
-  // CA-only resolution: resolve contracts that have no meta yet
-  const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
-  if (missingCA.length) {
-    log({ event: "resolve_ca_begin", count: missingCA.length });
-    let caMeta = new Map<
-      string,
-      { tokenKey: string; tokenDisplay: string; boostedConf: number }
-    >();
-    try {
-      caMeta = await resolveContractsToMeta(missingCA);
-      log({
-        event: "resolve_ca_done",
-        hit: Array.from(caMeta.keys()).length,
-      });
-    } catch (e) {
-      log({ event: "resolve_ca_failed", error: String(e) });
-    }
-    for (const [addr, meta] of caMeta.entries()) {
-      byContract.set(addr, {
-        tokenDisplay: meta.tokenDisplay,
-        boostedConf: meta.boostedConf,
-      });
-    }
-  }
-
-  // Build DB rows; de-duplicate by (tweetId, triggerKey)
-  type Row = {
-    tweetId: string;
-    tokenKey: string;
-    tokenDisplay: string | null;
-    confidence: number;
-    source: (typeof mentionSource.enumValues)[number];
-    triggerKey: string;
-    triggerText: string | null;
-  };
-  const rows: Row[] = [];
-  const seenPair = new Set<string>();
-
-  for (const { tweetId, m, triggerKey, triggerText } of all) {
-    let tokenKey = m.tokenKey;
-    let tokenDisplay = m.tokenDisplay;
-    let confidence = m.confidence;
-
-    if (m.source === "ca") {
-      // CA: map to a friendly $SYMBOL when possible
-      const addr = canonAddr(String(m.tokenKey || ""));
-      tokenKey = addr;
-      const meta = addr ? byContract.get(addr) : undefined;
-      if (meta?.tokenDisplay) {
-        tokenDisplay = meta.tokenDisplay;
-        confidence = Math.max(confidence, meta.boostedConf ?? 0);
-      } else {
-        // Last resort: synthesize a short tag for visibility
-        const short = addr ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : "????";
-        tokenDisplay = `$${short}`;
-        // keep confidence 100 for direct CA mentions
-      }
-    } else if (m.source === "ticker") {
-      const disp = m.tokenDisplay?.startsWith("$")
-        ? m.tokenDisplay
-        : `$${String(m.tokenKey || "").toUpperCase()}`;
-      const r = resolved.get(disp.replace(/^\$+/, "").toLowerCase());
-      if (r) {
-        tokenKey = r.tokenKey;
-        tokenDisplay = r.tokenDisplay;
-        confidence = Math.max(confidence, r.boostedConf);
-      }
-    } else if (m.source === "phrase") {
-      const q = (m.tokenDisplay || m.tokenKey || "").trim().toLowerCase();
-      const r = resolvedNames.get(q);
-      if (!r) {
-        // skip unresolved phrase to keep table clean
-        continue;
-      }
-      tokenKey = r.tokenKey;
-      tokenDisplay = r.tokenDisplay;
-      confidence = Math.max(confidence, r.boostedConf);
-    }
-
-    const pair = `${tweetId}___${triggerKey}`;
-    if (seenPair.has(pair)) continue;
-    seenPair.add(pair);
-
-    rows.push({
-      tweetId,
-      tokenKey: canonAddr(String(tokenKey || "")),
-      tokenDisplay: tokenDisplay ?? (m.tokenDisplay || m.tokenKey),
-      confidence: Math.min(100, Math.max(0, Math.round(confidence))),
-      source: m.source as any as Row["source"],
-      triggerKey,
-      triggerText,
-    });
-  }
+  // 交给引擎：抽取 → 解析（tickers/names/CA）→ 产出 rows（不涉及 DB）
+  const { rows, stats } = await processTweetsToRows(
+    candidates.map((t) => ({ tweetId: t.tweetId, textContent: t.textContent })),
+    log,
+  );
 
   if (!rows.length) {
-    log({ event: "done", inserted: 0, updated: 0, rows: 0 });
+    log({ event: "done", rows: 0, inserted: 0, updated: 0 });
     return {
       ok: true,
-      handle: isAll ? "*" : handle,
+      handle: handle ?? "*",
       days,
-      scannedTweets: candidates.length,
-      mentionsDetected: 0,
+      scannedTweets: stats.scannedTweets,
+      mentionsDetected: stats.mentionsDetected,
       inserted: 0,
       updated: 0,
     };
   }
 
-  // Accurate counts via pre-check (existing pairs)
+  // 统计：先查 (tweetId, triggerKey) 是否已存在，算 willInsert/willUpdate
   const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
   const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
@@ -485,10 +159,20 @@ async function runDetect(
     willUpdate,
   });
 
-  // Upsert by (tweet_id, trigger_key), chunked
+  // Upsert：以 (tweet_id, trigger_key) 为冲突键，分块写入
   const CHUNK = 200;
   for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
+    const chunk = rows.slice(i, i + CHUNK).map((r) => ({
+      tweetId: r.tweetId,
+      tokenKey: r.tokenKey,
+      tokenDisplay: r.tokenDisplay,
+      confidence: r.confidence,
+      // cast 到数据库 enum（"ca" | "ticker" | "phrase"...）
+      source: r.source as (typeof mentionSource.enumValues)[number],
+      triggerKey: r.triggerKey,
+      triggerText: r.triggerText,
+    }));
+
     await db
       .insert(tweetTokenMentions)
       .values(chunk)
@@ -507,25 +191,25 @@ async function runDetect(
 
   log({
     event: "done",
+    rows: rows.length,
     inserted: willInsert,
     updated: willUpdate,
-    rows: rows.length,
   });
 
   return {
     ok: true,
-    handle: isAll ? "*" : handle,
+    handle: handle ?? "*",
     days,
-    scannedTweets: candidates.length,
-    mentionsDetected: rows.length,
+    scannedTweets: stats.scannedTweets,
+    mentionsDetected: stats.mentionsDetected,
     inserted: willInsert,
     updated: willUpdate,
   };
 }
 
-/* ========================= Route ========================= */
+/* ========================= Route (POST) ========================= */
 export async function POST(req: Request) {
-  // Admin or CRON auth
+  // Admin 或 CRON 密钥
   const session = await getServerSession(authOptions);
   const isAdmin = Boolean((session?.user as any)?.isAdmin);
   const bySecret = allowByCronSecret(req);
@@ -541,7 +225,7 @@ export async function POST(req: Request) {
     url.searchParams.get("stream") === "1" ||
     url.searchParams.get("stream") === "true";
 
-  const body = Body.parse(await req.json());
+  const body = Body.parse(await req.json().catch(() => ({})));
   const params = { ...body, url };
 
   if (wantStream) {
@@ -553,7 +237,7 @@ export async function POST(req: Request) {
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
           (async () => {
             try {
-              const result = await runDetect(params, write);
+              const result = await runDetectOnce(params, write);
               write({ event: "result", result });
               controller.close();
             } catch (e: any) {
@@ -566,13 +250,14 @@ export async function POST(req: Request) {
       {
         headers: {
           "Content-Type": "application/x-ndjson",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
         },
       },
     );
   }
 
-  // Non-stream fallback: run to completion and return JSON
-  const result = await runDetect(params, () => {});
+  // 非流式：直接返回 JSON
+  const result = await runDetectOnce(params, () => {});
   return NextResponse.json(result);
 }
