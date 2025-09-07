@@ -1,11 +1,9 @@
 // app/api/kols/detect-mentions/batch/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
-import { eq, and, gte, lt, inArray, desc, sql } from "drizzle-orm";
+import { and, or, eq, lt, gte, desc, inArray, sql } from "drizzle-orm";
 import { extractMentions, type Mention } from "@/lib/tokens/extract";
 import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
 import {
@@ -13,12 +11,12 @@ import {
   resolveContractsToMeta,
   resolveNamesToContracts,
 } from "@/lib/markets/geckoterminal";
-import { canonAddr } from "@/lib/chains/address";
+import { canonAddr, isSolAddr } from "@/lib/chains/address";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* ========================= Auth helpers ========================= */
+/* ========================= auth ========================= */
 function allowByCronSecret(req: Request) {
   const expected = (process.env.CRON_SECRET || "").trim();
   if (!expected) return false;
@@ -31,15 +29,30 @@ function allowByCronSecret(req: Request) {
   return q === expected || h === expected;
 }
 
-/* ========================= Cursor helpers ========================= */
-// keyset: (publishDate DESC, tweetId DESC)
-type Cursor = { ts: string; id: string }; // ISO date + tweetId
+/* ========================= schema ========================= */
+const Q = z.object({
+  screen_name: z.string().min(1).default("*"),
+  days: z.coerce.number().int().min(1).max(30).default(14),
+  missingOnly: z
+    .union([
+      z.literal("1"),
+      z.literal("0"),
+      z.literal("true"),
+      z.literal("false"),
+    ])
+    .optional()
+    .transform((v) => (v == null ? true : v === "1" || v === "true")),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+  cursor: z.string().optional(), // base64url of {ts,id}
+  stream: z.union([z.literal("1"), z.literal("true")]).optional(),
+});
 
-function encodeCursor(c: Cursor | null): string | null {
-  if (!c) return null;
-  return Buffer.from(JSON.stringify(c), "utf8").toString("base64url");
+/* ========================= cursor helpers ========================= */
+type Cursor = { ts: string; id: string }; // ts: ISO
+function encCursor(c: Cursor) {
+  return Buffer.from(JSON.stringify(c)).toString("base64url");
 }
-function decodeCursor(s?: string | null): Cursor | null {
+function decCursor(s?: string): Cursor | null {
   if (!s) return null;
   try {
     const j = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
@@ -48,37 +61,8 @@ function decodeCursor(s?: string | null): Cursor | null {
   return null;
 }
 
-/* ========================= Body schema ========================= */
-const Body = z.object({
-  screen_name: z.string().min(1), // handle or "*" | "all"
-  days: z.number().int().min(1).max(30).optional().default(7),
-  missingOnly: z.boolean().optional().default(true),
-  limit: z.number().int().min(1).max(500).optional().default(200),
-  cursor: z.string().optional(), // base64url Cursor
-});
-
-/* ========================= Trigger helpers ========================= */
-function triggerInputFor(m: Mention) {
-  if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
-  if (m.source === "ca") return m.tokenKey || "";
-  if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
-  return `$${String(m.tokenKey || "").toUpperCase()}`;
-}
-function makeDeterministicTriggerKey(m: Mention): string {
-  if (m.source === "ca") {
-    const addr = canonAddr(String(m.tokenKey || ""));
-    return addr ? `ca:${addr}` : "ca:unknown";
-  }
-  if (m.source === "ticker")
-    return `tk:${String(m.tokenKey || "").toLowerCase()}`;
-  if (m.source === "phrase")
-    return `ph:${String(m.tokenKey || "").toLowerCase()}`;
-  return `uk:${String(m.tokenKey || "").toLowerCase()}`;
-}
-
-/* ========================= CA reconstruction (conservative) ========================= */
+/* ========================= CA reconstruct (conservative) ========================= */
 const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
-
 function collectFromPumpFun(text: string): string[] {
   const out: string[] = [];
   const RE = /pump\.fun\/coin\/([^\s]{1,90})/gi;
@@ -133,60 +117,89 @@ function reconstructCAsFromTweet(text: string): Set<string> {
   return filterCAKeepMaximal([...plain, ...fromPump, ...joined]);
 }
 
-/* ========================= Core of a single page ========================= */
+/* ========================= trigger helpers ========================= */
+function triggerInputFor(m: Mention) {
+  if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
+  if (m.source === "ca") return m.tokenKey || "";
+  if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
+  return `$${String(m.tokenKey || "").toUpperCase()}`;
+}
+function makeDeterministicTriggerKey(m: Mention): string {
+  if (m.source === "ca") {
+    const addr = canonAddr(String(m.tokenKey || ""));
+    return addr ? `ca:${addr}` : "ca:unknown";
+  }
+  if (m.source === "ticker")
+    return `tk:${String(m.tokenKey || "").toLowerCase()}`;
+  if (m.source === "phrase")
+    return `ph:${String(m.tokenKey || "").toLowerCase()}`;
+  return `uk:${String(m.tokenKey || "").toLowerCase()}`;
+}
+
+/* ========================= one-page runner ========================= */
 async function runDetectPage(
   params: {
     screen_name: string;
     days: number;
     missingOnly: boolean;
     limit: number;
-    cursor?: string | null;
+    cursor?: string;
     url: URL;
   },
   log: (e: any) => void,
 ) {
-  const { screen_name, days, missingOnly, limit, cursor, url } = params;
-  const handleRaw = screen_name.trim().replace(/^@+/, "");
-  const handle = handleRaw.toLowerCase();
-  const isAll = handle === "*" || handle === "all";
+  const { screen_name, days, missingOnly, limit, cursor } = params;
+  const isAll = screen_name === "*" || screen_name.toLowerCase() === "all";
+  const handle = isAll
+    ? null
+    : screen_name.trim().replace(/^@+/, "").toLowerCase();
 
   log({
     event: "start",
-    handle: isAll ? "*" : handle,
+    handle: handle ?? "*",
     days,
     missingOnly,
     limit,
+    cursor: cursor ?? null,
   });
 
-  // Time window [since, until)
+  // time window
   const now = new Date();
   const since = new Date(now);
   since.setDate(now.getDate() - (days - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
-  // Keyset pagination cursor
-  const cur = decodeCursor(cursor || url.searchParams.get("cursor"));
+  // paging cursor
+  const c = decCursor(cursor || undefined);
+  const cursorTs = c ? new Date(c.ts) : null;
+  const cursorId = c?.id ?? null;
 
-  // Base where
+  // base where
   const baseWhere = isAll
     ? and(gte(kolTweets.publishDate, since), lt(kolTweets.publishDate, until))
     : and(
-        eq(kolTweets.twitterUsername, handle),
+        eq(kolTweets.twitterUsername, handle!),
         gte(kolTweets.publishDate, since),
         lt(kolTweets.publishDate, until),
       );
 
-  // Add keyset predicate: (publish_date, tweet_id) < (cursor.ts, cursor.id) in DESC order
-  const where = cur
+  // cursor where (order: publishDate DESC, tweetId DESC)
+  const where = c
     ? and(
         baseWhere,
-        sql`(${kolTweets.publishDate}, ${kolTweets.tweetId}) < (${new Date(cur.ts)}, ${cur.id})`,
+        or(
+          lt(kolTweets.publishDate, cursorTs!),
+          and(
+            eq(kolTweets.publishDate, cursorTs!),
+            lt(kolTweets.tweetId, cursorId!),
+          ),
+        ),
       )
     : baseWhere;
 
-  // Load one page
-  const tweets = await db
+  // fetch one page
+  const page = await db
     .select({
       tweetId: kolTweets.tweetId,
       textContent: kolTweets.textContent,
@@ -197,24 +210,23 @@ async function runDetectPage(
     .orderBy(desc(kolTweets.publishDate), desc(kolTweets.tweetId))
     .limit(limit);
 
-  log({ event: "loaded", tweets: tweets.length });
+  log({ event: "loaded", tweets: page.length });
 
-  if (!tweets.length) {
-    const end = {
+  if (page.length === 0) {
+    return {
       ok: true,
-      handle: isAll ? "*" : handle,
-      pageCount: 0,
+      handle: handle ?? "*",
+      days,
+      scannedTweets: 0,
       mentionsDetected: 0,
       inserted: 0,
       updated: 0,
-      nextCursor: null as string | null,
+      nextCursor: null,
     };
-    log({ event: "done", ...end });
-    return end;
   }
 
-  // If missingOnly: filter out tweets that already have mentions
-  let candidates = tweets;
+  // missingOnly: drop tweets that already have mentions
+  let candidates = page;
   if (missingOnly) {
     const existing = await db
       .select({ tweetId: tweetTokenMentions.tweetId })
@@ -222,27 +234,25 @@ async function runDetectPage(
       .where(
         inArray(
           tweetTokenMentions.tweetId,
-          tweets.map((t) => t.tweetId),
+          page.map((t) => t.tweetId),
         ),
       );
     const has = new Set(existing.map((e) => e.tweetId));
-    candidates = tweets.filter((t) => !has.has(t.tweetId));
+    candidates = page.filter((t) => !has.has(t.tweetId));
   }
   log({ event: "candidates", count: candidates.length });
 
-  // Aggregate mentions
-  const all: {
+  // collect mentions
+  type Tuple = {
     tweetId: string;
     m: Mention;
     triggerKey: string;
     triggerText: string;
-  }[] = [];
+  };
+  const all: Tuple[] = [];
   const uniqueTickers = new Set<string>();
   const phraseNames = new Set<string>();
   const caSet = new Set<string>();
-
-  let processed = 0;
-  const PROGRESS_EVERY = 200;
 
   for (const t of candidates) {
     const rebuiltCAs = reconstructCAsFromTweet(t.textContent ?? "");
@@ -258,31 +268,25 @@ async function runDetectPage(
         } as Mention);
       }
     }
-
     for (const m of ext) {
       const input = triggerInputFor(m);
-      let trigKey = "";
-      let trigText = "";
+      let triggerKey = "";
+      let triggerText = "";
 
       if (m.source === "ca") {
         const addr = String(m.tokenKey || "");
-        trigKey = makeDeterministicTriggerKey(m); // "ca:<base58>"
-        trigText = addr || input;
+        triggerKey = makeDeterministicTriggerKey(m);
+        triggerText = addr || input;
       } else {
         const built = buildTriggerKeyWithText({
           source: m.source as any,
           value: input,
         });
-        trigKey = (built as any)?.key || makeDeterministicTriggerKey(m);
-        trigText = (built as any)?.text || input;
+        triggerKey = (built as any)?.key || makeDeterministicTriggerKey(m);
+        triggerText = (built as any)?.text || input;
       }
 
-      all.push({
-        tweetId: t.tweetId,
-        m,
-        triggerKey: trigKey,
-        triggerText: trigText,
-      });
+      all.push({ tweetId: t.tweetId, m, triggerKey, triggerText });
 
       if (m.source === "ca") {
         const addr = canonAddr(String(m.tokenKey || ""));
@@ -297,11 +301,6 @@ async function runDetectPage(
         if (name) phraseNames.add(name);
       }
     }
-
-    processed++;
-    if (processed % PROGRESS_EVERY === 0) {
-      log({ event: "extract_progress", processed, of: candidates.length });
-    }
   }
 
   log({
@@ -311,28 +310,27 @@ async function runDetectPage(
     cas: caSet.size,
   });
 
-  // Resolve symbols / names / CA
-  let resolved = new Map<
+  // resolve
+  let byTicker = new Map<
     string,
     { tokenKey: string; tokenDisplay: string; boostedConf: number }
   >();
-  let resolvedNames = new Map<
+  let byName = new Map<
     string,
     { tokenKey: string; tokenDisplay: string; boostedConf: number }
   >();
+
   try {
-    if (uniqueTickers.size)
-      log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
-    resolved = await resolveTickersToContracts([...uniqueTickers]);
-    if (uniqueTickers.size) log({ event: "resolve_tickers_done" });
+    log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
+    byTicker = await resolveTickersToContracts([...uniqueTickers]);
+    log({ event: "resolve_tickers_done" });
   } catch (e) {
     log({ event: "resolve_tickers_failed", error: String(e) });
   }
   try {
-    if (phraseNames.size)
-      log({ event: "resolve_names_begin", count: phraseNames.size });
-    resolvedNames = await resolveNamesToContracts([...phraseNames]);
-    if (phraseNames.size) log({ event: "resolve_names_done" });
+    log({ event: "resolve_names_begin", count: phraseNames.size });
+    byName = await resolveNamesToContracts([...phraseNames]);
+    log({ event: "resolve_names_done" });
   } catch (e) {
     log({ event: "resolve_names_failed", error: String(e) });
   }
@@ -341,7 +339,7 @@ async function runDetectPage(
     string,
     { tokenDisplay: string; boostedConf: number }
   >();
-  for (const [, r] of resolved.entries()) {
+  for (const [, r] of byTicker.entries()) {
     const addr = canonAddr(String(r.tokenKey || ""));
     if (addr)
       byContract.set(addr, {
@@ -361,13 +359,13 @@ async function runDetectPage(
           boostedConf: meta.boostedConf,
         });
       }
-      log({ event: "resolve_ca_done", hit: byContract.size });
+      log({ event: "resolve_ca_done", hit: Array.from(caMeta.keys()).length });
     } catch (e) {
       log({ event: "resolve_ca_failed", error: String(e) });
     }
   }
 
-  // Build rows
+  // build rows
   type Row = {
     tweetId: string;
     tokenKey: string;
@@ -378,7 +376,7 @@ async function runDetectPage(
     triggerText: string | null;
   };
   const rows: Row[] = [];
-  const seenPair = new Set<string>();
+  const seen = new Set<string>();
 
   for (const { tweetId, m, triggerKey, triggerText } of all) {
     let tokenKey = m.tokenKey;
@@ -393,14 +391,13 @@ async function runDetectPage(
         tokenDisplay = meta.tokenDisplay;
         confidence = Math.max(confidence, meta.boostedConf ?? 0);
       } else {
-        const short = addr ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : "????";
-        tokenDisplay = `$${short}`;
+        tokenDisplay = `$${addr?.slice(0, 4)}…${addr?.slice(-4)}`;
       }
     } else if (m.source === "ticker") {
       const disp = m.tokenDisplay?.startsWith("$")
         ? m.tokenDisplay
         : `$${String(m.tokenKey || "").toUpperCase()}`;
-      const r = resolved.get(disp.replace(/^\$+/, "").toLowerCase());
+      const r = byTicker.get(disp.replace(/^\$+/, "").toLowerCase());
       if (r) {
         tokenKey = r.tokenKey;
         tokenDisplay = r.tokenDisplay;
@@ -408,48 +405,48 @@ async function runDetectPage(
       }
     } else if (m.source === "phrase") {
       const q = (m.tokenDisplay || m.tokenKey || "").trim().toLowerCase();
-      const r = resolvedNames.get(q);
-      if (!r) continue; // keep table clean
+      const r = byName.get(q) ?? byName.get(`${q} coin`); // 容错
+      if (!r) continue; // 不落库未命中 phrase
       tokenKey = r.tokenKey;
       tokenDisplay = r.tokenDisplay;
       confidence = Math.max(confidence, r.boostedConf);
     }
 
-    const pair = `${tweetId}___${triggerKey}`;
-    if (seenPair.has(pair)) continue;
-    seenPair.add(pair);
+    const key = `${tweetId}___${triggerKey}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
 
     rows.push({
       tweetId,
       tokenKey: canonAddr(String(tokenKey || "")),
       tokenDisplay: tokenDisplay ?? (m.tokenDisplay || m.tokenKey),
       confidence: Math.min(100, Math.max(0, Math.round(confidence))),
-      source: m.source as any as Row["source"],
+      source: m.source as any,
       triggerKey,
       triggerText,
     });
   }
 
   if (!rows.length) {
-    const next = tweets[tweets.length - 1];
-    const nextCursor = encodeCursor({
-      ts: next.published.toISOString(),
-      id: next.tweetId,
-    });
-    const end = {
+    // next cursor
+    const last = page[page.length - 1];
+    const nextCursor = last
+      ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
+      : null;
+    log({ event: "done", rows: 0, inserted: 0, updated: 0, nextCursor });
+    return {
       ok: true,
-      handle: isAll ? "*" : handle,
-      pageCount: candidates.length,
+      handle: handle ?? "*",
+      days,
+      scannedTweets: candidates.length,
       mentionsDetected: 0,
       inserted: 0,
       updated: 0,
       nextCursor,
     };
-    log({ event: "done", ...end });
-    return end;
   }
 
-  // Upsert
+  // pre-check for counts
   const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
   const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
@@ -465,7 +462,6 @@ async function runDetectPage(
         inArray(tweetTokenMentions.triggerKey, triggers),
       ),
     );
-
   const existsMap = new Map(
     existingPairs.map((e) => [`${e.tweetId}___${e.triggerKey}`, e.tokenKey]),
   );
@@ -477,11 +473,10 @@ async function runDetectPage(
     return prev && prev !== r.tokenKey;
   }).length;
 
-  log({ event: "upsert_planning", rows: rows.length, willInsert, willUpdate });
-
-  const CHUNK = 200;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK);
+  // upsert chunked
+  const CH = 200;
+  for (let i = 0; i < rows.length; i += CH) {
+    const chunk = rows.slice(i, i + CH);
     await db
       .insert(tweetTokenMentions)
       .values(chunk)
@@ -498,45 +493,43 @@ async function runDetectPage(
       });
   }
 
-  const last = tweets[tweets.length - 1];
-  const nextCursor = encodeCursor({
-    ts: last.published.toISOString(),
-    id: last.tweetId,
+  // next cursor by整个 page 的最后一条（与排序一致）
+  const last = page[page.length - 1];
+  const nextCursor = last
+    ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
+    : null;
+
+  log({
+    event: "done",
+    rows: rows.length,
+    inserted: willInsert,
+    updated: willUpdate,
+    nextCursor,
   });
 
-  const end = {
+  return {
     ok: true,
-    handle: isAll ? "*" : handle,
-    pageCount: candidates.length,
+    handle: handle ?? "*",
+    days,
+    scannedTweets: candidates.length,
     mentionsDetected: rows.length,
     inserted: willInsert,
     updated: willUpdate,
     nextCursor,
   };
-  log({ event: "done", ...end });
-  return end;
 }
 
-/* ========================= Route ========================= */
-export async function POST(req: Request) {
-  const session = await getServerSession(authOptions);
-  const isAdmin = Boolean((session?.user as any)?.isAdmin);
-  const bySecret = allowByCronSecret(req);
-  if (!isAdmin && !bySecret) {
+/* ========================= GET (NDJSON or JSON) ========================= */
+export async function GET(req: Request) {
+  if (!allowByCronSecret(req)) {
     return NextResponse.json(
       { ok: false, error: "forbidden" },
       { status: 403 },
     );
   }
-
   const url = new URL(req.url);
-  const wantStream =
-    url.searchParams.get("stream") === "1" ||
-    url.searchParams.get("stream") === "true";
-
-  const { screen_name, days, missingOnly, limit, cursor } = Body.parse(
-    await req.json().catch(() => ({})),
-  );
+  const q = Q.parse(Object.fromEntries(url.searchParams.entries()));
+  const wantStream = !!q.stream;
 
   if (wantStream) {
     const encoder = new TextEncoder();
@@ -545,10 +538,19 @@ export async function POST(req: Request) {
         start(controller) {
           const write = (obj: any) =>
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+          // 立刻吐一行，避免 Vercel 空闲超时
+          write({ event: "hello", ts: Date.now() });
           (async () => {
             try {
               const result = await runDetectPage(
-                { screen_name, days, missingOnly, limit, cursor, url },
+                {
+                  screen_name: q.screen_name,
+                  days: q.days,
+                  missingOnly: q.missingOnly,
+                  limit: q.limit,
+                  cursor: q.cursor,
+                  url,
+                },
                 write,
               );
               write({ event: "result", result });
@@ -563,15 +565,85 @@ export async function POST(req: Request) {
       {
         headers: {
           "Content-Type": "application/x-ndjson",
-          "Cache-Control": "no-cache",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
         },
       },
     );
   }
 
   const result = await runDetectPage(
-    { screen_name, days, missingOnly, limit, cursor, url },
+    {
+      screen_name: q.screen_name,
+      days: q.days,
+      missingOnly: q.missingOnly,
+      limit: q.limit,
+      cursor: q.cursor,
+      url,
+    },
     () => {},
   );
+  return NextResponse.json(result);
+}
+
+/* ========================= POST （可选，同 GET） ========================= */
+export async function POST(req: Request) {
+  if (!allowByCronSecret(req)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden" },
+      { status: 403 },
+    );
+  }
+  const url = new URL(req.url);
+  const qs = Object.fromEntries(url.searchParams.entries());
+  const isStream = qs.stream === "1" || qs.stream === "true";
+
+  // body 支持 JSON；若无 body，走 query fallback
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+  const parsed = {
+    screen_name: String(body.screen_name ?? qs.screen_name ?? "*"),
+    days: Number(body.days ?? qs.days ?? 14),
+    missingOnly:
+      body.missingOnly ?? /^(1|true)$/i.test(String(qs.missingOnly ?? "true")),
+    limit: Number(body.limit ?? qs.limit ?? 200),
+    cursor: String(body.cursor ?? qs.cursor ?? "") || undefined,
+  };
+
+  if (isStream) {
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const write = (obj: any) =>
+            controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+          write({ event: "hello", ts: Date.now() });
+          (async () => {
+            try {
+              const result = await runDetectPage({ ...parsed, url }, write);
+              write({ event: "result", result });
+              controller.close();
+            } catch (e: any) {
+              write({ event: "error", message: e?.message || String(e) });
+              controller.close();
+            }
+          })();
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-ndjson",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+        },
+      },
+    );
+  }
+
+  const result = await runDetectPage({ ...parsed, url }, () => {});
   return NextResponse.json(result);
 }
