@@ -1,3 +1,5 @@
+// app/api/kols/resolve-user/route.ts
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
@@ -91,7 +93,8 @@ export async function POST(req: Request) {
     tweets?: number;
     dateCreated?: string;
     last_scanned_at?: string;
-    profile_image_url_https?: string;
+    avatar?: string;
+    avatar_thumb?: string;
   };
 
   const values = {
@@ -103,7 +106,7 @@ export async function POST(req: Request) {
     followers: Number(u.followers ?? 0),
     following: Number(u.followings ?? 0),
     accountCreationDate: u.dateCreated ? new Date(u.dateCreated) : undefined,
-    profileImgUrl: (u as any).profile_image_url_https || undefined,
+    profileImgUrl: u.avatar ?? u.avatar_thumb ?? undefined,
   };
 
   await db
