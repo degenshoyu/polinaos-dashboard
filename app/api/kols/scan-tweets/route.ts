@@ -1,27 +1,41 @@
-// app/api/kols/bulk-scan/route.ts
+// app/api/kols/scan-tweets/route.ts
+
+const ROUTE_ID = "/api/kols/scan-tweets";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { db } from "@/lib/db/client";
-import { kols } from "@/lib/db/schema";
-import { asc } from "drizzle-orm";
+import { kols, kolTweets, tweetTokenMentions } from "@/lib/db/schema";
+import { eq, sql, and, gte, lt, inArray } from "drizzle-orm";
+import { extractMentions } from "@/lib/tokens/extract";
+import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
+
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    routeId: ROUTE_ID,
+    ts: new Date().toISOString(),
+  });
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Give ourselves headroom, but still keep each invocation small/fast.
-export const maxDuration = 300;
 
-/** ===== Auth: allow admin session OR x-cron-secret (?secret=...) ===== */
+/** Allow admin session OR x-cron-secret (or ?secret=...) */
 async function ensureAuth(req: Request) {
+  // 1) Admin session
   const session = await getServerSession(authOptions);
   const isAdmin = Boolean((session?.user as any)?.isAdmin);
   if (isAdmin) return true;
 
+  // 2) Header: x-cron-secret
   const secret = process.env.CRON_SECRET;
   const hdr = req.headers.get("x-cron-secret") ?? "";
   if (secret && hdr && hdr === secret) return true;
 
+  // 3) Optional: query param ?secret=... (useful for providers that can't set headers)
   const url = new URL(req.url);
   const qs = url.searchParams.get("secret");
   if (secret && qs && qs === secret) return true;
@@ -29,276 +43,417 @@ async function ensureAuth(req: Request) {
   return false;
 }
 
-/** ===== Small helpers ===== */
-const clamp = (n: number, lo: number, hi: number) =>
-  Math.max(lo, Math.min(hi, n));
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-function originOf(req: Request) {
-  const proto = req.headers.get("x-forwarded-proto") ?? "http";
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
-  return `${proto}://${host}`;
-}
-
-/** Lightweight p-limit */
-function pLimit(concurrency: number) {
-  let active = 0;
-  const queue: Array<() => void> = [];
-  const next = () => {
-    active--;
-    if (queue.length > 0) queue.shift()?.();
-  };
-  return function <T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const run = () => {
-        active++;
-        fn()
-          .then((v) => resolve(v))
-          .catch(reject)
-          .finally(next);
-      };
-      if (active < concurrency) run();
-      else queue.push(run);
-    });
-  };
-}
-
-/** Per-item timeout wrapper for fetch/any promise */
-function withTimeout<T>(p: Promise<T>, ms: number, label = "task"): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const id = setTimeout(
-      () => reject(new Error(`${label} timeout ${ms}ms`)),
-      ms,
-    );
-    p.then((v) => {
-      clearTimeout(id);
-      resolve(v);
-    }).catch((e) => {
-      clearTimeout(id);
-      reject(e);
-    });
-  });
-}
-
-/** ===== Input schema =====
- * We accept limit / concurrency / offset from caller,
- * but we will clamp them to safe small values.
- */
+/** ===== Input schema ===== */
 const Body = z.object({
-  limit: z.number().int().min(1).max(1000).optional().default(5),
-  concurrency: z.number().int().min(1).max(16).optional().default(3),
-  offset: z.number().int().min(0).optional().default(0),
-  // Optional per-item timeout (ms), default 30s
-  itemTimeoutMs: z
+  screen_name: z.string().min(1),
+  rangeDays: z.number().int().min(1).max(14).optional().default(7),
+  pollIntervalMs: z.number().int().min(250).max(3000).optional().default(1000),
+  maxWaitMs: z
     .number()
     .int()
     .min(3000)
-    .max(120000)
+    .max(1800000)
     .optional()
-    .default(30000),
-  // Optional small delay between items batches (ms) to reduce pressure.
-  interDelayMs: z.number().int().min(0).max(5000).optional().default(0),
+    .default(1200000),
 });
 
-/** ===== POST /api/kols/bulk-scan ===== */
+const norm = (h: string) => h.trim().replace(/^@+/, "").toLowerCase();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const toBig = (v: unknown): bigint => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return BigInt(0);
+  try {
+    return BigInt(Math.trunc(n));
+  } catch {
+    return BigInt(0);
+  }
+};
+const ORIGIN = (req: Request) => {
+  const proto = req.headers.get("x-forwarded-proto") ?? "http";
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+  return `${proto}://${host}`;
+};
+
+/** Normalize remote tweet payload into kolTweets insert shape */
+function mapTweet(raw: any, fallbackHandle: string) {
+  const id = raw?.tweetId ?? raw?.id_str ?? raw?.id ?? raw?.tweet_id ?? "";
+  const text =
+    raw?.textContent ??
+    raw?.full_text ??
+    raw?.text ??
+    raw?.body ??
+    raw?.content ??
+    "";
+  const likes = raw?.likes ?? raw?.favorite_count ?? raw?.like_count ?? 0;
+  const rts = raw?.retweets ?? raw?.retweet_count ?? 0;
+  const replies = raw?.replies ?? raw?.reply_count ?? 0;
+  const views = raw?.views ?? raw?.impression_count ?? 0;
+  const createdAt =
+    raw?.datetime ??
+    raw?.created_at ??
+    raw?.publish_date ??
+    raw?.timestamp_ms ??
+    raw?.timestamp ??
+    null;
+  const screenName =
+    raw?.tweeter ??
+    raw?.user?.screen_name ??
+    raw?.screen_name ??
+    fallbackHandle;
+  const uid = raw?.user?.id_str ?? raw?.user?.id ?? raw?.twitter_uid ?? null;
+  const link =
+    raw?.statusLink ??
+    raw?.status_link ??
+    raw?.url ??
+    (id && screenName ? `https://x.com/${screenName}/status/${id}` : null);
+  const verified = raw?.isVerified ?? raw?.user?.verified ?? null;
+
+  return {
+    twitterUid: uid,
+    twitterUsername: String(screenName || fallbackHandle).toLowerCase(),
+    type: "tweet" as const,
+    textContent: text,
+    views: Number(views ?? 0),
+    likes: Number(likes ?? 0),
+    retweets: Number(rts ?? 0),
+    replies: Number(replies ?? 0),
+    publishDate: createdAt ? new Date(createdAt) : new Date(),
+    tweetId: String(id),
+    statusLink: link ? String(link) : null,
+    authorIsVerified: verified === null ? null : Boolean(verified),
+  };
+}
+
+/** Confidence fallback if extractMentions() didn't provide one */
+function resolveConfidence(m: any): number {
+  const n = Number(m?.confidence);
+  if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+  const kind = String(m?.kind || "").toLowerCase();
+  const v = String(
+    m?.ticker || m?.value || m?.symbol || m?.contract || m?.address || "",
+  );
+  // contract-like → 100; $ticker-like → 99; others → 90
+  if (kind === "contract" || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v))
+    return 100;
+  if (/^\$[A-Za-z0-9_]{2,20}$/.test(v)) return 99;
+  return 90;
+}
+
+/** Extract mentions from text, robust to function changes */
+function safeExtractMentions(text: string): any[] {
+  try {
+    const out = extractMentions?.(text);
+    if (Array.isArray(out)) return out;
+    if (out && Array.isArray((out as any).mentions))
+      return (out as any).mentions;
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/** POST /api/kols/scan-tweets */
 export async function POST(req: Request) {
-  const startedAt = Date.now();
-  const logs: string[] = []; // We will also console.log them.
-
-  function log(msg: string, obj?: unknown) {
-    const line = `[${new Date().toISOString()}] ${msg}${
-      obj !== undefined ? ` ${safePreview(obj)}` : ""
-    }`;
-    logs.push(line);
-    // Also print to Vercel logs:
-    console.log(line);
-  }
-
-  function safePreview(obj: unknown) {
-    try {
-      const s = JSON.stringify(obj);
-      return s.length > 800 ? s.slice(0, 800) + "...(trunc)" : s;
-    } catch {
-      return String(obj);
-    }
-  }
-
-  // --- Auth ---
+  // --- auth ---
   if (!(await ensureAuth(req))) {
-    log("forbidden: auth failed");
     return NextResponse.json(
-      { ok: false, error: "forbidden", logs },
+      { routeId: ROUTE_ID, ok: false, error: "forbidden" },
       { status: 403 },
     );
   }
 
-  // --- Parse input and clamp ---
-  let body: z.infer<typeof Body>;
-  try {
-    body = Body.parse(await req.json().catch(() => ({})));
-  } catch (e: any) {
-    log("bad request: invalid body", e?.message);
+  // --- parse input ---
+  const { screen_name, rangeDays, pollIntervalMs, maxWaitMs } = Body.parse(
+    await req.json(),
+  );
+  const handle = norm(screen_name);
+
+  // --- build ctsearch window: past 6 days ~ tomorrow (inclusive/exclusive) ---
+  const now = new Date();
+  const since = new Date(now);
+  since.setDate(now.getDate() - (rangeDays - 1));
+  const until = new Date(now);
+  until.setDate(now.getDate() + 1);
+  const startDate = since.toISOString().slice(0, 10);
+  const endDate = until.toISOString().slice(0, 10);
+
+  // --- start ctsearch job ---
+  const origin = ORIGIN(req);
+  const cookie = req.headers.get("cookie") ?? "";
+  const ctRes = await fetch(`${origin}/api/ctsearch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { cookie } : {}),
+    },
+    body: JSON.stringify({ twitterHandle: handle, startDate, endDate }),
+    cache: "no-store",
+  });
+  const ctText = await ctRes.text();
+  const m = ctText.match(/Job started:\s*([A-Za-z0-9_\-:.]+)/i);
+  const jobId = m?.[1];
+  if (!ctRes.ok || !jobId) {
     return NextResponse.json(
-      { ok: false, error: "bad_request", logs },
+      {
+        routeId: ROUTE_ID,
+        ok: false,
+        error: "ctsearch start failed",
+        status: ctRes.status,
+        preview: ctText.slice(0, 400),
+      },
+      { status: 502 },
+    );
+  }
+
+  // --- poll job status ---
+  const begin = Date.now();
+  let last: any = null;
+  while (Date.now() - begin < maxWaitMs) {
+    const r = await fetch(
+      `${origin}/api/jobProxy?job_id=${encodeURIComponent(jobId)}`,
+      {
+        cache: "no-store",
+        headers: cookie ? { cookie } : undefined,
+      },
+    );
+    const t = await r.text();
+    try {
+      last = JSON.parse(t);
+    } catch {
+      last = { error: "non-json", preview: t.slice(0, 300) };
+    }
+    const s = String(last?.status || "").toLowerCase();
+    if (s === "completed" || s === "failed") break;
+    await sleep(pollIntervalMs);
+  }
+  if (!last || String(last?.status).toLowerCase() !== "completed") {
+    return NextResponse.json(
+      {
+        routeId: ROUTE_ID,
+        ok: false,
+        error: "poll timeout or not completed",
+        last,
+      },
+      { status: 504 },
+    );
+  }
+
+  // --- map tweets ---
+  const rowsRaw: any[] = Array.isArray(last?.tweets)
+    ? last.tweets
+    : Array.isArray(last?.data?.tweets)
+      ? last.data.tweets
+      : Array.isArray(last?.result?.tweets)
+        ? last.result.tweets
+        : [];
+  const mapped = rowsRaw
+    .map((tw) => mapTweet(tw, handle))
+    .filter((x) => x.tweetId);
+
+  if (mapped.length === 0) {
+    return NextResponse.json({
+      routeId: ROUTE_ID,
+      ok: true,
+      handle,
+      job_id: jobId,
+      scanned: rowsRaw.length,
+      inserted: 0,
+      dupes: 0,
+      reason: "no mappable tweets in window",
+    });
+  }
+
+  // --- ensure kol record ---
+  const kol = await db.query.kols.findFirst({
+    where: eq(kols.twitterUsername, handle),
+  });
+  if (!kol?.twitterUid) {
+    return NextResponse.json(
+      {
+        routeId: ROUTE_ID,
+        ok: false,
+        error: "kol missing twitterUid; run resolve-user first",
+        handle,
+      },
       { status: 400 },
     );
   }
 
-  const LIMIT = clamp(body.limit ?? 5, 1, 5); // hard clamp to 5
-  const CONCURRENCY = clamp(body.concurrency ?? 3, 1, 3); // hard clamp to 3
-  const OFFSET = clamp(body.offset ?? 0, 0, 10_000_000);
-  const ITEM_TIMEOUT_MS = clamp(body.itemTimeoutMs ?? 30000, 3000, 120000);
-  const INTER_DELAY_MS = clamp(body.interDelayMs ?? 0, 0, 5000);
+  // --- upsert kol_tweets ---
+  const values = mapped.map((m) => ({
+    twitterUid: String(m.twitterUid ?? kol?.twitterUid ?? ""),
+    twitterUsername: String(kol?.twitterUsername ?? m.twitterUsername ?? ""),
+    type: m.type,
+    textContent: m.textContent,
+    views: toBig(m.views),
+    likes: m.likes,
+    retweets: m.retweets,
+    replies: m.replies,
+    publishDate: m.publishDate,
+    tweetId: String(m.tweetId ?? ""),
+    statusLink: m.statusLink,
+    authorIsVerified: m.authorIsVerified ?? null,
+  }));
 
-  log("input", { LIMIT, CONCURRENCY, OFFSET, ITEM_TIMEOUT_MS, INTER_DELAY_MS });
-
-  // --- Select targets: ORDER BY twitter_username ASC for deterministic paging ---
-  const targets =
-    (await db
-      .select({
-        twitterUsername: kols.twitterUsername,
+  let inserted = 0;
+  let dupes = 0;
+  try {
+    const res = await db
+      .insert(kolTweets)
+      .values(values)
+      .onConflictDoUpdate({
+        target: kolTweets.tweetId,
+        set: {
+          views: sql`GREATEST(${kolTweets.views}, EXCLUDED.views)`,
+          likes: sql`GREATEST(${kolTweets.likes}, EXCLUDED.likes)`,
+          retweets: sql`GREATEST(${kolTweets.retweets}, EXCLUDED.retweets)`,
+          replies: sql`GREATEST(${kolTweets.replies}, EXCLUDED.replies)`,
+          textContent: sql`COALESCE(EXCLUDED.text_content, ${kolTweets.textContent})`,
+          statusLink: sql`COALESCE(EXCLUDED.status_link, ${kolTweets.statusLink})`,
+          publishDate: sql`LEAST(${kolTweets.publishDate}, EXCLUDED.publish_date)`,
+          authorIsVerified: sql`COALESCE(EXCLUDED.author_is_verified, ${kolTweets.authorIsVerified})`,
+          lastSeenAt: sql`NOW()`,
+        },
       })
-      .from(kols)
-      .orderBy(asc(kols.twitterUsername))
-      .limit(LIMIT)
-      .offset(OFFSET)) ?? [];
-
-  log("targets selected", {
-    count: targets.length,
-    sample: targets.slice(0, 3),
-  });
-
-  if (targets.length === 0) {
-    const durationMs = Date.now() - startedAt;
-    log("no targets found for this page");
+      .returning({
+        tweetId: kolTweets.tweetId,
+        inserted: sql<boolean>`xmax = 0`,
+      });
+    const upserts = res.length;
+    inserted = res.reduce((n, r) => n + (r.inserted ? 1 : 0), 0);
+    dupes = upserts - inserted;
+  } catch (e: any) {
+    console.error("insert kolTweets error:", e);
     return NextResponse.json(
       {
-        ok: true,
-        scanned: 0,
-        offset: OFFSET,
-        limit: LIMIT,
-        nextOffset: OFFSET, // unchanged
-        durationMs,
-        logs,
+        routeId: ROUTE_ID,
+        ok: false,
+        error: "db insert failed",
+        reason: String(e?.message ?? e).slice(0, 300),
       },
-      { status: 200 },
+      { status: 500 },
     );
   }
 
-  const origin = originOf(req);
-  const secret =
-    req.headers.get("x-cron-secret") || process.env.CRON_SECRET || "";
-  const limiter = pLimit(CONCURRENCY);
+  // --- compute 7d totals for UI ---
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const agg = await db
+    .select({
+      totalTweets: sql<number>`COUNT(*)`,
+      totalViews: sql<number>`COALESCE(SUM(${kolTweets.views}), 0)`,
+      totalEngs: sql<number>`COALESCE(SUM(${kolTweets.likes} + ${kolTweets.retweets} + ${kolTweets.replies}), 0)`,
+    })
+    .from(kolTweets)
+    .where(
+      and(
+        eq(kolTweets.twitterUsername, handle),
+        gte(kolTweets.publishDate, sevenDaysAgo),
+        lt(kolTweets.publishDate, tomorrow),
+      ),
+    );
+  const totals = agg?.[0] ?? { totalTweets: 0, totalViews: 0, totalEngs: 0 };
 
-  // Run scans with per-item timeout and concurrency limit
-  let okCount = 0;
-  let failCount = 0;
-  const perItem: Array<{
-    handle: string;
-    ok: boolean;
-    status?: number;
-    error?: string;
-    summary?: unknown;
-    durationMs: number;
-  }> = [];
+  // === CONDITIONAL REBUILD OF MENTIONS (threshold 98) ===
+  // Only for tweets involved in this scan; skip if existing max(confidence) > 98.
+  const threshold = 98;
+  const tweetIds = mapped.map((m) => m.tweetId);
+  // Query current max confidence for these tweets
+  const confRows = tweetIds.length
+    ? await db
+        .select({
+          tweetId: tweetTokenMentions.tweetId,
+          maxConf: sql<number>`MAX(${tweetTokenMentions.confidence})`,
+        })
+        .from(tweetTokenMentions)
+        .where(inArray(tweetTokenMentions.tweetId, tweetIds))
+        .groupBy(tweetTokenMentions.tweetId)
+    : [];
+  const confMap = new Map<string, number>();
+  for (const r of confRows)
+    confMap.set(String(r.tweetId), Number(r.maxConf ?? 0));
 
-  for (let i = 0; i < targets.length; i++) {
-    const handle = String(targets[i].twitterUsername || "").toLowerCase();
-
-    // Optional small pacing between queueing tasks
-    if (INTER_DELAY_MS > 0 && i > 0) {
-      await sleep(INTER_DELAY_MS);
+  // Split to skip/rebuild sets
+  const needsRebuild = new Set<string>();
+  for (const id of tweetIds) {
+    const maxConf = confMap.get(id);
+    if (maxConf == null || !(maxConf > threshold)) {
+      needsRebuild.add(id);
     }
-
-    const task = async () => {
-      const t0 = Date.now();
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), ITEM_TIMEOUT_MS);
-
-      try {
-        // We call our internal scan endpoint; it accepts x-cron-secret too.
-        const res = await fetch(`${origin}/api/kols/scan-tweets`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            ...(secret ? { "x-cron-secret": secret } : {}),
-          },
-          body: JSON.stringify({ screen_name: handle }),
-          signal: ctrl.signal,
-          cache: "no-store",
-        });
-
-        const txt = await res.text();
-        let parsed: any = null;
-        try {
-          parsed = JSON.parse(txt);
-        } catch {
-          // not JSON; return preview
-          parsed = { preview: txt.slice(0, 400) };
-        }
-
-        const item = {
-          handle,
-          ok: res.ok,
-          status: res.status,
-          summary: {
-            inserted: parsed?.inserted,
-            dupes: parsed?.dupes,
-            totals: parsed?.totals,
-            mentions_checked: parsed?.mentions_checked,
-            mentions_rebuilt: parsed?.mentions_rebuilt,
-          },
-          durationMs: Date.now() - t0,
-        };
-        perItem.push(item);
-
-        if (res.ok) {
-          okCount++;
-          log(`scan OK: @${handle}`, item.summary);
-        } else {
-          failCount++;
-          log(`scan FAIL(${res.status}): @${handle}`, parsed);
-        }
-      } catch (e: any) {
-        failCount++;
-        const item = {
-          handle,
-          ok: false,
-          error: e?.name === "AbortError" ? "timeout" : String(e?.message ?? e),
-          durationMs: Date.now() - t0,
-        };
-        perItem.push(item);
-        log(`scan EXCEPTION: @${handle}`, item);
-      } finally {
-        clearTimeout(to);
-      }
-    };
-
-    // enqueue with concurrency limit
-    await limiter(task);
   }
 
-  // Wait a tick to flush all queued tasks
-  // (our limiter resolves per task; if you want strict "all done", you can wait Promise.all over an array)
-  // Here, tasks are awaited inline so we're already done.
+  // Delete old mentions for rebuild set
+  if (needsRebuild.size > 0) {
+    await db
+      .delete(tweetTokenMentions)
+      .where(inArray(tweetTokenMentions.tweetId, Array.from(needsRebuild)));
+  }
 
-  const durationMs = Date.now() - startedAt;
-  log("bulk-scan page done", { okCount, failCount, durationMs });
+  // Re-extract mentions for rebuild tweets
+  let mentionsInserted = 0;
+  if (needsRebuild.size > 0) {
+    const textById = new Map(
+      mapped.map((m) => [m.tweetId, m.textContent || ""]),
+    );
+    const rows: Array<typeof tweetTokenMentions.$inferInsert> = [];
+    for (const id of needsRebuild) {
+      const text = (textById.get(id) || "").trim();
+      if (!text) continue;
+      const triggerKey = (() => {
+        try {
+          return buildTriggerKeyWithText?.(text) || null;
+        } catch {
+          return null;
+        }
+      })();
+      const mentions = safeExtractMentions(text);
+      for (const m of mentions) {
+        const tokenDisplay =
+          m?.ticker?.toString?.() ||
+          m?.value?.toString?.() ||
+          m?.symbol?.toString?.() ||
+          "";
+        const contractRaw =
+          m?.contract?.toString?.() ||
+          m?.address?.toString?.() ||
+          m?.ca?.toString?.() ||
+          "";
+        if (!tokenDisplay && !contractRaw) continue;
+        rows.push({
+          tweetId: id,
+          tokenDisplay: tokenDisplay || null,
+          contractAddress: contractRaw || null,
+          source: "text" as any, // replace with mentionSource.text if you have enum
+          triggerKey,
+          confidence: resolveConfidence(m),
+        } as any);
+      }
+    }
+    if (rows.length) {
+      await db.insert(tweetTokenMentions).values(rows);
+      mentionsInserted = rows.length;
+    }
+  }
 
-  return NextResponse.json(
-    {
-      ok: true,
-      scanned: targets.length,
-      okCount,
-      failCount,
-      offset: OFFSET,
-      limit: LIMIT,
-      nextOffset: OFFSET + targets.length,
-      durationMs,
-      perItem,
-      logs, // full verbose logs for curl-based debugging
-    },
-    { status: 200 },
-  );
+  const mentionsChecked = tweetIds.length;
+  const mentionsSkipped = mentionsChecked - needsRebuild.size;
+  const mentionsRebuilt = needsRebuild.size;
+
+  return NextResponse.json({
+    routeId: ROUTE_ID,
+    ok: true,
+    handle,
+    job_id: jobId,
+    scanned: rowsRaw.length,
+    inserted,
+    dupes,
+    totals,
+    // mentions stats for visibility
+    mentions_checked: mentionsChecked,
+    mentions_skipped: mentionsSkipped, // already >98, not touched
+    mentions_rebuilt: mentionsRebuilt, // tweets we re-extracted
+    mentions_inserted: mentionsInserted, // rows inserted into tweet_token_mentions
+  });
 }

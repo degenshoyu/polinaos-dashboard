@@ -1,4 +1,7 @@
 // app/api/kols/bulk-scan/route.ts
+
+const ROUTE_ID = "/api/kols/bulk-scan";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
@@ -94,7 +97,7 @@ const Body = z.object({
 export async function GET() {
   return NextResponse.json({
     ok: true,
-    route: "/api/kols/bulk-scan",
+    routeId: ROUTE_ID,
     maxDuration,
     ts: new Date().toISOString(),
   });
@@ -138,7 +141,10 @@ export async function POST(req: Request) {
       // Auth
       if (!(await ensureAuth(req))) {
         await log("forbidden: auth failed");
-        await write('{"ok":false,"error":"forbidden"}\n');
+        await write(
+          JSON.stringify({ routeId: ROUTE_ID, ok: false, error: "forbidden" }) +
+            "\n",
+        );
         await writer.close();
         return;
       }
@@ -149,7 +155,13 @@ export async function POST(req: Request) {
         body = Body.parse(await req.json().catch(() => ({})));
       } catch (e: any) {
         await log("bad request: invalid body", e?.message);
-        await write('{"ok":false,"error":"bad_request"}\n');
+        await write(
+          JSON.stringify({
+            routeId: ROUTE_ID,
+            ok: false,
+            error: "bad_request",
+          }) + "\n",
+        );
         await writer.close();
         return;
       }
@@ -186,6 +198,7 @@ export async function POST(req: Request) {
         const durationMs = Date.now() - startedAt;
         await write(
           JSON.stringify({
+            routeId: ROUTE_ID,
             ok: true,
             scanned: 0,
             offset: OFFSET,
@@ -237,6 +250,22 @@ export async function POST(req: Request) {
               parsed = { preview: txt.slice(0, 500) };
             }
 
+            const EXPECTED_SCAN_ID = "/api/kols/scan-tweets";
+            if (
+              parsed &&
+              typeof parsed === "object" &&
+              "routeId" in parsed &&
+              parsed.routeId !== EXPECTED_SCAN_ID
+            ) {
+              failCount++;
+              await log(`FAIL @${handle} wrong-route`, {
+                got: parsed?.routeId,
+                expect: EXPECTED_SCAN_ID,
+                ms: Date.now() - t0,
+              });
+              return;
+            }
+
             if (res.ok) {
               okCount++;
               await log(`OK @${handle}`, {
@@ -244,6 +273,8 @@ export async function POST(req: Request) {
                 inserted: parsed?.inserted,
                 dupes: parsed?.dupes,
                 totals: parsed?.totals,
+                scanned: parsed?.scanned,
+                reason: parsed?.reason,
                 ms: Date.now() - t0,
               });
             } else {
@@ -274,6 +305,7 @@ export async function POST(req: Request) {
       // Final JSON line (so scripts can parse)
       await write(
         JSON.stringify({
+          routeId: ROUTE_ID,
           ok: true,
           scanned: targets.length,
           okCount,
@@ -289,6 +321,7 @@ export async function POST(req: Request) {
       try {
         await write(
           JSON.stringify({
+            routeId: ROUTE_ID,
             ok: false,
             error: "fatal",
             reason: String(e?.message ?? e),
