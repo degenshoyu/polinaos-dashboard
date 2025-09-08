@@ -339,11 +339,11 @@ export default function ReportModal({
 
     const parts: string[] = [
       `My weekly take on ${ticker} ’s Twitter performance 👇`,
+      "",
+      "1/ Executive Snapshot",
       `[ ${fmtDate(data?.start_date)} ~ ${fmtDateMinusOne(
         data?.end_date
       )} ]`,
-      "",
-      "1/ Executive Snapshot",
       snapshot,
       "",
       "2/ Verified Activity",
