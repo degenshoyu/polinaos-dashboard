@@ -11,23 +11,47 @@ export const dynamic = "force-dynamic";
 /** Query validation */
 const QuerySchema = z.object({
   handle: z.string().min(1, "handle is required"),
-  days: z.preprocess((v) => Number(v), z.union([z.literal(7), z.literal(30)])).default(7),
+  days: z
+    .preprocess((v) => Number(v), z.union([z.literal(7), z.literal(30)]))
+    .default(7),
   page: z.preprocess((v) => Number(v ?? 1), z.number().int().min(1)).default(1),
-  pageSize: z.preprocess((v) => Number(v ?? 10), z.number().int().min(1).max(50)).default(10),
+  pageSize: z
+    .preprocess((v) => Number(v ?? 10), z.number().int().min(1).max(50))
+    .default(10),
 });
 
-type CoinSnap = { tokenKey: string; tokenDisplay: string; priceUsdAt: number | null };
-type TweetItem = { id: string; text: string; url: string; createdAt: string; detectedCoins: CoinSnap[] };
-type ApiResp = { items: TweetItem[]; page: number; pageSize: number; total: number };
+type CoinSnap = {
+  tokenKey: string;
+  tokenDisplay: string;
+  priceUsdAt: number | null;
+};
+type TweetItem = {
+  id: string;
+  text: string;
+  url: string;
+  createdAt: string;
+  detectedCoins: CoinSnap[];
+};
+type ApiResp = {
+  items: TweetItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
 
 export async function GET(req: Request) {
   try {
+    // helper: shorten a base58 address for display
+    const shortAddr = (addr: string) =>
+      addr && addr.length > 8
+        ? `${addr.slice(0, 4)}…${addr.slice(-4)}`
+        : addr || "UNKNOWN";
     const url = new URL(req.url);
     const parsed = QuerySchema.safeParse(Object.fromEntries(url.searchParams));
     if (!parsed.success) {
       return NextResponse.json(
         { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -46,8 +70,8 @@ export async function GET(req: Request) {
         and(
           eq(kolTweets.twitterUsername, handle),
           gte(kolTweets.publishDate, since),
-          lt(kolTweets.publishDate, now)
-        )
+          lt(kolTweets.publishDate, now),
+        ),
       );
 
     const total = Number(count || 0);
@@ -60,8 +84,8 @@ export async function GET(req: Request) {
     const rows = await db
       .select({
         id: kolTweets.tweetId,
-        text: kolTweets.textContent,      // ← 你的 schema 用 text_content
-        url: kolTweets.statusLink,        // ← 你的 schema 用 status_link
+        text: kolTweets.textContent, // ← 你的 schema 用 text_content
+        url: kolTweets.statusLink, // ← 你的 schema 用 status_link
         createdAt: kolTweets.publishDate, // ← 时间维度用 publish_date
       })
       .from(kolTweets)
@@ -69,8 +93,8 @@ export async function GET(req: Request) {
         and(
           eq(kolTweets.twitterUsername, handle),
           gte(kolTweets.publishDate, since),
-          lt(kolTweets.publishDate, now)
-        )
+          lt(kolTweets.publishDate, now),
+        ),
       )
       .orderBy(desc(kolTweets.publishDate))
       .limit(pageSize)
@@ -96,7 +120,7 @@ export async function GET(req: Request) {
       const arr = mByTweet.get(m.tweetId) || [];
       arr.push({
         tokenKey: m.tokenKey,
-        tokenDisplay: m.tokenDisplay,
+        tokenDisplay: m.tokenDisplay ?? shortAddr(m.tokenKey),
         priceUsdAt: m.priceUsdAtRaw == null ? null : Number(m.priceUsdAtRaw),
       });
       mByTweet.set(m.tweetId, arr);
@@ -123,8 +147,7 @@ export async function GET(req: Request) {
     console.error("[/api/kols/tweets] ERROR:", err);
     return NextResponse.json(
       { error: err?.message ?? "Internal Server Error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
-
