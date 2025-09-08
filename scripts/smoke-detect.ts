@@ -6,6 +6,7 @@ const tweets = [
   { tweetId: "T1", textContent: "I love $POPCAT. bonk to the moon!" },
   { tweetId: "T2", textContent: "New gem at pump.fun/coin/xxxx ... $USDUC" },
   { tweetId: "T3", textContent: "that unstable coin is everywhere" },
+  { tweetId: "T4", textContent: "here is $homeless" },
 ];
 
 (async () => {
