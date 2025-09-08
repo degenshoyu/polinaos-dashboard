@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { KolRow } from "@/components/types";
 import { totalsFromRow } from "@/lib/kols";
 import { useKolAggregations } from "@/hooks/useKolAggregations";
@@ -11,6 +11,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { KolsHeaderControls, type SortKey, type ScopeKey, type CoinOpt } from "./KolsHeaderControls";
 import { LeaderboardHeader } from "./LeaderboardHeader";
 import { LeaderboardRow, type CoinStat } from "./LeaderboardRow";
+import { Pagination, PAGE_SIZE_OPTIONS } from "./Pagination";
+import MobileRow from "./MobileRow";
 
 /* ---------- local utils ---------- */
 export default function KolsLeaderboardClient({
@@ -31,6 +33,8 @@ export default function KolsLeaderboardClient({
   const [sortKey, setSortKey] = useState<SortKey>("tweets");
   const [scope, setScope] = useState<ScopeKey>("shills");
   const [coinKey, setCoinKey] = useState<string | null>(null);
+  const [page, setPage] = useState<number>(1);             // 1-based
+  const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
 
   const { refreshing, refreshVisible } = useKolAggregations();
   const rows = initialRows ?? [];
@@ -60,7 +64,7 @@ export default function KolsLeaderboardClient({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const ck = (coinKey || "").toLowerCase();
-    return rows.filter((r) => {
+    const out = rows.filter((r) => {
       // text search
       const u = (r.twitterUsername || "").toLowerCase();
       const d = (r.displayName || "").toLowerCase();
@@ -75,6 +79,7 @@ export default function KolsLeaderboardClient({
       });
       return textOk && hit;
     });
+    return out;
   }, [rows, query, coinKey]);
 
   /** Enrich, compute totals & shills metrics, then sort by (scope × sortKey) */
@@ -138,6 +143,15 @@ export default function KolsLeaderboardClient({
   }, [filtered, sortKey, scope]);
 
   const empty = ranked.length === 0;
+  const total = ranked.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(Math.max(1, page), pageCount);
+  const start = (safePage - 1) * pageSize;
+  const end = start + pageSize;
+  const paged = ranked.slice(start, end);
+
+  // Reset to page 1 when filters/sorts change
+  useEffect(() => { setPage(1); }, [query, coinKey, sortKey, scope, daysFromUrl]);
 
   // URL setter for days
   function setDays(d: 7 | 30) {
@@ -194,8 +208,45 @@ export default function KolsLeaderboardClient({
         />
       </div>
 
-      {/* Table container */}
-      <div className="relative z-0 rounded-2xl border border-white/10 bg-white/5 overflow-visible">
+      {/* === Mobile list (cards) === */}
+      <div className="md:hidden space-y-3">
+        {ranked.length === 0 ? (
+          <div className="px-3 py-6 text-center text-sm text-gray-400">No KOLs found.</div>
+        ) : (
+          ranked.map((x, idx) => (
+            <MobileRow
+              key={(x.row as any).twitterUsername || idx}
+              r={x.row}
+              rank={idx + 1}
+              totals={{
+                tweets: x.totalTweets,
+                views: x.totalViews,
+                engs: x.totalEngs,
+                er: x.totalER,
+              }}
+              shills={{
+                tweets: x.shTweets,
+                views: x.shViews,
+                engs: x.shEngs,
+                er: x.shER,
+              }}
+              coinsAll={(x.coins || (x.row as any).coinsTop || []) as CoinStat[]}
+            />
+          ))
+        )}
+      </div>
+
+      {/* Top pagination */}
+      <Pagination
+        total={total}
+        page={safePage}
+        pageSize={pageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(s) => { setPageSize(s); setPage(1); }}
+      />
+
+      {/* === Desktop table === */}
+      <div className="relative z-0 hidden md:block rounded-2xl border border-white/10 bg-white/5 overflow-visible">
         <LeaderboardHeader days={daysFromUrl} totalTooltip={totalTooltip} shillTooltip={shillTooltip} />
 
         {/* BODY */}
@@ -203,11 +254,11 @@ export default function KolsLeaderboardClient({
           {empty ? (
             <div className="px-3 py-6 text-center text-sm text-gray-400">No KOLs found.</div>
           ) : (
-            ranked.map((x, idx) => (
+            paged.map((x, idx) => (
               <LeaderboardRow
                 key={(x.row as any).twitterUsername || idx}
                 r={x.row}
-                rank={idx + 1}
+                rank={(start + idx) + 1}
                 totals={{
                   tweets: x.totalTweets,
                   views: x.totalViews,
@@ -226,6 +277,14 @@ export default function KolsLeaderboardClient({
           )}
         </div>
       </div>
+      {/* Bottom pagination */}
+      <Pagination
+        total={total}
+        page={safePage}
+        pageSize={pageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(s) => { setPageSize(s); setPage(1); }}
+      />
     </div>
   );
 }

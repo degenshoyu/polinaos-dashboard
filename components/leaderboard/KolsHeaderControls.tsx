@@ -36,9 +36,19 @@ export function KolsHeaderControls({
   onSetCoinKey: (k: string | null) => void;
 }) {
   return (
-    <div className="relative z-[60] w-full flex flex-nowrap items-center gap-2 overflow-x-auto overflow-y-visible [-webkit-overflow-scrolling:touch]">
+    <div className="
+      relative z-[60] w-full
+      grid grid-cols-[1fr_auto] items-end gap-2
+      overflow-x-auto overflow-y-visible [-webkit-overflow-scrolling:touch]
+      md:flex md:flex-nowrap md:items-center
+    ">
       {/* Search (controlled width; inline with the rest) */}
-      <div className="relative z-[60] shrink-0 flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 min-w-[240px] max-w-[380px] w-[min(38vw,380px)]">
+      <div className="
+        relative z-[60] shrink-0 self-end
+        flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2
+        w-full min-w-0
+        md:min-w-[240px] md:max-w-[380px] md:w-[min(38vw,380px)]
+      ">
         <Search size={16} className="text-gray-400" />
         <input
           value={query}
@@ -50,8 +60,9 @@ export function KolsHeaderControls({
       </div>
 
       {/* Right group */}
-      <div className="ml-auto flex flex-wrap items-center gap-2">
+      <div className="ml-auto flex flex-col items-stretch gap-2 md:flex-row md:flex-wrap md:items-center">
         {/* Period */}
+        <div className="w-full md:w-auto">
         <Dropdown
           label={`${days === 7 ? "7d" : "30d"} Period`}
           icon={<CalendarDays size={16} className="text-gray-300" />}
@@ -59,6 +70,7 @@ export function KolsHeaderControls({
           <MenuItem active={days === 7} onClick={() => onSetDays(7)}>7 days</MenuItem>
           <MenuItem active={days === 30} onClick={() => onSetDays(30)}>30 days</MenuItem>
         </Dropdown>
+        </div>
 
         {/* Sort metric (only four options) */}
         <Dropdown
