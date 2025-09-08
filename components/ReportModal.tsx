@@ -301,26 +301,26 @@ export default function ReportModal({
   /** ===== Report text ===== */
   const report = useMemo(() => {
     const snapshot = [
-      `🚮 ${rowsAllRaw.length - rowsAll.length} spam tweets removed from analysis`,
-      `🧵 ${aggAll.tweets} total tweets`,
-      `👀 ${compact(aggAll.views)} total views | ${compact(
+      `- ${rowsAllRaw.length - rowsAll.length} spam tweets removed from analysis`,
+      `- ${aggAll.tweets} total tweets`,
+      `- ${compact(aggAll.views)} total views | ${compact(
         avgAllViews
       )} avg views`,
-      `💬 ${compact(aggAll.engs)} total engagements | ${compact(
+      `- ${compact(aggAll.engs)} total engagements | ${compact(
         avgAllEngs
       )} avg engs`,
-      `📈 ${pct(aggAll.er)} ER`,
+      `- ${pct(aggAll.er)} ER`,
     ].join("\n");
 
     const verActivity = [
-      `🧵 ${aggVer.tweets} verified tweets`,
-      `👀 ${compact(aggVer.views)} verified views | ${compact(
+      `- ${aggVer.tweets} verified tweets`,
+      `- ${compact(aggVer.views)} verified views | ${compact(
         aggVer.tweets ? aggVer.views / aggVer.tweets : 0
       )} avg views`,
-      `💬 ${compact(aggVer.engs)} verified engagements | ${compact(
+      `- ${compact(aggVer.engs)} verified engagements | ${compact(
         aggVer.tweets ? aggVer.engs / aggVer.tweets : 0
       )} avg engs`,
-      `📈 ${pct(aggVer.er)} ER`,
+      `- ${pct(aggVer.er)} ER`,
       "",
       `✅ ${pct(verShare)} verified views share: ${(() => {
         if (verShare >= 0.75)
@@ -460,4 +460,3 @@ export default function ReportModal({
     </div>
   );
 }
-
