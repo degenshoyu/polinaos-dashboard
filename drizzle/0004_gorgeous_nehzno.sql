@@ -1,0 +1,1 @@
+ALTER TABLE "tweet_token_mentions" ADD COLUMN "price_usd_at" numeric(18, 8);

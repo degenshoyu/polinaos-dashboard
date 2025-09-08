@@ -202,16 +202,8 @@ export async function processTweetsToRows(
   >();
 
   try {
-    const normalizedTickers = [...uniqueTickers]
-      .map((t) => t.replace(/^\$+/, "").toLowerCase())
-      .filter(Boolean);
-
-    log({
-      event: "resolve_tickers_begin",
-      collected: uniqueTickers.size,
-      normalized: normalizedTickers.length,
-    });
-    byTicker = await resolveTickersToContracts(normalizedTickers);
+    log({ event: "resolve_tickers_begin", count: uniqueTickers.size });
+    byTicker = await resolveTickersToContracts([...uniqueTickers]);
     log({ event: "resolve_tickers_done" });
   } catch (e) {
     log({ event: "resolve_tickers_failed", error: String(e) });

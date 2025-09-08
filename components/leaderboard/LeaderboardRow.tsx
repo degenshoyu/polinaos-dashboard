@@ -32,12 +32,14 @@ export function LeaderboardRow({
   totals,
   shills,
   coinsAll,
+  onOpen,
 }: {
   r: any;
   rank: number;
   totals: { tweets: number; views: number; engs: number; er: number };
   shills: { tweets: number; views: number; engs: number; er: number };
   coinsAll: CoinStat[];
+  onOpen?: (info: { twitterUsername: string; displayName?: string; profileImgUrl?: string }) => void;
 }) {
   /** Merge duplicates BEFORE rendering to guarantee unique keys:
    *  - Prefer c.tokenKey (contract or canonical key) as uniqueness
@@ -82,8 +84,22 @@ export function LeaderboardRow({
     rank === 2 ? <Medal size={16} className="text-gray-300" /> :
     rank === 3 ? <Medal size={16} className="text-amber-500" /> : null;
 
+  const open = () => {
+    onOpen?.({
+      twitterUsername: r.twitterUsername,
+      displayName: r.displayName,
+      profileImgUrl: r.profileImgUrl,
+    });
+  };
+
   return (
-    <div className="grid grid-cols-12 gap-2 px-3 py-3 items-center">
+    <div
+      className="grid grid-cols-12 gap-2 px-3 py-3 items-center cursor-pointer hover:bg-white/5 transition"
+      onClick={open}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && open()}
+    >
       {/* KOL */}
       <div className="col-span-2 flex items-center gap-3 min-w-0 border-r border-white/10">
         <img
@@ -100,6 +116,7 @@ export function LeaderboardRow({
               rel="noopener noreferrer"
               className="truncate text-sm text-white hover:underline"
               title={r.bio || ""}
+              onClick={(e) => e.stopPropagation()}
             >
               {r.displayName || r.twitterUsername}
             </a>

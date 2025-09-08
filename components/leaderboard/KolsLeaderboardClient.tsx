@@ -13,6 +13,7 @@ import { LeaderboardHeader } from "./LeaderboardHeader";
 import { LeaderboardRow, type CoinStat } from "./LeaderboardRow";
 import { Pagination, PAGE_SIZE_OPTIONS } from "./Pagination";
 import MobileRow from "./MobileRow";
+import KolTweetsModal from "./KolTweetsModal";
 
 /* ---------- local utils ---------- */
 export default function KolsLeaderboardClient({
@@ -38,6 +39,10 @@ export default function KolsLeaderboardClient({
 
   const { refreshing, refreshVisible } = useKolAggregations();
   const rows = initialRows ?? [];
+
+  const [selectedKol, setSelectedKol] = useState<{
+    twitterUsername: string; displayName?: string; profileImgUrl?: string;
+  } | null>(null);
 
   /** Build coin options for filter (merge by tokenKey/tokenDisplay) */
   const coinOptions: CoinOpt[] = useMemo(() => {
@@ -272,11 +277,23 @@ export default function KolsLeaderboardClient({
                   er: x.shER,
                 }}
                 coinsAll={(x.coins || (x.row as any).coinsTop || []) as CoinStat[]}
+                onOpen={(info) => setSelectedKol(info)}
               />
             ))
           )}
         </div>
       </div>
+
+      {selectedKol && (
+        <KolTweetsModal
+          open={!!selectedKol}
+          onClose={() => setSelectedKol(null)}
+          handle={selectedKol.twitterUsername}
+          displayName={selectedKol.displayName}
+          avatar={selectedKol.profileImgUrl}
+          initialDays={daysFromUrl as 7 | 30}
+        />
+      )}
       {/* Bottom pagination */}
       <Pagination
         total={total}

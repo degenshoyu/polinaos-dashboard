@@ -227,6 +227,9 @@ export const tweetTokenMentions = pgTable(
 
     triggerKey: text("trigger_key"),
     triggerText: text("trigger_text"),
+    priceUsdAt: numeric("price_usd_at", { precision: 18, scale: 8 }).$type<
+      string | null
+    >(),
     ...timestamps,
   },
   (t) => ({
