@@ -37,7 +37,7 @@ export default function Navbar() {
   const isLoggedIn = status === "authenticated" && !!sessionWallet;
 
   return (
-    <header className="sticky top-0 z-50 flex justify-center px-3 py-4 md:px-4">
+    <header className="sticky top-0 z-[1000] flex justify-center px-3 py-4 md:px-4">
       <div
         className="
           w-full max-w-6xl rounded-full
