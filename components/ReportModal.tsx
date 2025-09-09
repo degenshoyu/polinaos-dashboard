@@ -63,9 +63,9 @@ export default function ReportModal({
   const compact = (v: number) => {
     if (!Number.isFinite(v)) return "0";
     const abs = Math.abs(v);
-    if (abs >= 1e9) return (v / 1e9).toFixed(2).replace(/\.00?$/, "") + "B";
-    if (abs >= 1e6) return (v / 1e6).toFixed(2).replace(/\.00?$/, "") + "M";
-    if (abs >= 1e3) return (v / 1e3).toFixed(2).replace(/\.00?$/, "") + "K";
+    if (abs >= 1e9) return (v / 1e9).toFixed(1).replace(/\.00?$/, "") + "B";
+    if (abs >= 1e6) return (v / 1e6).toFixed(1).replace(/\.00?$/, "") + "M";
+    if (abs >= 1e3) return (v / 1e3).toFixed(1).replace(/\.00?$/, "") + "K";
     return String(Math.round(v));
   };
   const pct = (v: number) => (v * 100).toFixed(1).replace(/\.0$/, "") + "%";
@@ -301,26 +301,26 @@ export default function ReportModal({
   /** ===== Report text ===== */
   const report = useMemo(() => {
     const snapshot = [
-      `- ${rowsAllRaw.length - rowsAll.length} spam tweets removed from analysis`,
-      `- ${aggAll.tweets} total tweets`,
-      `- ${compact(aggAll.views)} total views | ${compact(
+      // `- ${rowsAllRaw.length - rowsAll.length} spam tweets removed from analysis`,
+      `• ${aggAll.tweets} total tweets analyzed (spams excluded)`,
+      `• ${compact(aggAll.views)} total views | ${compact(
         avgAllViews
       )} avg views`,
-      `- ${compact(aggAll.engs)} total engagements | ${compact(
+      `• ${compact(aggAll.engs)} total engagements | ${compact(
         avgAllEngs
       )} avg engs`,
-      `- ${pct(aggAll.er)} ER`,
+      `• ${pct(aggAll.er)} ER`,
     ].join("\n");
 
     const verActivity = [
-      `- ${aggVer.tweets} verified tweets`,
-      `- ${compact(aggVer.views)} verified views | ${compact(
+      `• ${aggVer.tweets} verified tweets`,
+      `• ${compact(aggVer.views)} verified views | ${compact(
         aggVer.tweets ? aggVer.views / aggVer.tweets : 0
       )} avg views`,
-      `- ${compact(aggVer.engs)} verified engagements | ${compact(
+      `• ${compact(aggVer.engs)} verified engagements | ${compact(
         aggVer.tweets ? aggVer.engs / aggVer.tweets : 0
       )} avg engs`,
-      `- ${pct(aggVer.er)} ER`,
+      `• ${pct(aggVer.er)} ER`,
       "",
       `✅ ${pct(verShare)} verified views share: ${(() => {
         if (verShare >= 0.75)
@@ -340,16 +340,19 @@ export default function ReportModal({
     const parts: string[] = [
       `My weekly take on ${ticker} ’s Twitter performance 👇`,
       "",
-      "1/ Executive Snapshot",
+      "1/ Executive Snapshot 📊",
       `[ ${fmtDate(data?.start_date)} ~ ${fmtDateMinusOne(
         data?.end_date
       )} ]`,
       snapshot,
       "",
-      "2/ Verified Activity",
+      "2/ Verified Activity ✅",
       verActivity,
       "",
       buildTopBlock("3/ Top Shillers 🏆", topShillers, 5),
+      "",
+      `• ${rowsAllRaw.length} relevant tweets collected`,
+      `• ${rowsAllRaw.length - rowsAll.length} spam tweets removed from analysis`,
       "",
       `Turn raw X (Twitter) chatter about your token and KOLs into decisions. @PolinaAIOS delivers AI-native, actionable insights.`,
       "",
