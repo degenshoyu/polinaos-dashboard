@@ -92,6 +92,7 @@ export default function InputCard({
       dex: opt.dex ?? undefined,
     });
     onMetaUpdate?.({
+      symbol: opt.symbol,
       marketCapUsd: (opt as any).marketCap ?? (opt as any).fdv ?? undefined,
       volume24hUsd: (opt as any).vol24h,
       createdAt: normalizeCreatedAt((opt as any).createdAt),

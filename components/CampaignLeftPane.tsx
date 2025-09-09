@@ -1,7 +1,7 @@
 // components/CampaignLeftPane.tsx
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AiUnderstanding } from "@/components/AiUnderstanding";
 import InputCard from "@/components/InputCard";
 import type { AnalysisInput } from "@/components/types";
@@ -41,6 +41,8 @@ export default function CampaignLeftPane({
   contractAddress?: string | null;
   className?: string;
 }) {
+  const [localTicker, setLocalTicker] = useState<string | null>(ticker ?? null);
+
   return (
     <div className={`flex flex-col gap-6 w-full ${className}`}>
       {/* === Search card === */}
@@ -49,13 +51,16 @@ export default function CampaignLeftPane({
           <h2 className="text-xl font-bold bg-gradient-to-r from-[#2fd480] via-[#3ef2ac] to-[#27a567] text-transparent bg-clip-text">
             Search
           </h2>
-          {deepLinkUrl ? <ShareDropdown url={deepLinkUrl} ticker={ticker} /> : null}
+          {deepLinkUrl ? <ShareDropdown url={deepLinkUrl} ticker={localTicker ?? ticker ?? null} /> : null}
         </div>
 
         <InputCard
           onRun={onRun}
           deepLinkUrl={deepLinkUrl}
-          onMetaUpdate={onMetaUpdate}
+          onMetaUpdate={(meta) => {
+          if (meta?.symbol) setLocalTicker(meta.symbol);
+          onMetaUpdate?.(meta);
+          }}
         />
       </div>
 
@@ -83,10 +88,39 @@ export default function CampaignLeftPane({
 }
 
 /* ─────────────────────────────
- * Share Dropdown
+ * Share Dropdown (robust ticker)
  * ───────────────────────────── */
 function ShareDropdown({ url, ticker }: { url: string; ticker?: string | null }) {
   const [copied, setCopied] = useState(false);
+  const [copiedEmbed, setCopiedEmbed] = useState(false);
+  const [localTicker, setLocalTicker] = useState<string | null>(null);
+
+  const parseTickerFromUrl = (u?: string) => {
+    try {
+      if (!u) return null;
+      const usp = new URL(u, typeof window !== "undefined" ? window.location.origin : "https://example.com").searchParams;
+      return usp.get("ticker") || usp.get("symbol") || usp.get("t");
+    } catch {
+      return null;
+    }
+  };
+
+  const normalizeTicker = (t?: string | null) => {
+    if (!t) return null;
+    const v = t.trim();
+    if (!v) return null;
+    const up = v.toUpperCase();
+    return up.startsWith("$") ? up : `$${up}`;
+  };
+
+  useEffect(() => {
+    const pref = normalizeTicker(ticker);
+    if (pref) {
+      setLocalTicker(pref);
+    } else {
+      setLocalTicker(normalizeTicker(parseTickerFromUrl(url)));
+    }
+  }, [ticker, url]);
 
   const onCopy = async () => {
     try {
@@ -99,17 +133,22 @@ function ShareDropdown({ url, ticker }: { url: string; ticker?: string | null })
   };
 
   const onShareX = () => {
-    const text = `Check out this CT analysis on ${ticker ?? ""} by @PolinaAIOS 👉 ${url}`;
+    const text = localTicker
+      ? `Check out this CT analysis on ${localTicker} by @PolinaAIOS 👉 ${url}`
+      : `Check out this CT analysis by @PolinaAIOS 👉 ${url}`;
     const shareUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(text)}`;
     window.open(shareUrl, "_blank", "noopener,noreferrer");
   };
 
-  const onEmbed = () => {
-    const code = `<iframe src="${url}" width="600" height="400"></iframe>`;
-    navigator.clipboard.writeText(code).catch(() => {
+  const onEmbed = async () => {
+    const code = `<iframe src="${url}" style="width:100%;height:600px;border:0;border-radius:12px;" loading="lazy" allowfullscreen></iframe>`;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedEmbed(true);
+      setTimeout(() => setCopiedEmbed(false), 1500);
+    } catch {
       window.prompt("Copy embed code:", code);
-    });
-    alert("Embed code copied!");
+    }
   };
 
   return (
@@ -128,8 +167,12 @@ function ShareDropdown({ url, ticker }: { url: string; ticker?: string | null })
         <DropdownMenuItem onClick={onCopy}>
           {copied ? "Copied ✓" : "Copy Link"}
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={onShareX}>Share to X</DropdownMenuItem>
-        <DropdownMenuItem onClick={onEmbed}>Embed Code</DropdownMenuItem>
+        <DropdownMenuItem onClick={onShareX}>
+          {localTicker ? `Share to X` : "Share to X"}
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={onEmbed}>
+          {copiedEmbed ? "Embed copied ✓" : "Embed Code"}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
