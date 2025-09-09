@@ -302,25 +302,27 @@ export default function ReportModal({
   const report = useMemo(() => {
     const snapshot = [
       // `- ${rowsAllRaw.length - rowsAll.length} spam tweets removed from analysis`,
-      `• ${aggAll.tweets} total tweets analyzed (spams excluded)`,
-      `• ${compact(aggAll.views)} total views | ${compact(
+      "",
+      `${aggAll.tweets} total tweets analyzed`,
+      `${compact(aggAll.views)} total views | ${compact(
         avgAllViews
       )} avg views`,
-      `• ${compact(aggAll.engs)} total engagements | ${compact(
+      `${compact(aggAll.engs)} total engagements | ${compact(
         avgAllEngs
       )} avg engs`,
-      `• ${pct(aggAll.er)} ER`,
+      `${pct(aggAll.er)} ER`,
     ].join("\n");
 
     const verActivity = [
-      `• ${aggVer.tweets} verified tweets`,
-      `• ${compact(aggVer.views)} verified views | ${compact(
+      "",
+      `${aggVer.tweets} tweets`,
+      `${compact(aggVer.views)} views | ${compact(
         aggVer.tweets ? aggVer.views / aggVer.tweets : 0
       )} avg views`,
-      `• ${compact(aggVer.engs)} verified engagements | ${compact(
+      `${compact(aggVer.engs)} engagements | ${compact(
         aggVer.tweets ? aggVer.engs / aggVer.tweets : 0
       )} avg engs`,
-      `• ${pct(aggVer.er)} ER`,
+      `${pct(aggVer.er)} ER`,
       "",
       `✅ ${pct(verShare)} verified views share: ${(() => {
         if (verShare >= 0.75)
@@ -340,13 +342,14 @@ export default function ReportModal({
     const parts: string[] = [
       `My weekly take on ${ticker} ’s Twitter performance 👇`,
       "",
-      "1/ Executive Snapshot 📊",
       `[ ${fmtDate(data?.start_date)} ~ ${fmtDateMinusOne(
         data?.end_date
       )} ]`,
+      "",
+      "1/ Executive Snapshot 📊",
       snapshot,
       "",
-      "2/ Verified Activity ✅",
+      "2/ Verified Accounts Activity ✅",
       verActivity,
       "",
       buildTopBlock("3/ Top Shillers 🏆", topShillers, 5),
