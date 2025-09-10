@@ -3,23 +3,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
-import {
-  and,
-  or,
-  eq,
-  lt,
-  gte,
-  desc,
-  inArray,
-  sql,
-  isNull,
-  asc,
-} from "drizzle-orm";
+import { and, or, eq, lt, gte, desc, inArray, sql } from "drizzle-orm";
 import { processTweetsToRows } from "@/lib/kols/detectEngine";
-import {
-  listTopPoolsByToken,
-  priceAtTsWithFallbacks,
-} from "@/lib/pricing/geckoterminal";
 
 /* ========================= Runtime ========================= */
 export const runtime = "nodejs";
@@ -44,7 +29,7 @@ function allowByCronSecret(req: Request) {
 
 /* ========================= Query schema ========================= */
 const Q = z.object({
-  screen_name: z.string().min(1).default("*"),
+  screen_name: z.string().min(1).default("*"), // "*" / "all" 表示全库
   days: z.coerce.number().int().min(1).max(30).default(14),
   missingOnly: z
     .union([
@@ -56,12 +41,8 @@ const Q = z.object({
     .optional()
     .transform((v) => (v == null ? true : v === "1" || v === "true")),
   limit: z.coerce.number().int().min(1).max(500).default(200),
-  cursor: z.string().optional(),
+  cursor: z.string().optional(), // base64url of { ts: ISOString, id: string }
   stream: z.union([z.literal("1"), z.literal("true")]).optional(),
-
-  fill_prices: z.union([z.literal("1"), z.literal("true")]).optional(),
-  price_try_pools: z.coerce.number().int().min(1).max(5).default(3),
-  price_grace_seconds: z.coerce.number().int().min(0).max(600).default(90),
 });
 
 /* ========================= Cursor helpers ========================= */
@@ -79,208 +60,7 @@ function decCursor(s?: string): Cursor | null {
   return null;
 }
 
-/* ========================= Global price fill (sweep) ========================= */
-
-const NET_KEY = "solana";
-
-// ↓↓↓ 降低默认并发，避免 429
-const GT_CONCURRENCY = Math.max(
-  1,
-  Number(process.env.DETECT_BATCH_PRICE_CONCURRENCY ?? 2),
-);
-
-// ---- In-pass caches ----
-type PoolInfo = {
-  address: string;
-  dexId?: string;
-  reservesUsd?: number;
-  volume24h?: number;
-};
-type PoolsCache = Map<string, PoolInfo[]>; // tokenKey -> pools
-type PriceCache = Map<string, number | null>; // `${pool}:${minuteTs}` -> price
-
-function minuteKey(tsSec: number) {
-  return Math.floor(tsSec / 60) * 60; // align to minute
-}
-
-async function fillOnePrice(
-  row: {
-    mentionId: string;
-    tweetId: string;
-    tokenKey: string;
-    publishedAt: Date;
-  },
-  opts: {
-    tryPools: number;
-    graceSeconds: number;
-    log: (e: any) => void;
-    poolsCache: PoolsCache;
-    priceCache: PriceCache;
-  },
-) {
-  const { tryPools, graceSeconds, log, poolsCache, priceCache } = opts;
-  const ts = Math.floor(row.publishedAt.getTime() / 1000);
-
-  // fresh guard
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (nowSec - ts < Math.max(0, graceSeconds)) {
-    log({ event: "price_skip", id: row.mentionId, why: "too-fresh" });
-    return false;
-  }
-
-  // resolve pools with per-pass cache
-  let pools = poolsCache.get(row.tokenKey);
-  if (!pools) {
-    try {
-      pools = await listTopPoolsByToken(NET_KEY, row.tokenKey, tryPools);
-      poolsCache.set(row.tokenKey, pools);
-    } catch (e: any) {
-      const msg = e?.message || String(e);
-      if (/HTTP\s+404/.test(msg)) {
-        log({
-          event: "price_skip",
-          id: row.mentionId,
-          why: "gt-404-unindexed",
-        });
-        poolsCache.set(row.tokenKey, []); // cache empty to avoid re-hit
-        return false;
-      }
-      log({ event: "price_resolve_error", id: row.mentionId, err: msg });
-      return false;
-    }
-  }
-  if (!pools?.length) {
-    log({ event: "price_not_found", id: row.mentionId, tried: [] });
-    return false;
-  }
-  log({ event: "price_candidates", id: row.mentionId, pools });
-
-  // try OHLCV with (pool, minute) cache
-  const mKey = minuteKey(ts);
-  for (const p of pools) {
-    const cacheKey = `${p.address}:${mKey}`;
-    if (priceCache.has(cacheKey)) {
-      const cached = priceCache.get(cacheKey)!;
-      if (cached != null) {
-        await db
-          .update(tweetTokenMentions)
-          .set({ priceUsdAt: String(Number(cached).toFixed(8)) })
-          .where(eq(tweetTokenMentions.id, row.mentionId));
-        log({
-          event: "price_filled",
-          id: row.mentionId,
-          pool: p.address,
-          ts,
-          price: cached,
-          cached: true,
-        });
-        return true;
-      }
-      // cached null → skip this pool quickly
-      continue;
-    }
-
-    try {
-      const price = await priceAtTsWithFallbacks(NET_KEY, p.address, ts);
-      priceCache.set(cacheKey, price ?? null);
-
-      if (Number.isFinite(price)) {
-        await db
-          .update(tweetTokenMentions)
-          .set({ priceUsdAt: String(Number(price).toFixed(8)) })
-          .where(eq(tweetTokenMentions.id, row.mentionId));
-        log({
-          event: "price_filled",
-          id: row.mentionId,
-          pool: p.address,
-          ts,
-          price,
-        });
-        return true;
-      }
-    } catch (e: any) {
-      log({
-        event: "ohlcv_error",
-        id: row.mentionId,
-        pool: p.address,
-        err: e?.message || String(e),
-      });
-    }
-  }
-
-  log({
-    event: "price_not_found",
-    id: row.mentionId,
-    tried: pools.map((p) => p.address),
-  });
-  return false;
-}
-
-async function fillPricesGlobalPass(
-  params: { limit: number; tryPools: number; graceSeconds: number },
-  log: (e: any) => void,
-): Promise<{ filled: number; scanned: number; pickedTweets: number }> {
-  const rows = await db
-    .select({
-      mentionId: tweetTokenMentions.id,
-      tweetId: tweetTokenMentions.tweetId,
-      tokenKey: tweetTokenMentions.tokenKey,
-      publishedAt: kolTweets.publishDate,
-    })
-    .from(tweetTokenMentions)
-    .innerJoin(kolTweets, eq(kolTweets.tweetId, tweetTokenMentions.tweetId))
-    .where(isNull(tweetTokenMentions.priceUsdAt))
-    .orderBy(asc(kolTweets.publishDate), asc(tweetTokenMentions.id))
-    .limit(params.limit);
-
-  if (rows.length === 0) {
-    log({ event: "price_fill_skip", reason: "no-null-prices" });
-    return { filled: 0, scanned: 0, pickedTweets: 0 };
-  }
-
-  const byTweet = new Map<string, Date>();
-  rows.forEach((r) => byTweet.set(r.tweetId, r.publishedAt));
-  log({
-    event: "price_global_start",
-    tweetIds: byTweet.size,
-    pick: params.limit,
-  });
-
-  // per-pass caches
-  const poolsCache: PoolsCache = new Map();
-  const priceCache: PriceCache = new Map();
-
-  // simple concurrency workers
-  let filled = 0;
-  let i = 0;
-  async function worker() {
-    while (true) {
-      const idx = i++;
-      if (idx >= rows.length) break;
-      const r = rows[idx];
-      const ok = await fillOnePrice(r, {
-        tryPools: params.tryPools,
-        graceSeconds: params.graceSeconds,
-        log,
-        poolsCache,
-        priceCache,
-      });
-      if (ok) filled += 1;
-    }
-  }
-  const workers = Array.from({ length: GT_CONCURRENCY }, () => worker());
-  await Promise.all(workers);
-
-  log({
-    event: "price_global_done",
-    filled,
-    scanned: rows.length,
-    pickedTweets: byTweet.size,
-  });
-  return { filled, scanned: rows.length, pickedTweets: byTweet.size };
-}
-
-/* ========================= Page runner (detect + optional global price sweep) ========================= */
+/* ========================= Page runner ========================= */
 async function runDetectPage(
   params: {
     screen_name: string;
@@ -292,36 +72,11 @@ async function runDetectPage(
   },
   log: (e: any) => void,
 ) {
-  const { screen_name, days, missingOnly, limit, cursor, url } = params;
+  const { screen_name, days, missingOnly, limit, cursor } = params;
 
   const raw = screen_name.trim().replace(/^@+/, "");
   const isAll = raw === "*" || raw.toLowerCase() === "all";
   const handle = isAll ? null : raw.toLowerCase();
-
-  const qs = Object.fromEntries(url.searchParams.entries());
-  const fillPrices =
-    /^(1|true)$/i.test(String(qs.fill_prices ?? "")) ||
-    String(process.env.DETECT_BATCH_FILL_PRICES_DEFAULT ?? "true") === "true";
-  const priceTryPools = Number(
-    qs.price_try_pools ?? process.env.DETECT_BATCH_PRICE_TRY_POOLS ?? 3,
-  );
-  const priceGraceSeconds = Number(
-    qs.price_grace_seconds ??
-      process.env.DETECT_BATCH_PRICE_GRACE_SECONDS ??
-      90,
-  );
-  const globalLimit = Math.max(
-    1,
-    Number(process.env.DETECT_BATCH_PRICE_GLOBAL_LIMIT ?? 200),
-  );
-  const maxPasses = Math.max(
-    1,
-    Number(process.env.DETECT_BATCH_PRICE_GLOBAL_SWEEP_PASSES ?? 20),
-  );
-  const sleepMs = Math.max(
-    0,
-    Number(process.env.DETECT_BATCH_PRICE_SWEEP_SLEEP_MS ?? 300),
-  );
 
   log({
     event: "start",
@@ -330,17 +85,16 @@ async function runDetectPage(
     missingOnly,
     limit,
     cursor: cursor ?? null,
-    fillPrices,
   });
 
-  // time window
+  // 时间窗口 [since, until)
   const now = new Date();
   const since = new Date(now);
   since.setDate(now.getDate() - (days - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
-  // cursor (publishDate DESC, tweetId DESC)
+  // 解析分页游标（排序：publishDate DESC, tweetId DESC）
   const c = decCursor(cursor || undefined);
   const cursorTs = c ? new Date(c.ts) : null;
   const cursorId = c?.id ?? null;
@@ -366,6 +120,7 @@ async function runDetectPage(
       )
     : baseWhere;
 
+  // 拉一页
   const page = await db
     .select({
       tweetId: kolTweets.tweetId,
@@ -380,23 +135,6 @@ async function runDetectPage(
   log({ event: "loaded", tweets: page.length });
 
   if (page.length === 0) {
-    if (fillPrices) {
-      let pass = 0;
-      while (pass < maxPasses) {
-        pass++;
-        const { filled, scanned } = await fillPricesGlobalPass(
-          {
-            limit: globalLimit,
-            tryPools: priceTryPools,
-            graceSeconds: priceGraceSeconds,
-          },
-          log,
-        );
-        if (scanned < globalLimit || filled === 0) break;
-        if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
-      }
-      log({ event: "price_fill_done_page" });
-    }
     return {
       routeId: ROUTE_ID,
       ok: true,
@@ -410,7 +148,6 @@ async function runDetectPage(
     };
   }
 
-  // filter if missingOnly
   let candidates = page;
   if (missingOnly) {
     const existing = await db
@@ -438,44 +175,20 @@ async function runDetectPage(
     : null;
 
   if (!rows.length) {
-    if (fillPrices) {
-      log({
-        event: "price_fill_start",
-        tweetIds: page.length,
-        tryPools: priceTryPools,
-        network: NET_KEY,
-        graceSeconds: priceGraceSeconds,
-      });
-      let pass = 0;
-      while (pass < maxPasses) {
-        pass++;
-        const { filled, scanned } = await fillPricesGlobalPass(
-          {
-            limit: globalLimit,
-            tryPools: priceTryPools,
-            graceSeconds: priceGraceSeconds,
-          },
-          log,
-        );
-        if (scanned < globalLimit || filled === 0) break;
-        if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
-      }
-      log({ event: "price_fill_done_page" });
-    }
+    log({ event: "done", rows: 0, inserted: 0, updated: 0, nextCursor });
     return {
       routeId: ROUTE_ID,
       ok: true,
       handle: handle ?? "*",
       days,
       scannedTweets: stats.scannedTweets,
-      mentionsDetected: 0,
+      mentionsDetected: stats.mentionsDetected,
       inserted: 0,
       updated: 0,
       nextCursor,
     };
   }
 
-  // upsert planning
   const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
   const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
@@ -503,7 +216,9 @@ async function runDetectPage(
     return prev && prev !== r.tokenKey;
   }).length;
 
-  // upsert
+  log({ event: "upsert_planning", rows: rows.length, willInsert, willUpdate });
+
+  // Upsert（分块）：冲突键 (tweet_id, trigger_key)
   const CHUNK = 200;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const chunk = rows.slice(i, i + CHUNK).map((r) => ({
@@ -531,30 +246,13 @@ async function runDetectPage(
       });
   }
 
-  if (fillPrices) {
-    log({
-      event: "price_fill_start",
-      tweetIds: page.length,
-      tryPools: priceTryPools,
-      network: NET_KEY,
-      graceSeconds: priceGraceSeconds,
-    });
-    let pass = 0;
-    while (pass < maxPasses) {
-      pass++;
-      const { filled, scanned } = await fillPricesGlobalPass(
-        {
-          limit: globalLimit,
-          tryPools: priceTryPools,
-          graceSeconds: priceGraceSeconds,
-        },
-        log,
-      );
-      if (scanned < globalLimit || filled === 0) break;
-      if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
-    }
-    log({ event: "price_fill_done_page" });
-  }
+  log({
+    event: "done",
+    rows: rows.length,
+    inserted: willInsert,
+    updated: willUpdate,
+    nextCursor,
+  });
 
   return {
     routeId: ROUTE_ID,
@@ -569,7 +267,7 @@ async function runDetectPage(
   };
 }
 
-/* ========================= GET / POST (unchanged) ========================= */
+/* ========================= GET (NDJSON or JSON) ========================= */
 export async function GET(req: Request) {
   if (!allowByCronSecret(req)) {
     return NextResponse.json(
@@ -639,6 +337,7 @@ export async function GET(req: Request) {
   return NextResponse.json(result);
 }
 
+/* ========================= POST ========================= */
 export async function POST(req: Request) {
   if (!allowByCronSecret(req)) {
     return NextResponse.json(
@@ -656,7 +355,6 @@ export async function POST(req: Request) {
   } catch {
     body = {};
   }
-
   const parsed = {
     screen_name: String(body.screen_name ?? qs.screen_name ?? "*"),
     days: Number(body.days ?? qs.days ?? 14),

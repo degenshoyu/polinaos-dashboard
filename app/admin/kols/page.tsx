@@ -1,14 +1,12 @@
+// app/admin/kols/pages.tsx
 "use client";
 
 import { useEffect, useState } from "react";
+import ImportCard from "@/components/admin/ImportCard";
 import KolTable from "@/components/admin/KolTable";
 import type { KolRow } from "@/components/types";
 
-import ImportCard from "@/components/admin/ImportCard";
-
-
-export default function KolsImportPage() {
-  /** ========== KOL list data ========== */
+export default function AdminKolsPages() {
   const [rows, setRows] = useState<KolRow[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [errorList, setErrorList] = useState<string | null>(null);
