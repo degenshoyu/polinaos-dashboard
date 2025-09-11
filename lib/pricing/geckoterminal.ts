@@ -32,12 +32,10 @@ async function fetchJson(url: string, opts: FetchOpts = {}) {
       // Handle 429 with backoff + Retry-After
       if (r.status === 429) {
         const ra = Number(r.headers.get("retry-after") || 0);
-        // base backoff: either Retry-After (sec) or exponential
         const base =
           ra > 0 ? ra * 1000 : retryDelayMs * Math.pow(2, i === 0 ? 0 : i - 1);
         const jitter = Math.floor(Math.random() * 300);
         const sleepMs = Math.min(base + jitter, 8000); // cap
-        // surface error details for logs (without consuming body multiple times)
         let msg = `HTTP 429 for ${url}`;
         try {
           const j = await r.json().catch(() => null);
@@ -71,14 +69,14 @@ async function fetchJson(url: string, opts: FetchOpts = {}) {
   throw lastErr;
 }
 
-/** List pools for a token on a network, pick by highest reserves_usd (fallback volume_24h). */
+/** List pools for a token on a network, rank by highest reserves_usd (fallback volume_24h). */
 export async function listTopPoolsByToken(
   network: string,
   tokenAddress: string,
   take = 3,
 ): Promise<
   {
-    address: string;
+    address: string; // GT pool **address** (for OHLCV)
     dexId?: string;
     reservesUsd?: number;
     volume24h?: number;
@@ -92,25 +90,27 @@ export async function listTopPoolsByToken(
   if (!arr.length) return [];
   const ranked = arr
     .map((d) => {
-      const id = String(d?.id || "");
       const a = d?.attributes || {};
+      // ⛳ OHLCV 必须使用 attributes.address 作为 pool 标识
+      const poolAddress = String(a?.address || "");
       const reserves = Number(a?.reserve_in_usd ?? a?.reserve_usd ?? 0);
       const vol24 = Number(a?.volume_usd_24h ?? 0);
       const score =
         Number.isFinite(reserves) && reserves > 0 ? reserves : vol24;
       return {
-        address: id,
+        address: poolAddress,
         dexId: String(a?.dex_identifier || a?.dex_id || a?.dexId || ""),
         reservesUsd: Number.isFinite(reserves) ? reserves : undefined,
         volume24h: Number.isFinite(vol24) ? vol24 : undefined,
         score,
       };
     })
+    .filter((x) => x.address) // 防御：确保有地址
     .sort((a, b) => b.score - a.score);
   return ranked.slice(0, take).map(({ score, ...rest }) => rest);
 }
 
-/** Minute OHLCV (aggregate=1) before/at ts (sec). Returns newest-first list. */
+/** Minute OHLCV (aggregate=1) before/at ts (sec). */
 export async function fetchOHLCVMinute(
   network: string,
   poolId: string,
@@ -127,7 +127,7 @@ export async function fetchOHLCVMinute(
   return Array.isArray(list) ? (list as Ohlcv[]) : [];
 }
 
-/** Day OHLCV (aggregate=1) before/at ts (sec). Newest-first list. */
+/** Day OHLCV (aggregate=1) before/at ts (sec). */
 export async function fetchOHLCVDay(
   network: string,
   poolId: string,
@@ -144,30 +144,47 @@ export async function fetchOHLCVDay(
   return Array.isArray(list) ? (list as Ohlcv[]) : [];
 }
 
-export function pickClose(candle?: Ohlcv): number | null {
-  if (!candle) return null;
-  const c = Number(candle[4]);
-  return Number.isFinite(c) ? c : null;
+// ---- helpers: order & picking ----
+
+/** Ensure ascending order by timestamp (old -> new). */
+function normalizeAsc(list: Ohlcv[]): Ohlcv[] {
+  if (!Array.isArray(list) || list.length <= 1) return list ?? [];
+  const asc = Number(list[0]?.[0]) <= Number(list.at(-1)?.[0]);
+  return asc ? list : [...list].reverse();
 }
 
-/** Try price at ts with fallbacks: minute(1) -> minute(5) -> day(1). */
+/** Pick the nearest candle CLOSE whose ts <= target ts. */
+function pickNearestAtOrBefore(list: Ohlcv[], tsSec: number): number | null {
+  if (!list?.length) return null;
+  const asc = normalizeAsc(list);
+  for (let i = asc.length - 1; i >= 0; i--) {
+    const c = asc[i];
+    if (Number(c?.[0]) <= tsSec) {
+      const close = Number(c?.[4]);
+      return Number.isFinite(close) ? close : null;
+    }
+  }
+  return null;
+}
+
+/** Try price at ts with robust fallbacks: minute(1) -> minute(60 nearest<=ts) -> day(2 nearest<=ts). */
 export async function priceAtTsWithFallbacks(
   network: string,
   poolId: string,
   tsSec: number,
 ): Promise<number | null> {
-  // 1) last minute candle
+  // 1) 直接尝试最近的分钟（limit=1）
   let arr = await fetchOHLCVMinute(network, poolId, tsSec, 1).catch(() => []);
-  let price = pickClose(arr[0]);
+  let price = pickNearestAtOrBefore(arr, tsSec);
   if (price != null) return price;
 
-  // 2) widen to 5 minutes
-  arr = await fetchOHLCVMinute(network, poolId, tsSec, 5).catch(() => []);
-  price = pickClose(arr[0]);
+  // 2) 扩到 60 根分钟线，挑 ≤ ts 的最近一根
+  arr = await fetchOHLCVMinute(network, poolId, tsSec, 60).catch(() => []);
+  price = pickNearestAtOrBefore(arr, tsSec);
   if (price != null) return price;
 
-  // 3) fallback to day
-  arr = await fetchOHLCVDay(network, poolId, tsSec, 1).catch(() => []);
-  price = pickClose(arr[0]);
+  // 3) 再退到日线（2 根），挑 ≤ ts 的最近一根
+  arr = await fetchOHLCVDay(network, poolId, tsSec, 2).catch(() => []);
+  price = pickNearestAtOrBefore(arr, tsSec);
   return price ?? null;
 }

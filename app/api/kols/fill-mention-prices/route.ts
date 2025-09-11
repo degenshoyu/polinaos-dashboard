@@ -1,4 +1,3 @@
-// app/api/kols/fill-mention-prices/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
@@ -13,15 +12,18 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const Body = z.object({
-  screen_name: z.string().trim().optional(),
+  screen_name: z.string().trim().optional(), // optional: narrow to one author
   days: z.number().int().positive().default(7),
-  limit: z.number().int().min(1).max(300).default(100),
+  limit: z.number().int().min(1).max(500).default(200),
+  // DEPRECATED: don't use source='ca' as a guard anymore; keep for compat
   onlyCA: z.boolean().default(true),
-  network: z.string().trim().default("solana"), // GeckoTerminal network key
+  network: z.string().trim().default("solana"),
   debug: z.boolean().default(false),
   tryPools: z.number().int().min(1).max(5).default(3),
-  // 给 GT 少许索引缓冲，避免刚发推时还未建立蜡烛/池信息
   graceSeconds: z.number().int().min(0).max(600).default(90),
+  // NEW: limit by scope (from UI modal)
+  ticker: z.string().trim().optional(), // e.g. "ABC" or "$ABC"
+  ca: z.string().trim().optional(), // exact CA, case-insensitive match
 });
 
 function looksLikeSolMint(s: string): boolean {
@@ -35,7 +37,7 @@ export async function POST(req: Request) {
     const now = new Date();
     const since = new Date(now.getTime() - body.days * 24 * 60 * 60 * 1000);
 
-    // 1) get tweets in window
+    // 1) tweets in window (optionally by screen_name)
     const tweets = await db
       .select({ id: kolTweets.tweetId, publishedAt: kolTweets.publishDate })
       .from(kolTweets)
@@ -62,19 +64,34 @@ export async function POST(req: Request) {
     const tweetIds = tweets.map((t) => t.id);
 
     // 2) mentions missing price
+    // NOTE: DO NOT filter by source='ca' anymore — we rely on token_key shape
+    const normTicker = body.ticker
+      ? body.ticker.replace(/^\$/, "").toUpperCase()
+      : null;
+
     const mentions = await db
       .select({
         id: tweetTokenMentions.id,
         tweetId: tweetTokenMentions.tweetId,
         tokenKey: tweetTokenMentions.tokenKey,
         source: tweetTokenMentions.source,
+        tokenDisplay: tweetTokenMentions.tokenDisplay,
       })
       .from(tweetTokenMentions)
       .where(
         and(
           inArray(tweetTokenMentions.tweetId, tweetIds),
           isNull(tweetTokenMentions.priceUsdAt),
-          body.onlyCA ? eq(tweetTokenMentions.source, "ca") : sql`true`,
+          // restrict by CA scope if provided
+          body.ca
+            ? sql`lower(${tweetTokenMentions.tokenKey}) = lower(${body.ca})`
+            : sql`true`,
+          // restrict by ticker scope if provided
+          normTicker
+            ? sql`upper(trim(both ' $' from ${tweetTokenMentions.tokenDisplay})) = ${normTicker}`
+            : sql`true`,
+          // must "look like" a Sol mint (DB-side guard)
+          sql`char_length(${tweetTokenMentions.tokenKey}) between 32 and 44`,
         ),
       )
       .limit(body.limit);
@@ -84,7 +101,7 @@ export async function POST(req: Request) {
         ok: true,
         updated: 0,
         scanned: 0,
-        reason: "no empty prices",
+        reason: "no empty prices (in scope)",
       });
     }
 
@@ -97,17 +114,13 @@ export async function POST(req: Request) {
         if (body.debug) debugLog.push({ id: m.id, why: "no-publish-date" });
         continue;
       }
-      if (body.onlyCA && !looksLikeSolMint(m.tokenKey)) {
-        if (body.debug)
-          debugLog.push({
-            id: m.id,
-            why: "not-solana-mint",
-            tokenKey: m.tokenKey,
-          });
+
+      if (!looksLikeSolMint(m.tokenKey ?? "")) {
+        if (body.debug) debugLog.push({ id: m.id, why: "not-solana-mint" });
         continue;
       }
 
-      // 小宽限：避免“刚发推、GT 还没出蜡烛/池”
+      // Grace period to avoid GT not-ready candles
       const tweetSec = Math.floor(new Date(publishedAt).getTime() / 1000);
       const nowSec = Math.floor(Date.now() / 1000);
       if (nowSec - tweetSec < body.graceSeconds) {
@@ -137,9 +150,7 @@ export async function POST(req: Request) {
       } catch (e: any) {
         const msg = String(e?.message || "");
         if (msg.includes("HTTP 404")) {
-          // GT 尚未收录该 mint
-          if (body.debug)
-            debugLog.push({ id: m.id, why: "gt-404-unindexed" });
+          if (body.debug) debugLog.push({ id: m.id, why: "gt-404-unindexed" });
         } else {
           if (body.debug)
             debugLog.push({
@@ -150,7 +161,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // 无池直接跳过（GT-only 策略）
       if (pools.length === 0) {
         if (body.debug) debugLog.push({ id: m.id, why: "no-pool-on-gt" });
         continue;
@@ -184,7 +194,8 @@ export async function POST(req: Request) {
           debugLog.push({
             id: m.id,
             why: "no-price",
-            tried: pools.map((p) => p.address),
+            tokenKey: m.tokenKey,
+            sourcesTried: pools.map((p) => p.address),
           });
         continue;
       }
@@ -204,12 +215,11 @@ export async function POST(req: Request) {
           ts: tweetSec,
           price,
         });
-
-      // small delay to be nice to GT public rate limit (optional)
-      // await new Promise((r) => setTimeout(r, 60));
+      // Optional: small delay to be nice to GT rate limits
+      // await new Promise((r) => setTimeout(r, 50));
     }
 
-    // 简单汇总：按 why 聚合
+    // Debug summary
     const summary = debugLog.reduce((acc: Record<string, number>, x: any) => {
       if (x.why) acc[x.why] = (acc[x.why] ?? 0) + 1;
       return acc;
@@ -219,7 +229,7 @@ export async function POST(req: Request) {
       ok: true,
       updated,
       scanned: mentions.length,
-      summary,
+      summary: Object.keys(summary).length ? summary : undefined,
       debug: body.debug ? debugLog : undefined,
     });
   } catch (e: any) {
@@ -229,4 +239,3 @@ export async function POST(req: Request) {
     );
   }
 }
-

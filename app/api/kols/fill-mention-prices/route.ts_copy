@@ -20,6 +20,8 @@ const Body = z.object({
   network: z.string().trim().default("solana"), // GeckoTerminal network key
   debug: z.boolean().default(false),
   tryPools: z.number().int().min(1).max(5).default(3),
+  // 给 GT 少许索引缓冲，避免刚发推时还未建立蜡烛/池信息
+  graceSeconds: z.number().int().min(0).max(600).default(90),
 });
 
 function looksLikeSolMint(s: string): boolean {
@@ -105,7 +107,19 @@ export async function POST(req: Request) {
         continue;
       }
 
-      const ts = Math.floor(new Date(publishedAt).getTime() / 1000);
+      // 小宽限：避免“刚发推、GT 还没出蜡烛/池”
+      const tweetSec = Math.floor(new Date(publishedAt).getTime() / 1000);
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (nowSec - tweetSec < body.graceSeconds) {
+        if (body.debug)
+          debugLog.push({
+            id: m.id,
+            why: "too-fresh",
+            wait: body.graceSeconds,
+          });
+        continue;
+      }
+
       let price: number | null = null;
       let hitPool: string | null = null;
 
@@ -121,21 +135,34 @@ export async function POST(req: Request) {
         if (body.debug)
           debugLog.push({ id: m.id, note: "gt-top-pools", pools: tops });
       } catch (e: any) {
-        if (body.debug)
-          debugLog.push({
-            id: m.id,
-            why: "gt-top-pools-failed",
-            err: e?.message,
-          });
+        const msg = String(e?.message || "");
+        if (msg.includes("HTTP 404")) {
+          // GT 尚未收录该 mint
+          if (body.debug)
+            debugLog.push({ id: m.id, why: "gt-404-unindexed" });
+        } else {
+          if (body.debug)
+            debugLog.push({
+              id: m.id,
+              why: "gt-top-pools-failed",
+              err: e?.message,
+            });
+        }
       }
 
-      if (pools.length === 0 && body.debug) {
-        debugLog.push({ id: m.id, why: "no-pool-on-gt" });
+      // 无池直接跳过（GT-only 策略）
+      if (pools.length === 0) {
+        if (body.debug) debugLog.push({ id: m.id, why: "no-pool-on-gt" });
+        continue;
       }
 
       for (const p of pools) {
         try {
-          const v = await priceAtTsWithFallbacks(body.network, p.address, ts);
+          const v = await priceAtTsWithFallbacks(
+            body.network,
+            p.address,
+            tweetSec,
+          );
           if (Number.isFinite(v)) {
             price = v!;
             hitPool = p.address;
@@ -170,16 +197,29 @@ export async function POST(req: Request) {
 
       updated += 1;
       if (body.debug)
-        debugLog.push({ id: m.id, ok: true, poolAddress: hitPool, ts, price });
+        debugLog.push({
+          id: m.id,
+          ok: true,
+          poolAddress: hitPool,
+          ts: tweetSec,
+          price,
+        });
 
       // small delay to be nice to GT public rate limit (optional)
-      // await new Promise((r) => setTimeout(r, 80));
+      // await new Promise((r) => setTimeout(r, 60));
     }
+
+    // 简单汇总：按 why 聚合
+    const summary = debugLog.reduce((acc: Record<string, number>, x: any) => {
+      if (x.why) acc[x.why] = (acc[x.why] ?? 0) + 1;
+      return acc;
+    }, {});
 
     return NextResponse.json({
       ok: true,
       updated,
       scanned: mentions.length,
+      summary,
       debug: body.debug ? debugLog : undefined,
     });
   } catch (e: any) {
@@ -189,3 +229,4 @@ export async function POST(req: Request) {
     );
   }
 }
+

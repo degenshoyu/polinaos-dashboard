@@ -36,6 +36,20 @@
       "when": 1757328856963,
       "tag": "0004_gorgeous_nehzno",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1757578859364,
+      "tag": "0005_giant_redwing",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1757580402572,
+      "tag": "0006_heavy_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

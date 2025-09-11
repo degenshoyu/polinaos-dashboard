@@ -1,0 +1,42 @@
+{
+  "mode": "gt",
+  "tickers": [
+    "BONK",
+    "WIF",
+    "SAMO",
+    "MOODENG",
+    "PENGU"
+  ],
+  "rows": [
+    {
+      "ticker": "BONK",
+      "contractAddress": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+      "boostedConf": "99.00",
+      "source": "geckoterminal"
+    },
+    {
+      "ticker": "WIF",
+      "contractAddress": "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
+      "boostedConf": "99.00",
+      "source": "geckoterminal"
+    },
+    {
+      "ticker": "SAMO",
+      "contractAddress": "",
+      "boostedConf": "",
+      "source": ""
+    },
+    {
+      "ticker": "MOODENG",
+      "contractAddress": "3MMagKqf5yC54DaKhvm5GmFgStAFgKzzGtfKrooXpump",
+      "boostedConf": "99.00",
+      "source": "geckoterminal"
+    },
+    {
+      "ticker": "PENGU",
+      "contractAddress": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
+      "boostedConf": "100.00",
+      "source": "geckoterminal"
+    }
+  ]
+}

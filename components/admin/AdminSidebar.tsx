@@ -22,7 +22,7 @@ type NavItem = {
 const adminItems: NavItem[] = [
   { href: "/admin/kols",         label: "KOLs",          locked: false, Icon: UserCog },
   { href: "/admin/kols/tweets",  label: "Tweets",        locked: false, Icon: MessageSquare },
-  { href: "/admin/kols/coins",   label: "Coins Mentioned", locked: true,  Icon: Coins }, // 先锁定
+  { href: "/admin/kols/coins",   label: "Coins Mentioned", locked: false,  Icon: Coins },
 ];
 
 export default function AdminSidebar() {
@@ -176,4 +176,3 @@ export default function AdminSidebar() {
     </>
   );
 }
-

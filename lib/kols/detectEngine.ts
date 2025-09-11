@@ -1,16 +1,13 @@
 // lib/kols/detectEngine.ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { extractMentions, type Mention } from "@/lib/tokens/extract";
 import { buildTriggerKeyWithText } from "@/lib/tokens/triggerKey";
-import { canonAddr, isSolAddr } from "@/lib/chains/address";
-import {
-  resolveTickersToContracts,
-  resolveContractsToMeta,
-  resolveNamesToContracts,
-} from "@/lib/markets/geckoterminal";
+import { canonAddr } from "@/lib/chains/address";
 
-/** --------- CA reconstruct (conservative) --------- */
+/** ---------------- CA reconstruction (conservative) ---------------- */
 const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 
+/** Rebuild CA from pump.fun links where CA may be split across segments */
 function collectFromPumpFun(text: string): string[] {
   const out: string[] = [];
   const RE = /pump\.fun\/coin\/([^\s]{1,90})/gi;
@@ -32,6 +29,7 @@ function collectFromPumpFun(text: string): string[] {
   return out;
 }
 
+/** Rejoin space-split base58 pairs like "abc…xyz" -> "abcxyz" when valid */
 function collectJoinedPairs(text: string): string[] {
   const out: string[] = [];
   const SPLIT2 =
@@ -44,6 +42,7 @@ function collectJoinedPairs(text: string): string[] {
   return out;
 }
 
+/** Keep only maximal (non-substring) candidates to reduce false positives */
 function filterCAKeepMaximal(cas: string[]): Set<string> {
   const uniq = Array.from(new Set(cas));
   const keep = new Set<string>();
@@ -68,7 +67,7 @@ export function reconstructCAsFromTweet(text: string): Set<string> {
   return filterCAKeepMaximal([...plain, ...fromPump, ...joined]);
 }
 
-/** --------- trigger helpers --------- */
+/** ---------------- Trigger helpers ---------------- */
 function triggerInputFor(m: Mention) {
   if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
   if (m.source === "ca") return m.tokenKey || "";
@@ -88,16 +87,16 @@ export function makeDeterministicTriggerKey(m: Mention): string {
   return `uk:${String(m.tokenKey || "").toLowerCase()}`;
 }
 
-/** --------- types --------- */
+/** ---------------- Types ---------------- */
 export type MinimalTweet = { tweetId: string; textContent: string | null };
 export type CandidateRow = {
   tweetId: string;
-  tokenKey: string;
-  tokenDisplay: string | null;
-  confidence: number; // 0..100
-  source: Mention["source"];
-  triggerKey: string;
-  triggerText: string | null;
+  tokenKey: string; // CA or raw ticker/phrase (no network resolution here)
+  tokenDisplay: string | null; // pretty text for UI/logging
+  confidence: number; // 0..100 from extractor
+  source: Mention["source"]; // "ca" | "ticker" | "phrase"
+  triggerKey: string; // deterministic, used as PK along with tweetId
+  triggerText: string | null; // normalized text used for trigger
 };
 
 export type DetectStats = {
@@ -111,12 +110,11 @@ export type DetectResult = {
   stats: DetectStats;
 };
 
-/** --------- core engine: tweets -> rows (no DB here) --------- */
+/** ---------------- Core engine: tweets -> candidate rows (NO DB, NO network) ---------------- */
 export async function processTweetsToRows(
   tweets: MinimalTweet[],
   log: (e: any) => void = () => {},
 ): Promise<DetectResult> {
-  // aggregate
   const all: {
     tweetId: string;
     m: Mention;
@@ -127,13 +125,14 @@ export async function processTweetsToRows(
   const phraseNames = new Set<string>();
   const caSet = new Set<string>();
 
-  // 1) extract & reconstruct per tweet
+  // 1) Extract & reconstruct per tweet
   for (const t of tweets) {
     const txt = t.textContent ?? "";
     const rebuiltCAs = reconstructCAsFromTweet(txt);
     let ext = extractMentions(txt);
+
+    // Prefer reconstructed CAs (longest), replace any raw CA mentions
     if (rebuiltCAs.size) {
-      // replace CA with reconstructed CA (longest)
       ext = ext.filter((x) => x.source !== "ca");
       for (const addr of rebuiltCAs) {
         ext.push({
@@ -187,194 +186,33 @@ export async function processTweetsToRows(
     cas: caSet.size,
   });
 
-  // 2) resolve tickers/names/ca
-  let byTicker = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-  let byName = new Map<
-    string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
-  >();
-  const byContract = new Map<
-    string,
-    { tokenDisplay: string; boostedConf: number }
-  >();
-
-  try {
-    const normalizedTickers = [...uniqueTickers]
-      .map((t) => t.replace(/^\$+/, "").toLowerCase())
-      .filter(Boolean);
-
-    log({
-      event: "resolve_tickers_begin",
-      collected: uniqueTickers.size,
-      normalized: normalizedTickers.length,
-    });
-    {
-      const raw = await resolveTickersToContracts(normalizedTickers);
-      const norm = new Map<
-        string,
-        typeof raw extends Map<infer K, infer V> ? V : never
-      >();
-      for (const [k, v] of (raw as Map<string, any>).entries()) {
-        const key = String(k).replace(/^\$+/, "").toLowerCase();
-        norm.set(key, v);
-      }
-      byTicker = norm as any;
-    }
-    log({ event: "resolve_tickers_done" });
-  } catch (e) {
-    log({ event: "resolve_tickers_failed", error: String(e) });
-  }
-  try {
-    const nameInputs = [...phraseNames]
-      .map((n) => n.trim().toLowerCase())
-      .filter(Boolean);
-    log({ event: "resolve_names_begin", count: nameInputs.length });
-    {
-      const raw = await resolveNamesToContracts(nameInputs);
-      const norm = new Map<
-        string,
-        typeof raw extends Map<infer K, infer V> ? V : never
-      >();
-      for (const [k, v] of (raw as Map<string, any>).entries()) {
-        norm.set(String(k).trim().toLowerCase(), v);
-      }
-      byName = norm as any;
-    }
-    log({ event: "resolve_names_done" });
-  } catch (e) {
-    log({ event: "resolve_names_failed", error: String(e) });
-  }
-
-  for (const [, r] of byTicker.entries()) {
-    const addr = canonAddr(String(r.tokenKey || ""));
-    if (addr)
-      byContract.set(addr, {
-        tokenDisplay: r.tokenDisplay,
-        boostedConf: r.boostedConf,
-      });
-  }
-
-  const missingCA = Array.from(caSet).filter((a) => !byContract.has(a));
-  if (missingCA.length) {
-    log({ event: "resolve_ca_begin", count: missingCA.length });
-    try {
-      const caMeta = await resolveContractsToMeta(missingCA);
-      for (const [addr, meta] of caMeta.entries()) {
-        byContract.set(addr, {
-          tokenDisplay: meta.tokenDisplay,
-          boostedConf: meta.boostedConf,
-        });
-      }
-      log({ event: "resolve_ca_done", hit: Array.from(caMeta.keys()).length });
-    } catch (e) {
-      log({ event: "resolve_ca_failed", error: String(e) });
-    }
-  }
-
-  // -------- Build per-tweet "consensus" set (CA + resolved names) --------
-  const tweetConsensus = new Map<string, Set<string>>();
-  const addConsensus = (tid: string, addr?: string) => {
-    const a = canonAddr(String(addr || ""));
-    if (!a) return;
-    let s = tweetConsensus.get(tid);
-    if (!s) {
-      s = new Set<string>();
-      tweetConsensus.set(tid, s);
-    }
-    s.add(a);
-  };
-  for (const { tweetId, m } of all) {
-    if (m.source === "ca") {
-      addConsensus(tweetId, m.tokenKey);
-    } else if (m.source === "phrase") {
-      const q = (m.tokenDisplay || m.tokenKey || "").trim().toLowerCase();
-      const r = byName.get(q) ?? byName.get(`${q} coin`);
-      if (r && isSolAddr(r.tokenKey)) addConsensus(tweetId, r.tokenKey);
-    }
-  }
-
-  // 3) build rows (dedupe by tweetId+triggerKey)
+  // 2) Build rows (NO resolution; keep raw keys for ticker/phrase)
   const rows: CandidateRow[] = [];
   const seen = new Set<string>();
 
   for (const { tweetId, m, triggerKey, triggerText } of all) {
-    let tokenKey = m.tokenKey;
-    let tokenDisplay = m.tokenDisplay;
-    let confidence = m.confidence;
-
-    if (m.source === "ca") {
-      const addr = canonAddr(String(m.tokenKey || ""));
-      if (!addr) continue;
-      tokenKey = addr;
-      const meta = addr ? byContract.get(addr) : undefined;
-      if (meta?.tokenDisplay) {
-        tokenDisplay = meta.tokenDisplay;
-        confidence = Math.max(confidence, meta.boostedConf ?? 0);
-      } else {
-        const short = `${addr.slice(0, 4)}…${addr.slice(-4)}`;
-        tokenDisplay = short;
-      }
-    } else if (m.source === "ticker") {
-      const disp = m.tokenDisplay?.startsWith("$")
-        ? m.tokenDisplay
-        : `$${String(m.tokenKey || "").toUpperCase()}`;
-      const r = byTicker.get(disp.replace(/^\$+/, "").toLowerCase());
-      if (!r) continue; // unresolved ticker -> skip
-      const ca = canonAddr(String(r.tokenKey || ""));
-      if (!ca) {
-        // ticker resolved to non-CA (fallback tokenKey), skip writing
-        log({
-          event: "suppress_ticker_non_ca",
-          tweetId,
-          ticker: disp,
-          got: r.tokenKey,
-        });
-        continue;
-      }
-      // Weak ticker (no DEX/trending boost; boostedConf ≤ 98) needs consensus in *this tweet*
-      const isWeak = (r.boostedConf || 0) <= 98;
-      if (isWeak) {
-        const cons = tweetConsensus.get(tweetId);
-        if (!cons || !cons.has(ca)) {
-          log({
-            event: "suppress_weak_ticker",
-            tweetId,
-            ticker: disp,
-            resolved: ca,
-            reason: "no consensus (CA/name) in tweet",
-          });
-          continue;
-        }
-      }
-      tokenKey = ca;
-      tokenDisplay = r.tokenDisplay;
-      confidence = Math.max(confidence, r.boostedConf);
-    } else if (m.source === "phrase") {
-      const q = (m.tokenDisplay || m.tokenKey || "").trim().toLowerCase();
-      const r = byName.get(q) ?? byName.get(`${q} coin`);
-      if (!r) continue;
-      const ca = canonAddr(String(r.tokenKey || ""));
-      if (!ca) continue;
-      tokenKey = r.tokenKey;
-      tokenDisplay = r.tokenDisplay;
-      confidence = Math.max(confidence, r.boostedConf);
-    }
+    // For CA, canon; for ticker/phrase, keep raw key (route will resolve)
+    const tokenKey =
+      m.source === "ca"
+        ? canonAddr(String(m.tokenKey || "")) || ""
+        : String(m.tokenKey || "");
+    const tokenDisplay =
+      m.tokenDisplay ??
+      (m.source === "ticker"
+        ? m.tokenKey
+          ? `$${String(m.tokenKey).toUpperCase()}`
+          : null
+        : (m.tokenKey ?? null));
 
     const key = `${tweetId}___${triggerKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    // final guard: must have a valid Solana address
-    const finalAddr = canonAddr(String(tokenKey || ""));
-    if (!finalAddr) continue;
     rows.push({
       tweetId,
-      tokenKey: finalAddr,
-      tokenDisplay: tokenDisplay ?? (m.tokenDisplay || m.tokenKey),
-      confidence: Math.min(100, Math.max(0, Math.round(confidence))),
+      tokenKey,
+      tokenDisplay,
+      confidence: Math.min(100, Math.max(0, Math.round(m.confidence))),
       source: m.source,
       triggerKey,
       triggerText,

@@ -119,6 +119,50 @@ export const mentionSource = pgEnum("mention_source", [
   "llm",
 ]);
 
+/* ===================== coin_ca_ticker ===================== */
+// Knowledge base for mapping Ticker <-> Contract Address (Solana-first).
+export const coinCaTicker = pgTable(
+  "coin_ca_ticker",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+
+    // Core mapping
+    tokenTicker: text("token_ticker").notNull(), // e.g. "BONK"
+    contractAddress: text("contract_address").notNull(), // Solana mint (base58)
+    tokenName: text("token_name"), // e.g. "Bonk"
+
+    // Pricing / liquidity hints (optional, can be backfilled later)
+    primaryPoolAddress: text("primary_pool_address"),
+
+    // On-chain provenance (optional)
+    mintAuthority: text("mint_authority"),
+    mintAt: timestamp("mint_at", { withTimezone: true }),
+    creatorAddress: text("creator_address"),
+
+    // Metadata / socials (optional)
+    tokenMetadata: jsonb("token_metadata"), // JSON blob
+    websiteUrl: text("website_url"),
+    telegramUrl: text("telegram_url"),
+    twitterUrl: text("twitter_url"),
+
+    // Manual disambiguation knob: higher wins when same ticker has multiple CAs
+    priority: integer("priority"), // NULL = unknown
+
+    ...timestamps,
+  },
+  (t) => ({
+    uniqTickerCa: uniqueIndex("uniq_coin_ca_ticker_ticker_ca").on(
+      t.tokenTicker,
+      t.contractAddress,
+    ),
+    byTicker: index("idx_coin_ca_ticker_ticker").on(t.tokenTicker),
+    byCa: index("idx_coin_ca_ticker_ca").on(t.contractAddress),
+    byPriority: index("idx_coin_ca_ticker_priority").on(t.priority),
+  }),
+);
+
 /* ===================== kols ===================== */
 export const kols = pgTable(
   "kols",
@@ -185,6 +229,8 @@ export const kolTweets = pgTable(
       .defaultNow(),
 
     rawJson: jsonb("raw_json"),
+    // --- Detect-mentions pipeline resolution flag ---
+    resolved: boolean("resolved").notNull().default(false),
     ...timestamps,
   },
   (t) => ({
@@ -271,3 +317,6 @@ export type NewKolTweet = typeof kolTweets.$inferInsert;
 
 export type TweetTokenMention = typeof tweetTokenMentions.$inferSelect;
 export type NewTweetTokenMention = typeof tweetTokenMentions.$inferInsert;
+
+export type CoinCaTicker = typeof coinCaTicker.$inferSelect;
+export type NewCoinCaTicker = typeof coinCaTicker.$inferInsert;

@@ -1,0 +1,663 @@
+// lib/markets/geckoterminal.ts
+// Solana-only token resolution helpers via GeckoTerminal.
+//
+// Inputs:
+//   1) $tickers   → resolveTickersToContracts
+//   2) base58 CAs → resolveContractsToMeta
+//   3) Names      → resolveNamesToContracts (phrase name, e.g., "unstable")
+//
+// Rules:
+//   • Network = Solana only
+//   • Quote must be SOL / WSOL / USDC
+//   • DEX allowlist = PumpSwap > Raydium > Meteora (hard filter + priority)
+//   • Ranking after DEX + Quote preference:
+//       24h volume > Liquidity (reserve USD) > Market cap
+//
+// Safeguards:
+//   • Minimal thresholds for volume/liquidity to avoid binding zombie pools
+//   • Trending boost (address/symbol) as tie-breakers
+//   • No fake fallback mapping for unresolved tickers
+//
+// Notes:
+//   • This file expects: canonAddr, isSolAddr, fetchGTJson
+
+import { canonAddr, isSolAddr } from "@/lib/chains/address";
+import { fetchGTJson } from "@/lib/markets/gtFetch";
+
+const GT_BASE =
+  process.env.GECKOTERMINAL_BASE ?? "https://api.geckoterminal.com/api/v2";
+const NETWORK = "solana";
+
+// ---------- Tunables ----------
+/** PumpSwap (3) > Raydium (2) > Meteora (1), others (0 → filtered out) */
+function dexPriority(name?: string) {
+  const s = String(name || "").toLowerCase();
+  if (s.includes("pump")) return 3; // keep PumpSwap top priority (no penalty)
+  if (s.includes("raydium")) return 2;
+  if (s.includes("meteora")) return 1;
+  return 0;
+}
+
+/** Hard allowlist: only accept these DEXes */
+function isAllowedDex(name?: string) {
+  return dexPriority(name) > 0;
+}
+
+/** Prefer SOL/WSOL > USDC > others (others already filtered out) */
+function quotePreferenceScore(sym?: string): number {
+  const s = (sym || "").toUpperCase();
+  if (s === "SOL" || s === "WSOL") return 2;
+  if (s === "USDC") return 1;
+  return 0;
+}
+
+/** Minimal thresholds to suppress zombie pools */
+const MIN_LIQUIDITY_USD = Number(process.env.GT_MIN_LIQ_USD ?? 5_000);
+const MIN_VOLUME24H_USD = Number(process.env.GT_MIN_VOL24H_USD ?? 1_000);
+
+// ---------- Trending (symbols injected from UI/cron) ----------
+let trendingSolanaSymbols = new Set<string>();
+export function setTrendingSymbols(list: string[]) {
+  trendingSolanaSymbols = new Set(list.map((s) => s.toLowerCase()));
+}
+
+// ---------- Types ----------
+type VolUSD = { m5?: number; h1?: number; h6?: number; h24?: number };
+type PoolAttrs = {
+  reserve_in_usd?: number;
+  volume_usd?: VolUSD;
+  name?: string;
+};
+type TokenAttrs = { market_cap_usd?: number | null; fdv_usd?: number | null };
+
+type Candidate = {
+  addr: string; // canonical base58 (token mint on Solana)
+  symbol: string; // token symbol
+  dexName: string; // e.g. "PumpSwap"
+  dexScore: number; // 3/2/1 for allowlisted DEXes, 0 otherwise
+  volume24h: number; // USD
+  reserveUsd: number; // USD
+  marketCap: number; // USD
+  quoteSymbol?: string; // SOL/WSOL/USDC
+  trendingBoost: number; // 0..(addr+symbol bonus)
+};
+
+type GTToken = {
+  id: string;
+  symbol: string;
+  name: string;
+  address: string;
+  attrs: TokenAttrs;
+};
+type GTDex = { id: string; name: string };
+
+// ---------- Helpers ----------
+function pickVolume(v?: VolUSD): number {
+  if (!v) return 0;
+  return (
+    (typeof v.h24 === "number" && v.h24) ||
+    (typeof v.h6 === "number" && v.h6) ||
+    (typeof v.h1 === "number" && v.h1) ||
+    (typeof v.m5 === "number" && v.m5) ||
+    0
+  );
+}
+function pickMcap(t?: TokenAttrs): number {
+  if (!t) return 0;
+  if (typeof t.market_cap_usd === "number") return t.market_cap_usd;
+  if (typeof t.fdv_usd === "number") return t.fdv_usd;
+  return 0;
+}
+
+// Composite comparator for candidates (bigger is better)
+// (applied after DEX allowlist + quote filter)
+function compareCandidates(a: Candidate, b: Candidate): number {
+  const aScore =
+    a.trendingBoost * 100_000 +
+    a.dexScore * 10_000 +
+    quotePreferenceScore(a.quoteSymbol) * 5_000 +
+    a.volume24h * 50 +
+    a.reserveUsd * 5 +
+    a.marketCap;
+
+  const bScore =
+    b.trendingBoost * 100_000 +
+    b.dexScore * 10_000 +
+    quotePreferenceScore(b.quoteSymbol) * 5_000 +
+    b.volume24h * 50 +
+    b.reserveUsd * 5 +
+    b.marketCap;
+
+  return bScore - aScore;
+}
+
+// Strict picker for $ticker: DEX > Quote (SOL/WSOL > USDC) > 24h vol > Liquidity > Mcap
+function pickBestForTicker(cands: Candidate[]): Candidate | undefined {
+  if (!cands.length) return undefined;
+
+  // 1) DEX priority
+  let best = cands;
+  const maxDex = Math.max(...best.map((c) => c.dexScore));
+  best = best.filter((c) => c.dexScore === maxDex);
+
+  // 2) Quote preference
+  const qp = (s?: string) =>
+    s?.toUpperCase() === "SOL" || s?.toUpperCase() === "WSOL"
+      ? 2
+      : s?.toUpperCase() === "USDC"
+        ? 1
+        : 0;
+  const maxQP = Math.max(...best.map((c) => qp(c.quoteSymbol)));
+  best = best.filter((c) => qp(c.quoteSymbol) === maxQP);
+
+  // 3) Volume > Liquidity > Mcap
+  best.sort(
+    (a, b) =>
+      b.volume24h - a.volume24h ||
+      b.reserveUsd - a.reserveUsd ||
+      b.marketCap - a.marketCap,
+  );
+  return best[0];
+}
+
+// ---------- Trending addresses from GT ----------
+async function fetchSolanaTrendingAddrs(): Promise<Set<string>> {
+  const out = new Set<string>();
+  const endpoints = [
+    `${GT_BASE}/networks/${NETWORK}/trending_pools?include=base_token,quote_token`,
+    `${GT_BASE}/trending_pools?network=${NETWORK}&include=base_token,quote_token`,
+  ];
+
+  const collect = (j: any) => {
+    const included = Array.isArray(j?.included) ? j.included : [];
+    for (const x of included) {
+      const ty = String(x?.type || "");
+      if (!ty.includes("token")) continue;
+      const addr = canonAddr(String(x?.attributes?.address || ""));
+      if (addr && isSolAddr(addr)) out.add(addr);
+    }
+  };
+
+  for (const url of endpoints) {
+    try {
+      const j = await fetchGTJson(url).catch(() => null);
+      if (j) collect(j);
+      if (out.size > 0) break;
+    } catch {
+      // ignore and continue
+    }
+  }
+  return out;
+}
+
+// ---------- Fuzzy helpers for names ----------
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+function dice(a: string, b: string) {
+  const A = norm(a),
+    B = norm(b);
+  if (!A || !B) return 0;
+  const bg = (t: string) =>
+    new Set(
+      Array.from({ length: Math.max(0, t.length - 1) }, (_, i) =>
+        t.slice(i, i + 2),
+      ),
+    );
+  const A2 = bg(A),
+    B2 = bg(B);
+  let inter = 0;
+  for (const x of A2) if (B2.has(x)) inter++;
+  return (2 * inter) / (A2.size + B2.size || 1);
+}
+
+// ---------- Core search: /search/pools ----------
+async function searchPoolsAsCandidates(
+  query: string,
+  mode: "ticker" | "addr" | "name",
+  trendingAddrs: Set<string>,
+): Promise<Candidate[]> {
+  try {
+    const url =
+      `${GT_BASE}/search/pools?query=${encodeURIComponent(query)}` +
+      `&filter[network]=${NETWORK}&include=base_token,quote_token,dex&per_page=50`;
+    const j: any = await fetchGTJson(url).catch(() => null);
+    if (!j) return [];
+
+    const data = (Array.isArray(j?.data) ? j.data : []) as any[];
+    const included = (Array.isArray(j?.included) ? j.included : []) as any[];
+
+    const tokens: GTToken[] = included
+      .filter((x: any) => String(x?.type || "").includes("token"))
+      .map(
+        (x: any): GTToken => ({
+          id: String(x?.id ?? ""),
+          symbol: String(x?.attributes?.symbol ?? ""),
+          name: String(x?.attributes?.name ?? ""),
+          address: String(x?.attributes?.address ?? ""),
+          attrs: {
+            market_cap_usd: (x?.attributes?.market_cap_usd ??
+              x?.attributes?.fdv_usd ??
+              null) as number | null,
+            fdv_usd: (x?.attributes?.fdv_usd ?? null) as number | null,
+          },
+        }),
+      );
+
+    const dexes: GTDex[] = included
+      .filter((x: any) => String(x?.type || "").includes("dex"))
+      .map(
+        (x: any): GTDex => ({
+          id: String(x?.id ?? ""),
+          name: String(x?.attributes?.name ?? x?.attributes?.slug ?? ""),
+        }),
+      );
+    const dexNameById = new Map(dexes.map((d) => [d.id, d.name]));
+
+    const cands: Candidate[] = [];
+    for (const row of data) {
+      const attrs: PoolAttrs = (row?.attributes as PoolAttrs) || {};
+      const baseId = String(row?.relationships?.base_token?.data?.id || "");
+      const quoteId = String(row?.relationships?.quote_token?.data?.id || "");
+      const dexRelId = String(row?.relationships?.dex?.data?.id || "");
+
+      const base = tokens.find((t) => t.id === baseId);
+      const quote = tokens.find((t) => t.id === quoteId);
+      const dexName =
+        dexNameById.get(dexRelId) ||
+        String((attrs as any).dex_name ?? attrs.name ?? "");
+
+      // DEX allowlist
+      if (!isAllowedDex(dexName)) continue;
+
+      const baseIsSol = isSolAddr(base?.address || "");
+      const quoteIsSol = isSolAddr(quote?.address || "");
+      if (!baseIsSol && !quoteIsSol) continue; // Solana side must exist
+
+      const quoteSymbol = String(quote?.symbol || "").toUpperCase();
+      // Quote hard filter
+      if (!["SOL", "WSOL", "USDC"].includes(quoteSymbol)) continue;
+
+      // Pick side & match logic
+      let chosenAddr: string | null = null;
+      let chosenSymbol = "";
+
+      if (mode === "addr") {
+        const qAddr = canonAddr(query);
+        if (baseIsSol && canonAddr(base!.address) === qAddr) {
+          chosenAddr = qAddr;
+          chosenSymbol = base?.symbol || "";
+        } else if (quoteIsSol && canonAddr(quote!.address) === qAddr) {
+          chosenAddr = qAddr;
+          chosenSymbol = quote?.symbol || "";
+        } else {
+          continue;
+        }
+      } else if (mode === "ticker") {
+        const qTicker = String(query || "")
+          .toLowerCase()
+          .replace(/^\$+/, "");
+        const baseMatch = String(base?.symbol || "").toLowerCase() === qTicker;
+        const quoteMatch =
+          String(quote?.symbol || "").toLowerCase() === qTicker;
+        if (baseIsSol && baseMatch) {
+          chosenAddr = canonAddr(base!.address);
+          chosenSymbol = base?.symbol || "";
+        } else if (quoteIsSol && quoteMatch) {
+          chosenAddr = canonAddr(quote!.address);
+          chosenSymbol = quote?.symbol || "";
+        } else {
+          continue;
+        }
+      } else {
+        // mode === "name" (phrase fuzzy)
+        const baseSym = String(base?.symbol || "");
+        const baseName = String(base?.name || "");
+        const quoteSym = String(quote?.symbol || "");
+        const quoteName = String(quote?.name || "");
+        const pairName = String(attrs?.name || `${baseSym}/${quoteSym}`);
+
+        const TH = 0.28;
+        const qName = String(query || "").toLowerCase();
+        const like = (q: string, s: string) =>
+          !!s && (s.toLowerCase().includes(q) || dice(q, s) >= TH);
+
+        const baseHit = like(qName, baseSym) || like(qName, baseName);
+        const quoteHit = like(qName, quoteSym) || like(qName, quoteName);
+        const pairHit = like(qName, pairName);
+
+        if (baseIsSol && (baseHit || pairHit)) {
+          chosenAddr = canonAddr(base!.address);
+          chosenSymbol = baseSym || baseName || base?.symbol || "";
+        } else if (quoteIsSol && (quoteHit || pairHit)) {
+          chosenAddr = canonAddr(quote!.address);
+          chosenSymbol = quoteSym || quoteName || quote?.symbol || "";
+        } else {
+          continue;
+        }
+      }
+
+      if (!chosenAddr) continue;
+
+      const volume24h = pickVolume(attrs.volume_usd as VolUSD | undefined);
+      const reserveUsd = Number(attrs.reserve_in_usd ?? 0);
+
+      // Trending: address hit (+1). Symbol trending set (optional) gives +0.5.
+      const trAddr = trendingAddrs.has(chosenAddr) ? 1 : 0;
+      const trSym = trendingSolanaSymbols.has(
+        (chosenSymbol || "").toLowerCase(),
+      )
+        ? 0.5
+        : 0;
+      const trendingBoost = trAddr + trSym;
+
+      cands.push({
+        addr: chosenAddr,
+        symbol: chosenSymbol,
+        dexName,
+        dexScore: dexPriority(dexName),
+        volume24h,
+        reserveUsd,
+        marketCap: pickMcap(
+          (chosenSymbol && base?.symbol === chosenSymbol
+            ? base?.attrs
+            : quote?.attrs) as TokenAttrs | undefined,
+        ),
+        quoteSymbol,
+        trendingBoost,
+      });
+    }
+
+    // Already filtered by DEX allowlist + quote inside the loop; sort for stability
+    return cands.sort(compareCandidates);
+  } catch {
+    return [];
+  }
+}
+
+// ---------- Public APIs ----------
+
+/**
+ * Resolve `$tickers` → Map<ticker(lower), { tokenKey: CA, tokenDisplay: "$TICKER", boostedConf }>
+ *
+ * Implementation details:
+ *  - Perform TWO searches per ticker: "wif" and "$wif".
+ *  - Merge candidates and group by contract address ("address frequency").
+ *  - Pick the address with the highest frequency first (ties → total 24h volume,
+ *    then total reserve USD, then best DEX priority, then quote preference).
+ *  - Finally, within the chosen address cluster, select the best single candidate
+ *    by DEX > quote > 24h volume > reserve > mcap.
+ *  - Apply minimal volume/liquidity thresholds before returning.
+ */
+export async function resolveTickersToContracts(tickers: string[]) {
+  const out = new Map<
+    string,
+    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+  >();
+  if (!tickers?.length) return out;
+
+  const trendingAddrs = await fetchSolanaTrendingAddrs();
+
+  for (const raw of tickers) {
+    const ticker = raw.replace(/^\$+/, "").toLowerCase();
+    const symbolDisplay = `$${ticker.toUpperCase()}`;
+
+    // Two-pass search: "wif" + "$wif"
+    const q1 = ticker;
+    const q2 = `$${ticker}`;
+
+    let cands1 = await searchPoolsAsCandidates(q1, "ticker", trendingAddrs);
+    let cands2 = await searchPoolsAsCandidates(q2, "ticker", trendingAddrs);
+    cands1 = cands1.filter((c) => c.dexScore > 0);
+    cands2 = cands2.filter((c) => c.dexScore > 0);
+
+    const merged = [...cands1, ...cands2];
+    if (!merged.length) continue;
+
+    // ---- Address clustering (frequency first) ----
+    type Agg = {
+      count: number;
+      totalVol: number;
+      totalRes: number;
+      bestDex: number;
+      bestQP: number;
+    };
+    const aggByAddr = new Map<string, Agg>();
+    for (const c of merged) {
+      const prev = aggByAddr.get(c.addr) || {
+        count: 0,
+        totalVol: 0,
+        totalRes: 0,
+        bestDex: 0,
+        bestQP: 0,
+      };
+      prev.count += 1;
+      prev.totalVol += Number(c.volume24h || 0);
+      prev.totalRes += Number(c.reserveUsd || 0);
+      prev.bestDex = Math.max(prev.bestDex, c.dexScore);
+      prev.bestQP = Math.max(prev.bestQP, quotePreferenceScore(c.quoteSymbol));
+      aggByAddr.set(c.addr, prev);
+    }
+
+    // Pick address by: frequency > totalVol > totalRes > bestDex > bestQP
+    const bestAddr = Array.from(aggByAddr.entries())
+      .sort((a, b) => {
+        const A = a[1],
+          B = b[1];
+        return (
+          B.count - A.count ||
+          B.totalVol - A.totalVol ||
+          B.totalRes - A.totalRes ||
+          B.bestDex - A.bestDex ||
+          B.bestQP - A.bestQP
+        );
+      })
+      .map(([addr]) => addr)[0];
+
+    const addrCluster = merged.filter((c) => c.addr === bestAddr);
+    const best = pickBestForTicker(addrCluster);
+
+    // Thresholds: if too weak, do not map (avoid zombie pool binding)
+    if (
+      best &&
+      ((best.volume24h ?? 0) >= MIN_VOLUME24H_USD ||
+        (best.reserveUsd ?? 0) >= MIN_LIQUIDITY_USD)
+    ) {
+      out.set(ticker, {
+        tokenKey: best.addr,
+        tokenDisplay: symbolDisplay,
+        // Stronger floor than names; small boosts for DEX/trending
+        boostedConf: Math.min(
+          100,
+          98 + (best.dexScore > 0 ? 1 : 0) + (best.trendingBoost > 0 ? 1 : 0),
+        ),
+      });
+    }
+    // else unresolved/weak → skip; engine will suppress ticker-only mentions safely
+  }
+  return out;
+}
+
+/** Resolve contract addresses (base58) → Map<addr, { tokenKey: addr, tokenDisplay: "$SYMBOL"|short, boostedConf }> */
+export async function resolveContractsToMeta(addrs: string[]) {
+  const out = new Map<
+    string,
+    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+  >();
+  if (!addrs?.length) return out;
+
+  const trendingAddrs = await fetchSolanaTrendingAddrs();
+  const uniq = Array.from(
+    new Set(addrs.map((a) => canonAddr(String(a || ""))).filter(isSolAddr)),
+  );
+
+  for (const addr of uniq) {
+    const cands = (await searchPoolsAsCandidates(addr, "addr", trendingAddrs))
+      .filter((c) => c.dexScore > 0)
+      .sort(compareCandidates);
+
+    const best = cands[0];
+    if (
+      best &&
+      ((best.volume24h ?? 0) >= MIN_VOLUME24H_USD ||
+        (best.reserveUsd ?? 0) >= MIN_LIQUIDITY_USD)
+    ) {
+      const sym = String(best.symbol || "").trim();
+      const tokenDisplay = sym
+        ? `$${sym.toUpperCase()}`
+        : `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+      out.set(addr, {
+        tokenKey: addr,
+        tokenDisplay,
+        boostedConf: Math.min(
+          100,
+          99 + (best.dexScore > 0 ? 1 : 0) + (best.trendingBoost > 0 ? 1 : 0),
+        ),
+      });
+    } else {
+      // Very weak / no pool found: keep short address, lower confidence
+      out.set(addr, {
+        tokenKey: addr,
+        tokenDisplay: `${addr.slice(0, 4)}…${addr.slice(-4)}`,
+        boostedConf: 90,
+      });
+    }
+  }
+  return out;
+}
+
+/** Resolve phrase names → Map<name(lower), { tokenKey: CA, tokenDisplay: "$SYMBOL"|short, boostedConf }> */
+export async function resolveNamesToContracts(names: string[]) {
+  const out = new Map<
+    string,
+    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+  >();
+  if (!names?.length) return out;
+
+  const trendingAddrs = await fetchSolanaTrendingAddrs();
+
+  for (const raw of names) {
+    const q = String(raw || "").trim();
+    const qLower = q.toLowerCase();
+    if (!qLower) continue;
+
+    let cands = await searchPoolsAsCandidates(qLower, "name", trendingAddrs);
+    if (!cands.length)
+      cands = await searchPoolsAsCandidates(
+        `${qLower} coin`,
+        "name",
+        trendingAddrs,
+      );
+    cands = cands.filter((c) => c.dexScore > 0);
+
+    const best = cands[0];
+    if (
+      best &&
+      ((best.volume24h ?? 0) >= MIN_VOLUME24H_USD ||
+        (best.reserveUsd ?? 0) >= MIN_LIQUIDITY_USD)
+    ) {
+      const sym = String(best.symbol || "").trim();
+      out.set(qLower, {
+        tokenKey: best.addr,
+        tokenDisplay: sym
+          ? `$${sym.toUpperCase()}`
+          : `${best.addr.slice(0, 4)}…${best.addr.slice(-4)}`,
+        // Name-based slightly lower than ticker-based, still boosted by dex/trending
+        boostedConf: Math.min(
+          100,
+          95 + (best.dexScore > 0 ? 1 : 0) + (best.trendingBoost > 0 ? 1 : 0),
+        ),
+      });
+    } else {
+      // unresolved; keep original phrase and a low confidence so later passes can improve it
+      out.set(qLower, { tokenKey: qLower, tokenDisplay: q, boostedConf: 70 });
+    }
+  }
+  return out;
+}
+
+// ==== Debug/Forensics: ranked candidates for $tickers (full list for auditing) ====
+
+export type TickerCandidateVerbose = {
+  addr: string;
+  symbol?: string;
+  dexName?: string;
+  quoteSymbol?: string;
+  volume24h: number;
+  reserveUsd: number;
+  marketCap: number;
+  dexScore: number;
+  trendingBoost: number;
+  score: number; // composite score used only for display
+  addrFreq?: number; // how many times this addr appears across pools/DEXes
+};
+
+/**
+ * Return ranked candidates for each ticker after DEX allowlist & quote filters.
+ * This does NOT change resolution logic; it's purely for debugging/auditing.
+ *
+ * It performs TWO searches per ticker: plain "wif" and "$wif", merges candidates,
+ * and annotates each row with address frequency for easy majority-vote inspection.
+ */
+export async function getTickerCandidatesVerbose(
+  tickers: string[],
+  maxPer = 20,
+): Promise<Map<string, TickerCandidateVerbose[]>> {
+  const out = new Map<string, TickerCandidateVerbose[]>();
+  if (!Array.isArray(tickers) || tickers.length === 0) return out;
+
+  const trendingAddrs = await fetchSolanaTrendingAddrs();
+
+  const compositeScore = (c: {
+    trendingBoost: number;
+    dexScore: number;
+    quoteSymbol?: string;
+    volume24h?: number;
+    reserveUsd?: number;
+    marketCap?: number;
+  }) =>
+    c.trendingBoost * 100_000 +
+    c.dexScore * 10_000 +
+    quotePreferenceScore(c.quoteSymbol) * 5_000 +
+    (c.volume24h ?? 0) * 50 +
+    (c.reserveUsd ?? 0) * 5 +
+    (c.marketCap ?? 0);
+
+  for (const raw of tickers) {
+    const ticker = String(raw || "")
+      .replace(/^\$+/, "")
+      .toLowerCase();
+    if (!ticker) continue;
+
+    // Two-pass: "ticker" + "$ticker"
+    const c1 = await searchPoolsAsCandidates(ticker, `ticker`, trendingAddrs);
+    const c2 = await searchPoolsAsCandidates(
+      `$${ticker}`,
+      `ticker`,
+      trendingAddrs,
+    );
+    const merged = [...c1, ...c2].filter((c) => c.dexScore > 0);
+
+    // addr frequency for display
+    const freq = new Map<string, number>();
+    for (const c of merged) freq.set(c.addr, (freq.get(c.addr) || 0) + 1);
+
+    const ranked = merged.sort(compareCandidates).slice(0, Math.max(1, maxPer));
+    out.set(
+      ticker,
+      ranked.map((c) => ({
+        addr: c.addr,
+        symbol: c.symbol,
+        dexName: c.dexName,
+        quoteSymbol: c.quoteSymbol,
+        volume24h: c.volume24h ?? 0,
+        reserveUsd: c.reserveUsd ?? 0,
+        marketCap: c.marketCap ?? 0,
+        dexScore: c.dexScore,
+        trendingBoost: c.trendingBoost,
+        score: compositeScore(c),
+        addrFreq: freq.get(c.addr) || 1,
+      })),
+    );
+  }
+
+  return out;
+}

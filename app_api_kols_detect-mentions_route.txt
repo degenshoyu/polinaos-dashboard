@@ -1,64 +1,40 @@
 // app/api/kols/detect-mentions/route.ts
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
-import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
-
-import {
-  processTweetsToRows,
-  type MinimalTweet,
-} from "@/lib/kols/detectEngine";
+import { eq, and, gte, lt, sql, inArray, desc } from "drizzle-orm";
+import { processTweetsToRows } from "@/lib/kols/detectEngine";
 
 import { resolveTickerToCA, resolvePhraseToCA } from "@/lib/tokens/resolve";
 
-import { canonAddr } from "@/lib/chains/address";
-
-/* ========================= Runtime hints ========================= */
+/* ========================= Runtime ========================= */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /* ========================= Auth helpers ========================= */
-/**
- * Allow machine-to-machine (cron) access via a shared secret.
- * Accepts the secret from:
- *   - query param: ?secret=...
- *   - headers: x-cron-secret / x-api-key
- */
 function allowByCronSecret(req: Request) {
   const expected = (process.env.CRON_SECRET || "").trim();
   if (!expected) return false;
-
   const url = new URL(req.url);
   const q = url.searchParams.get("secret")?.trim() || "";
   const h =
     req.headers.get("x-cron-secret")?.trim() ||
     req.headers.get("x-api-key")?.trim() ||
     "";
-
   return q === expected || h === expected;
 }
 
-/* ========================= Input schema ========================= */
+/* ========================= Body schema ========================= */
 const Body = z.object({
-  // Handle or "*" / "all"
   screen_name: z.string().min(1),
-  // Scan window (in days)
   days: z.number().int().min(1).max(30).optional().default(7),
-  /**
-   * When true:
-   *   - only scan unresolved tweets (kol_tweets.resolved = false)
-   *   - after successful CA writes, mark those tweets as resolved=true
-   */
   missingOnly: z.boolean().optional().default(true),
 });
 
-/* ========================= Core runner ========================= */
+/* ========================= Core runner (single window) ========================= */
 async function runDetectOnce(
   params: { screen_name: string; days: number; missingOnly: boolean; url: URL },
   log: (e: any) => void,
@@ -71,15 +47,12 @@ async function runDetectOnce(
 
   log({ event: "start", handle: handle ?? "*", days, missingOnly });
 
-  // Calculate scan window: [since, until)
   const now = new Date();
   const since = new Date(now);
   since.setDate(now.getDate() - (days - 1));
   const until = new Date(now);
   until.setDate(now.getDate() + 1);
 
-  // Fetch candidate tweets (newest first).
-  // IMPORTANT: when missingOnly=true, only scan unresolved tweets.
   const tweets = await db
     .select({
       tweetId: kolTweets.tweetId,
@@ -117,55 +90,49 @@ async function runDetectOnce(
     };
   }
 
-  // 1) Extraction only: get raw mentions (no market calls here)
-  const minimal: MinimalTweet[] = tweets.map((t) => ({
-    tweetId: t.tweetId,
-    textContent: t.textContent,
-  }));
-
-  const { rows: extractedRows, stats } = await processTweetsToRows(
-    minimal,
+  const { rows: rawRows, stats } = await processTweetsToRows(
+    tweets.map((t) => ({ tweetId: t.tweetId, textContent: t.textContent })),
     log,
   );
-  log({ event: "extracted_rows", count: extractedRows.length });
 
-  // 2) Normalize ticker/phrase -> CA via resolver (knowledge base + GT search)
-  const normalizedRows = await Promise.all(
-    extractedRows.map(async (r) => {
+  const rows = await Promise.all(
+    rawRows.map(async (r) => {
       if (r.source === "ticker") {
-        const token = (r.tokenDisplay || r.tokenKey || "").replace(/^\$+/, "");
-        const hit = await resolveTickerToCA(token).catch(() => null);
+        const tick = (r.tokenDisplay || r.tokenKey || "").replace(/^\$+/, "");
+        const hit = await resolveTickerToCA(tick).catch(() => null);
         if (hit?.contractAddress) {
-          return { ...r, tokenKey: hit.contractAddress };
+          return {
+            ...r,
+            tokenKey: hit.contractAddress,
+          };
         }
-        return r; // unresolved; will be filtered out by CA-only gate below
+        return r;
       }
       if (r.source === "phrase") {
         const phrase = (r.tokenDisplay || r.tokenKey || "").trim();
         const hit = await resolvePhraseToCA(phrase).catch(() => null);
         if (hit?.contractAddress) {
-          return { ...r, tokenKey: hit.contractAddress };
+          return {
+            ...r,
+            tokenKey: hit.contractAddress,
+          };
         }
-        return r; // unresolved; will be filtered out by CA-only gate below
+        return r;
       }
-      // 'ca' or others: pass through
       return r;
     }),
   );
 
-  // 3) FINAL DEFENSE: only keep rows whose tokenKey is a valid Solana CA.
-  const caRows = normalizedRows
-    .map((r) => {
-      const a = canonAddr(String(r.tokenKey || ""));
-      return a ? { ...r, tokenKey: a } : null;
-    })
-    .filter((x): x is NonNullable<typeof x> => Boolean(x));
+  if (!rows.length) {
+    const scannedIds = tweets.map((t) => t.tweetId);
+    if (scannedIds.length) {
+      await db
+        .update(kolTweets)
+        .set({ resolved: true, updatedAt: new Date() })
+        .where(inArray(kolTweets.tweetId, scannedIds));
+    }
 
-  log({ event: "ca_rows", count: caRows.length });
-
-  if (!caRows.length) {
-    // No CA to write; do NOT mark tweets resolved to allow future attempts.
-    // (If you prefer to mark as resolved even without a CA, change here.)
+    log({ event: "done", rows: 0, inserted: 0, updated: 0 });
     return {
       ok: true,
       handle: handle ?? "*",
@@ -177,10 +144,8 @@ async function runDetectOnce(
     };
   }
 
-  // 4) Plan upsert: check existing (tweet_id, trigger_key)
-  const tweetIds = Array.from(new Set(caRows.map((r) => r.tweetId)));
-  const triggers = Array.from(new Set(caRows.map((r) => r.triggerKey)));
-
+  const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
+  const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
   const existingPairs = await db
     .select({
       tweetId: tweetTokenMentions.tweetId,
@@ -198,28 +163,26 @@ async function runDetectOnce(
   const existsMap = new Map(
     existingPairs.map((e) => [`${e.tweetId}___${e.triggerKey}`, e.tokenKey]),
   );
-
-  const willInsert = caRows.filter(
+  const willInsert = rows.filter(
     (r) => !existsMap.has(`${r.tweetId}___${r.triggerKey}`),
   ).length;
-  const willUpdate = caRows.filter((r) => {
+  const willUpdate = rows.filter((r) => {
     const prev = existsMap.get(`${r.tweetId}___${r.triggerKey}`);
     return prev && prev !== r.tokenKey;
   }).length;
 
   log({
     event: "upsert_planning",
-    rows: caRows.length,
+    rows: rows.length,
     willInsert,
     willUpdate,
   });
 
-  // 5) Upsert by chunks
   const CHUNK = 200;
-  for (let i = 0; i < caRows.length; i += CHUNK) {
-    const chunk = caRows.slice(i, i + CHUNK).map((r) => ({
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK).map((r) => ({
       tweetId: r.tweetId,
-      tokenKey: r.tokenKey, // final CA
+      tokenKey: r.tokenKey,
       tokenDisplay: r.tokenDisplay,
       confidence: r.confidence,
       source: r.source as (typeof mentionSource.enumValues)[number],
@@ -243,18 +206,16 @@ async function runDetectOnce(
       });
   }
 
-  // 6) Mark tweets that had at least one CA written as resolved=true
-  const processedTweetIds = Array.from(new Set(caRows.map((r) => r.tweetId)));
-  if (processedTweetIds.length) {
+  if (tweetIds.length) {
     await db
       .update(kolTweets)
       .set({ resolved: true, updatedAt: new Date() })
-      .where(inArray(kolTweets.tweetId, processedTweetIds));
+      .where(inArray(kolTweets.tweetId, tweetIds));
   }
 
   log({
     event: "done",
-    rows: caRows.length,
+    rows: rows.length,
     inserted: willInsert,
     updated: willUpdate,
   });
@@ -272,11 +233,10 @@ async function runDetectOnce(
 
 /* ========================= Route (POST) ========================= */
 export async function POST(req: Request) {
-  // Admin session OR cron secret
+  // Admin 或 CRON 密钥
   const session = await getServerSession(authOptions);
   const isAdmin = Boolean((session?.user as any)?.isAdmin);
   const bySecret = allowByCronSecret(req);
-
   if (!isAdmin && !bySecret) {
     return NextResponse.json(
       { ok: false, error: "forbidden" },
@@ -301,15 +261,11 @@ export async function POST(req: Request) {
             controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
           (async () => {
             try {
-              write({ event: "hello", ts: Date.now() });
               const result = await runDetectOnce(params, write);
               write({ event: "result", result });
               controller.close();
             } catch (e: any) {
-              write({
-                event: "error",
-                message: e?.message || String(e),
-              });
+              write({ event: "error", message: e?.message || String(e) });
               controller.close();
             }
           })();
@@ -325,7 +281,6 @@ export async function POST(req: Request) {
     );
   }
 
-  // Non-streaming JSON response
   const result = await runDetectOnce(params, () => {});
   return NextResponse.json(result);
 }
