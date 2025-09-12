@@ -7,6 +7,22 @@ import { canonAddr } from "@/lib/chains/address";
 /** ---------------- CA reconstruction (conservative) ---------------- */
 const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 
+/** Majors we never want as signals */
+const BLOCK_TICKERS = new Set(["BTC", "ETH", "SOL", "USDT", "USDC"]);
+
+/** Strip trailing noise like "<name> coin"/"<name> token" */
+const stripCoinSuffix = (raw: string) =>
+  String(raw || "")
+    .replace(/\s+(coin|token)\b/gi, "")
+    .trim();
+
+/** Normalize a bare ticker text (no $) into uppercased ticker */
+const normTicker = (s: string) =>
+  String(s || "")
+    .replace(/^\$+/, "")
+    .trim()
+    .toUpperCase();
+
 /** Rebuild CA from pump.fun links where CA may be split across segments */
 function collectFromPumpFun(text: string): string[] {
   const out: string[] = [];
@@ -69,7 +85,11 @@ export function reconstructCAsFromTweet(text: string): Set<string> {
 
 /** ---------------- Trigger helpers ---------------- */
 function triggerInputFor(m: Mention) {
-  if (m.source === "phrase") return m.tokenDisplay || m.tokenKey || "";
+  if (m.source === "phrase") {
+    // Pause "xxx coin" pattern: normalize to core phrase, no "coin/token" tail
+    const base = m.tokenDisplay || m.tokenKey || "";
+    return stripCoinSuffix(base);
+  }
   if (m.source === "ca") return m.tokenKey || "";
   if (m.tokenDisplay?.startsWith("$")) return m.tokenDisplay;
   return `$${String(m.tokenKey || "").toUpperCase()}`;
@@ -80,10 +100,14 @@ export function makeDeterministicTriggerKey(m: Mention): string {
     const addr = canonAddr(String(m.tokenKey || ""));
     return addr ? `ca:${addr}` : "ca:unknown";
   }
-  if (m.source === "ticker")
+  if (m.source === "ticker") {
     return `tk:${String(m.tokenKey || "").toLowerCase()}`;
-  if (m.source === "phrase")
-    return `ph:${String(m.tokenKey || "").toLowerCase()}`;
+  }
+  if (m.source === "phrase") {
+    // Use normalized phrase core for stable key
+    const core = stripCoinSuffix(m.tokenDisplay || m.tokenKey || "");
+    return `ph:${core.toLowerCase()}`;
+  }
   return `uk:${String(m.tokenKey || "").toLowerCase()}`;
 }
 
@@ -146,6 +170,17 @@ export async function processTweetsToRows(
 
     for (const m of ext) {
       const input = triggerInputFor(m);
+      // Early noise filtering:
+      // - drop empty/too-short phrases after normalization
+      if (m.source === "phrase") {
+        const core = input.trim();
+        if (!core || core.length < 2) continue;
+      }
+      // - drop majors tickers early (saves work downstream)
+      if (m.source === "ticker") {
+        const tk = normTicker(m.tokenKey || m.tokenDisplay || "");
+        if (tk && BLOCK_TICKERS.has(tk)) continue;
+      }
       let triggerKey = "";
       let triggerText = "";
 
@@ -173,7 +208,7 @@ export async function processTweetsToRows(
           : `$${String(m.tokenKey || "").toUpperCase()}`;
         uniqueTickers.add(tk);
       } else if (m.source === "phrase") {
-        const name = (m.tokenDisplay || m.tokenKey || "").trim();
+        const name = stripCoinSuffix(m.tokenDisplay || m.tokenKey || "").trim();
         if (name) phraseNames.add(name);
       }
     }
@@ -197,12 +232,14 @@ export async function processTweetsToRows(
         ? canonAddr(String(m.tokenKey || "")) || ""
         : String(m.tokenKey || "");
     const tokenDisplay =
-      m.tokenDisplay ??
-      (m.source === "ticker"
-        ? m.tokenKey
-          ? `$${String(m.tokenKey).toUpperCase()}`
-          : null
-        : (m.tokenKey ?? null));
+      m.source === "phrase"
+        ? stripCoinSuffix(m.tokenDisplay || m.tokenKey || "") || null
+        : (m.tokenDisplay ??
+          (m.source === "ticker"
+            ? m.tokenKey
+              ? `$${String(m.tokenKey).toUpperCase()}`
+              : null
+            : (m.tokenKey ?? null)));
 
     const key = `${tweetId}___${triggerKey}`;
     if (seen.has(key)) continue;

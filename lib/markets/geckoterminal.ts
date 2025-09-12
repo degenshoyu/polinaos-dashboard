@@ -26,7 +26,13 @@ export function setTrendingSymbols(list: string[]) {
 export async function resolveTickersToContracts(tickers: string[]) {
   const out = new Map<
     string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+    {
+      tokenKey: string;
+      tokenDisplay: string;
+      boostedConf: number;
+      symbol?: string;
+      tokenName?: string;
+    }
   >();
   if (!tickers?.length) return out;
 
@@ -117,6 +123,8 @@ export async function resolveTickersToContracts(tickers: string[]) {
       out.set(t0, {
         tokenKey: best.addr,
         tokenDisplay: symbolDisplay,
+        symbol: best.symbol,
+        tokenName: best.tokenName,
         boostedConf: Math.min(
           100,
           98 + (best.dexScore > 0 ? 1 : 0) + (best.trendingBoost > 0 ? 1 : 0),
@@ -133,7 +141,13 @@ export async function resolveContractsToMeta(addrs: string[]) {
   const trendingAddrs = await fetchSolanaTrendingAddrs();
   const out = new Map<
     string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+    {
+      tokenKey: string;
+      tokenDisplay: string;
+      boostedConf: number;
+      symbol?: string;
+      tokenName?: string;
+    }
   >();
   const uniq = Array.from(new Set(addrs.map((a) => String(a || ""))));
 
@@ -158,6 +172,8 @@ export async function resolveContractsToMeta(addrs: string[]) {
         tokenDisplay: sym
           ? `$${sym.toUpperCase()}`
           : `${addr.slice(0, 4)}…${addr.slice(-4)}`,
+        symbol: sym,
+        tokenName: best.tokenName,
         boostedConf: Math.min(
           100,
           99 + (best.dexScore > 0 ? 1 : 0) + (best.trendingBoost > 0 ? 1 : 0),
@@ -178,7 +194,13 @@ export async function resolveContractsToMeta(addrs: string[]) {
 export async function resolveNamesToContracts(names: string[]) {
   const out = new Map<
     string,
-    { tokenKey: string; tokenDisplay: string; boostedConf: number }
+    {
+      tokenKey: string;
+      tokenDisplay: string;
+      boostedConf: number;
+      symbol?: string;
+      tokenName?: string;
+    }
   >();
   if (!names?.length) return out;
 
@@ -217,6 +239,8 @@ export async function resolveNamesToContracts(names: string[]) {
         tokenDisplay: sym
           ? `$${sym.toUpperCase()}`
           : `${best.addr.slice(0, 4)}…${best.addr.slice(-4)}`,
+        symbol: sym,
+        tokenName: best.tokenName,
         boostedConf: Math.min(
           100,
           95 + (best.dexScore > 0 ? 1 : 0) + (best.trendingBoost > 0 ? 1 : 0),

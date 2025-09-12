@@ -5,6 +5,7 @@ import {
   text,
   timestamp,
   jsonb,
+  serial,
   integer,
   numeric,
   index,
@@ -118,6 +119,36 @@ export const mentionSource = pgEnum("mention_source", [
   "upper",
   "llm",
 ]);
+
+/* ===================== token_resolution_issues ===================== */
+export const tokenResolutionIssues = pgTable(
+  "token_resolution_issues",
+  {
+    id: serial("id").primaryKey(),
+    // reuse mentionSource enum for kind (ticker/phrase)
+    kind: mentionSource("kind").notNull(),
+    // normalized key: e.g. "WIF" for ticker, "dogwifhat" for phrase
+    normKey: text("norm_key").notNull(),
+    // human-readable last sample (raw trigger text / phrase)
+    sample: text("sample"),
+    // last error & reason (e.g. "resolver_miss", "missing_meta")
+    lastReason: text("last_reason"),
+    lastError: text("last_error"),
+    // last sighting
+    lastTweetId: text("last_tweet_id"),
+    lastTriggerKey: text("last_trigger_key"),
+    // how many times we have seen this unresolved key
+    seenCount: integer("seen_count").notNull().default(1),
+    // optional candidates snapshot for debugging (addr list, metrics, etc.)
+    candidates: jsonb("candidates"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  },
+  (t) => ({
+    uniq: uniqueIndex("res_issue_kind_key_uniq").on(t.kind, t.normKey),
+    idxUpdated: index("res_issue_updated_idx").on(t.updatedAt),
+  }),
+);
 
 /* ===================== coin_ca_ticker ===================== */
 // Knowledge base for mapping Ticker <-> Contract Address (Solana-first).

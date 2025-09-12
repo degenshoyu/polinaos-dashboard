@@ -42,7 +42,7 @@ export function pickPoolMcap(attrs?: { [k: string]: any }): number {
 export function dexPriority(name?: string) {
   const s = String(name || "").toLowerCase();
   if (s.includes("pump")) return 3; // PumpSwap highest (no penalty)
-  if (s.includes("raydium")) return 2;
+  if (s.includes("raydium")) return 3;
   if (s.includes("meteora")) return 1;
   return 0;
 }

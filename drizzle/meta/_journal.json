@@ -50,6 +50,13 @@
       "when": 1757580402572,
       "tag": "0006_heavy_franklin_richards",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1757655783180,
+      "tag": "0007_giant_hardball",
+      "breakpoints": true
     }
   ]
 }

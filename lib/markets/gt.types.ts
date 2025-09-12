@@ -26,6 +26,7 @@ export type TokenAttrs = {
 export type Candidate = {
   addr: string; // Solana mint
   symbol: string; // token symbol (may include leading "$")
+  tokenName?: string; // token display name (from GT token.name)
   dexName: string; // e.g., "PumpSwap"
   dexScore: number; // priority score (3/2/1)
   volume24h: number; // USD

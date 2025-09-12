@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
 import { kolTweets, tweetTokenMentions, mentionSource } from "@/lib/db/schema";
+import { resolveTickerToCA, resolvePhraseToCA } from "@/lib/tokens/resolve";
+import { canonAddr } from "@/lib/chains/address";
 import {
   and,
   or,
@@ -59,6 +61,7 @@ const Q = z.object({
   cursor: z.string().optional(),
   stream: z.union([z.literal("1"), z.literal("true")]).optional(),
 
+  // price fill knobs
   fill_prices: z.union([z.literal("1"), z.literal("true")]).optional(),
   price_try_pools: z.coerce.number().int().min(1).max(5).default(3),
   price_grace_seconds: z.coerce.number().int().min(0).max(600).default(90),
@@ -83,7 +86,7 @@ function decCursor(s?: string): Cursor | null {
 
 const NET_KEY = "solana";
 
-// ↓↓↓ 降低默认并发，避免 429
+// ↓↓↓ lower default concurrency to avoid 429
 const GT_CONCURRENCY = Math.max(
   1,
   Number(process.env.DETECT_BATCH_PRICE_CONCURRENCY ?? 2),
@@ -100,9 +103,14 @@ type PoolsCache = Map<string, PoolInfo[]>; // tokenKey -> pools
 type PriceCache = Map<string, number | null>; // `${pool}:${minuteTs}` -> price
 
 function minuteKey(tsSec: number) {
-  return Math.floor(tsSec / 60) * 60; // align to minute
+  // one price per minute per pool is enough for our backfill
+  return Math.floor(tsSec / 60) * 60;
 }
 
+/**
+ * Try to fill price for a single mention row (by tokenKey + publishedAt).
+ * It looks up top pools for the token and queries OHLCV; memoized by minute.
+ */
 async function fillOnePrice(
   row: {
     mentionId: string;
@@ -140,17 +148,24 @@ async function fillOnePrice(
         log({
           event: "price_skip",
           id: row.mentionId,
-          why: "gt-404-unindexed",
+          why: "no-pools",
+          tokenKey: row.tokenKey,
+          network: NET_KEY,
         });
-        poolsCache.set(row.tokenKey, []); // cache empty to avoid re-hit
         return false;
       }
-      log({ event: "price_resolve_error", id: row.mentionId, err: msg });
+      log({ event: "price_err_pools", id: row.mentionId, message: msg });
       return false;
     }
   }
   if (!pools?.length) {
-    log({ event: "price_not_found", id: row.mentionId, tried: [] });
+    log({
+      event: "price_skip",
+      id: row.mentionId,
+      why: "no-pools",
+      tokenKey: row.tokenKey,
+      network: NET_KEY,
+    });
     return false;
   }
   log({ event: "price_candidates", id: row.mentionId, pools });
@@ -195,31 +210,29 @@ async function fillOnePrice(
           pool: p.address,
           ts,
           price,
+          cached: false,
         });
         return true;
       }
     } catch (e: any) {
       log({
-        event: "ohlcv_error",
+        event: "price_err_ohlcv",
         id: row.mentionId,
         pool: p.address,
-        err: e?.message || String(e),
+        message: e?.message || String(e),
       });
     }
   }
-
-  log({
-    event: "price_not_found",
-    id: row.mentionId,
-    tried: pools.map((p) => p.address),
-  });
+  log({ event: "price_fail", id: row.mentionId, ts, tokenKey: row.tokenKey });
   return false;
 }
 
+/** Sweep pass to fill prices for existing rows with NULL priceUsdAt. */
 async function fillPricesGlobalPass(
   params: { limit: number; tryPools: number; graceSeconds: number },
   log: (e: any) => void,
-): Promise<{ filled: number; scanned: number; pickedTweets: number }> {
+) {
+  // pick a batch of mentions with null price, ordered by tweet publish time asc
   const rows = await db
     .select({
       mentionId: tweetTokenMentions.id,
@@ -265,22 +278,16 @@ async function fillPricesGlobalPass(
         poolsCache,
         priceCache,
       });
-      if (ok) filled += 1;
+      if (ok) filled++;
     }
   }
   const workers = Array.from({ length: GT_CONCURRENCY }, () => worker());
   await Promise.all(workers);
-
-  log({
-    event: "price_global_done",
-    filled,
-    scanned: rows.length,
-    pickedTweets: byTweet.size,
-  });
+  log({ event: "price_global_done", filled, scanned: rows.length });
   return { filled, scanned: rows.length, pickedTweets: byTweet.size };
 }
 
-/* ========================= Page runner (detect + optional global price sweep) ========================= */
+/* ========================= Core - one page ========================= */
 async function runDetectPage(
   params: {
     screen_name: string;
@@ -316,29 +323,30 @@ async function runDetectPage(
   );
   const maxPasses = Math.max(
     1,
-    Number(process.env.DETECT_BATCH_PRICE_GLOBAL_SWEEP_PASSES ?? 20),
+    Number(process.env.DETECT_BATCH_PRICE_MAX_PASSES ?? 3),
   );
   const sleepMs = Math.max(
     0,
-    Number(process.env.DETECT_BATCH_PRICE_SWEEP_SLEEP_MS ?? 300),
+    Number(process.env.DETECT_BATCH_PRICE_SLEEP_MS ?? 0),
   );
 
   log({
     event: "start",
+    routeId: ROUTE_ID,
     handle: handle ?? "*",
     days,
     missingOnly,
     limit,
-    cursor: cursor ?? null,
     fillPrices,
+    priceTryPools,
+    priceGraceSeconds,
+    globalLimit,
   });
 
   // time window
   const now = new Date();
-  const since = new Date(now);
-  since.setDate(now.getDate() - (days - 1));
-  const until = new Date(now);
-  until.setDate(now.getDate() + 1);
+  const until = now; // exclusive
+  const since = new Date(now.getTime() - days * 24 * 3600 * 1000);
 
   // cursor (publishDate DESC, tweetId DESC)
   const c = decCursor(cursor || undefined);
@@ -377,38 +385,7 @@ async function runDetectPage(
     .orderBy(desc(kolTweets.publishDate), desc(kolTweets.tweetId))
     .limit(limit);
 
-  log({ event: "loaded", tweets: page.length });
-
-  if (page.length === 0) {
-    if (fillPrices) {
-      let pass = 0;
-      while (pass < maxPasses) {
-        pass++;
-        const { filled, scanned } = await fillPricesGlobalPass(
-          {
-            limit: globalLimit,
-            tryPools: priceTryPools,
-            graceSeconds: priceGraceSeconds,
-          },
-          log,
-        );
-        if (scanned < globalLimit || filled === 0) break;
-        if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
-      }
-      log({ event: "price_fill_done_page" });
-    }
-    return {
-      routeId: ROUTE_ID,
-      ok: true,
-      handle: handle ?? "*",
-      days,
-      scannedTweets: 0,
-      mentionsDetected: 0,
-      inserted: 0,
-      updated: 0,
-      nextCursor: null,
-    };
-  }
+  log({ event: "loaded", count: page.length, until, since, limit });
 
   // filter if missingOnly
   let candidates = page;
@@ -432,12 +409,91 @@ async function runDetectPage(
     log,
   );
 
+  // Normalize: resolve ticker/phrase -> CA and keep only valid Solana CAs
+  const normalizedRows = await Promise.all(
+    rows.map(async (r) => {
+      if (r.source === "ticker") {
+        const token = (r.tokenDisplay || r.tokenKey || "").replace(/^\$+/, "");
+        log({
+          event: "resolver_try",
+          kind: "ticker",
+          tweetId: r.tweetId,
+          triggerKey: r.triggerKey,
+          token,
+        });
+        const hit = await resolveTickerToCA(token).catch(() => null);
+        if (hit?.contractAddress) {
+          log({
+            event: "resolver_hit",
+            kind: "ticker",
+            tweetId: r.tweetId,
+            triggerKey: r.triggerKey,
+            addr: hit.contractAddress,
+            tokenTicker: hit.tokenTicker ?? null,
+            tokenName: hit.tokenName ?? null,
+          });
+          return { ...r, tokenKey: hit.contractAddress };
+        }
+        log({
+          event: "resolver_miss",
+          kind: "ticker",
+          tweetId: r.tweetId,
+          triggerKey: r.triggerKey,
+          token,
+        });
+        return r;
+      }
+      if (r.source === "phrase") {
+        const phrase = (r.tokenDisplay || r.tokenKey || "").trim();
+        log({
+          event: "resolver_try",
+          kind: "phrase",
+          tweetId: r.tweetId,
+          triggerKey: r.triggerKey,
+          phrase,
+        });
+        const hit = await resolvePhraseToCA(phrase).catch(() => null);
+        if (hit?.contractAddress) {
+          log({
+            event: "resolver_hit",
+            kind: "phrase",
+            tweetId: r.tweetId,
+            triggerKey: r.triggerKey,
+            addr: hit.contractAddress,
+            tokenTicker: hit.tokenTicker ?? null,
+            tokenName: hit.tokenName ?? null,
+          });
+          return { ...r, tokenKey: hit.contractAddress };
+        }
+        log({
+          event: "resolver_miss",
+          kind: "phrase",
+          tweetId: r.tweetId,
+          triggerKey: r.triggerKey,
+          phrase,
+        });
+        return r;
+      }
+      return r; // 'ca' passthrough
+    }),
+  );
+
+  // FINAL DEFENSE: only keep mentions with a valid Solana contract address
+  const caRows = normalizedRows
+    .map((r) => {
+      const a = canonAddr(String(r.tokenKey || ""));
+      return a ? { ...r, tokenKey: a } : null;
+    })
+    .filter((x): x is NonNullable<typeof x> => Boolean(x));
+  log({ event: "ca_rows", count: caRows.length });
+
   const last = page[page.length - 1];
   const nextCursor = last
     ? encCursor({ ts: last.published.toISOString(), id: last.tweetId })
     : null;
 
-  if (!rows.length) {
+  if (!caRows.length) {
+    // Nothing to insert/update on this page; optionally run price fill sweep
     if (fillPrices) {
       log({
         event: "price_fill_start",
@@ -475,9 +531,9 @@ async function runDetectPage(
     };
   }
 
-  // upsert planning
-  const tweetIds = Array.from(new Set(rows.map((r) => r.tweetId)));
-  const triggers = Array.from(new Set(rows.map((r) => r.triggerKey)));
+  // Upsert planning based on CA rows only
+  const tweetIds = Array.from(new Set(caRows.map((r) => r.tweetId)));
+  const triggers = Array.from(new Set(caRows.map((r) => r.triggerKey)));
   const existingPairs = await db
     .select({
       tweetId: tweetTokenMentions.tweetId,
@@ -495,26 +551,51 @@ async function runDetectPage(
   const existsMap = new Map(
     existingPairs.map((e) => [`${e.tweetId}___${e.triggerKey}`, e.tokenKey]),
   );
-  const willInsert = rows.filter(
+  const willInsert = caRows.filter(
     (r) => !existsMap.has(`${r.tweetId}___${r.triggerKey}`),
   ).length;
-  const willUpdate = rows.filter((r) => {
+  const willUpdate = caRows.filter((r) => {
     const prev = existsMap.get(`${r.tweetId}___${r.triggerKey}`);
     return prev && prev !== r.tokenKey;
   }).length;
 
-  // upsert
+  log({
+    event: "upsert_planning",
+    rows: caRows.length,
+    willInsert,
+    willUpdate,
+  });
+
+  // Upsert by chunks
   const CHUNK = 200;
-  for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk = rows.slice(i, i + CHUNK).map((r) => ({
+  for (let i = 0; i < caRows.length; i += CHUNK) {
+    const chunk = caRows.slice(i, i + CHUNK).map((r) => ({
       tweetId: r.tweetId,
-      tokenKey: r.tokenKey,
+      tokenKey: r.tokenKey, // final CA
       tokenDisplay: r.tokenDisplay,
       confidence: r.confidence,
       source: r.source as (typeof mentionSource.enumValues)[number],
       triggerKey: r.triggerKey,
       triggerText: r.triggerText,
     }));
+
+    // Per-row action plan for logging
+    const actions = chunk.map((r) => {
+      const key = `${r.tweetId}___${r.triggerKey}`;
+      const prev = existsMap.get(key);
+      if (!prev) return { ...r, action: "insert" as const, prev: null };
+      if (prev !== r.tokenKey) return { ...r, action: "update" as const, prev };
+      return { ...r, action: "noop" as const, prev };
+    });
+    log({
+      event: "db_chunk_plan",
+      i,
+      size: chunk.length,
+      inserts: actions.filter((a) => a.action === "insert").length,
+      updates: actions.filter((a) => a.action === "update").length,
+      noops: actions.filter((a) => a.action === "noop").length,
+    });
+
     await db
       .insert(tweetTokenMentions)
       .values(chunk)
@@ -529,31 +610,28 @@ async function runDetectPage(
           updatedAt: sql`now()`,
         },
       });
+
+    log({
+      event: "db_chunk_written",
+      i,
+      size: chunk.length,
+      inserts: actions.filter((a) => a.action === "insert").length,
+      updates: actions.filter((a) => a.action === "update").length,
+    });
   }
 
-  if (fillPrices) {
+  // Mark tweets with at least one CA mention as resolved
+  const processedTweetIds = Array.from(new Set(caRows.map((r) => r.tweetId)));
+  if (processedTweetIds.length) {
+    await db
+      .update(kolTweets)
+      .set({ resolved: true, updatedAt: new Date() })
+      .where(inArray(kolTweets.tweetId, processedTweetIds));
     log({
-      event: "price_fill_start",
-      tweetIds: page.length,
-      tryPools: priceTryPools,
-      network: NET_KEY,
-      graceSeconds: priceGraceSeconds,
+      event: "tweets_resolved",
+      count: processedTweetIds.length,
+      sample: processedTweetIds.slice(0, 20),
     });
-    let pass = 0;
-    while (pass < maxPasses) {
-      pass++;
-      const { filled, scanned } = await fillPricesGlobalPass(
-        {
-          limit: globalLimit,
-          tryPools: priceTryPools,
-          graceSeconds: priceGraceSeconds,
-        },
-        log,
-      );
-      if (scanned < globalLimit || filled === 0) break;
-      if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
-    }
-    log({ event: "price_fill_done_page" });
   }
 
   return {
@@ -562,14 +640,14 @@ async function runDetectPage(
     handle: handle ?? "*",
     days,
     scannedTweets: stats.scannedTweets,
-    mentionsDetected: rows.length,
+    mentionsDetected: caRows.length,
     inserted: willInsert,
     updated: willUpdate,
     nextCursor,
   };
 }
 
-/* ========================= GET / POST (unchanged) ========================= */
+/* ========================= GET / POST ========================= */
 export async function GET(req: Request) {
   if (!allowByCronSecret(req)) {
     return NextResponse.json(
@@ -625,17 +703,7 @@ export async function GET(req: Request) {
     );
   }
 
-  const result = await runDetectPage(
-    {
-      screen_name: q.screen_name,
-      days: q.days,
-      missingOnly: q.missingOnly,
-      limit: q.limit,
-      cursor: q.cursor,
-      url,
-    },
-    () => {},
-  );
+  const result = await runDetectPage({ ...q, url }, () => {});
   return NextResponse.json(result);
 }
 
@@ -648,7 +716,6 @@ export async function POST(req: Request) {
   }
   const url = new URL(req.url);
   const qs = Object.fromEntries(url.searchParams.entries());
-  const isStream = qs.stream === "1" || qs.stream === "true";
 
   let body: any = {};
   try {
@@ -656,6 +723,14 @@ export async function POST(req: Request) {
   } catch {
     body = {};
   }
+
+  // Support stream flag from either query or body for convenience
+  const isStream =
+    qs.stream === "1" ||
+    qs.stream === "true" ||
+    body.stream === true ||
+    body.stream === "1" ||
+    body.stream === "true";
 
   const parsed = {
     screen_name: String(body.screen_name ?? qs.screen_name ?? "*"),

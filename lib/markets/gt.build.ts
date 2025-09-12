@@ -108,6 +108,7 @@ export function buildCandidatesFromPoolsResponse(
 
     let chosenAddr: string | null = null;
     let chosenSymbol = "";
+    let chosenName = "";
 
     if (mode === "addr") {
       const qAddr = canonAddr(String(query || ""));
@@ -124,9 +125,11 @@ export function buildCandidatesFromPoolsResponse(
       if (baseIsSol && baseMatch) {
         chosenAddr = canonAddr(base!.address);
         chosenSymbol = String(base?.symbol || "");
+        chosenName = String(base?.name || "");
       } else if (quoteIsSol && quoteMatch) {
         chosenAddr = canonAddr(quote!.address);
         chosenSymbol = String(quote?.symbol || "");
+        chosenName = String(quote?.name || "");
       } else continue;
     } else {
       // fuzzy "name" mode
@@ -146,9 +149,11 @@ export function buildCandidatesFromPoolsResponse(
       if (baseIsSol && (baseHit || pairHit)) {
         chosenAddr = canonAddr(base!.address);
         chosenSymbol = baseSym || baseName || base?.symbol || "";
+        chosenName = baseName || baseSym || "";
       } else if (quoteIsSol && (quoteHit || pairHit)) {
         chosenAddr = canonAddr(quote!.address);
         chosenSymbol = quoteSym || quoteName || quote?.symbol || "";
+        chosenName = quoteName || quoteSym || "";
       } else continue;
     }
 
@@ -165,6 +170,7 @@ export function buildCandidatesFromPoolsResponse(
     cands.push({
       addr: chosenAddr,
       symbol: chosenSymbol,
+      tokenName: chosenName,
       dexName,
       dexScore: dexPriority(dexName),
       volume24h,
@@ -220,12 +226,15 @@ export function buildCandidatesFromTokenPoolsResponse(
 
     let chosenAddr: string | null = null;
     let chosenSymbol = "";
+    let chosenName = "";
     if (baseIsSol && canonAddr(base!.address) === canonAddr(addr)) {
       chosenAddr = canonAddr(addr);
       chosenSymbol = base?.symbol || "";
+      chosenName = base?.name || "";
     } else if (quoteIsSol && canonAddr(quote!.address) === canonAddr(addr)) {
       chosenAddr = canonAddr(addr);
       chosenSymbol = quote?.symbol || "";
+      chosenName = quote?.name || "";
     } else continue;
 
     const volume24h = pickVolume(attrs.volume_usd as any);
@@ -239,6 +248,7 @@ export function buildCandidatesFromTokenPoolsResponse(
     cands.push({
       addr: chosenAddr,
       symbol: chosenSymbol,
+      tokenName: chosenName,
       dexName,
       dexScore: dexPriority(dexName),
       volume24h,
