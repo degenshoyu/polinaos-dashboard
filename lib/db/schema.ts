@@ -169,8 +169,11 @@ export const coinCaTicker = pgTable(
 
     // On-chain provenance (optional)
     mintAuthority: text("mint_authority"),
+    updateAuthority: text("update_authority"),
     mintAt: timestamp("mint_at", { withTimezone: true }),
     creatorAddress: text("creator_address"),
+    hasMintAuth: boolean("has_mint_auth"),
+    hasFreezeAuth: boolean("has_freeze_auth"),
 
     // Metadata / socials (optional)
     tokenMetadata: jsonb("token_metadata"), // JSON blob
@@ -191,6 +194,9 @@ export const coinCaTicker = pgTable(
     byTicker: index("idx_coin_ca_ticker_ticker").on(t.tokenTicker),
     byCa: index("idx_coin_ca_ticker_ca").on(t.contractAddress),
     byPriority: index("idx_coin_ca_ticker_priority").on(t.priority),
+    byUpdateAuthority: index("idx_coin_ca_ticker_update_authority").on(
+      t.updateAuthority,
+    ),
   }),
 );
 
@@ -262,6 +268,8 @@ export const kolTweets = pgTable(
     rawJson: jsonb("raw_json"),
     // --- Detect-mentions pipeline resolution flag ---
     resolved: boolean("resolved").notNull().default(false),
+    // --- Manually exclude this tweet from detection & UI/analytics ---
+    excluded: boolean("excluded").notNull().default(false),
     ...timestamps,
   },
   (t) => ({
@@ -274,6 +282,7 @@ export const kolTweets = pgTable(
       t.twitterUid,
       t.publishDate,
     ),
+    byExcluded: index("idx_kol_tweets_excluded").on(t.excluded, t.publishDate),
   }),
 );
 
@@ -307,6 +316,8 @@ export const tweetTokenMentions = pgTable(
     priceUsdAt: numeric("price_usd_at", { precision: 18, scale: 8 }).$type<
       string | null
     >(),
+    // Hide this mention from UI/analytics without deleting data.
+    excluded: boolean("excluded").notNull().default(false),
     ...timestamps,
   },
   (t) => ({
@@ -317,6 +328,10 @@ export const tweetTokenMentions = pgTable(
     byToken: index("idx_mentions_token").on(t.tokenKey),
     byTrigger: index("idx_mentions_trigger").on(t.triggerKey),
     byTriggerText: index("idx_mentions_trigger_text").on(t.triggerText),
+    byMentionExcluded: index("idx_mentions_excluded").on(
+      t.excluded,
+      t.createdAt,
+    ),
   }),
 );
 

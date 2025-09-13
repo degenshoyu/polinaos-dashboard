@@ -1,19 +1,31 @@
-// components/admin/coins/types.ts
+// app/api/kols/coins/admin/route.ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
-import { kolTweets, tweetTokenMentions, kols } from "@/lib/db/schema";
-import { and, eq, gte, lte, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const Q = z.object({
-  from: z.string().datetime(),
-  to: z.string().datetime(),
-  page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(200).default(20),
+// Threshold kept for legacy "topKolsOnly", but you will now prefer explicit KOL list.
+const TOP_MIN = Number(process.env.TOP_KOLS_MIN_FOLLOWERS ?? "100000");
+// How many KOLs to show in "Top KOLs" per coin
+const TOP_KOLS_PER_COIN = Number(process.env.TOP_KOLS_PER_COIN ?? "5");
+
+// Accept NEW + OLD query names for backward compatibility
+const Query = z.object({
+  // time range (inclusive from, exclusive to)
+  from: z.string().optional(),
+  to: z.string().optional(),
+
+  // paging (legacy: pageSize + order)
+  page: z.coerce.number().int().min(1).optional().default(1),
+  size: z.coerce.number().int().min(1).max(200).optional(),
+  pageSize: z.coerce.number().int().min(1).max(200).optional(), // old
+
+  // sort (legacy "order" vs new "asc")
   sort: z
     .enum([
       "ticker",
@@ -25,250 +37,290 @@ const Q = z.object({
       "kols",
       "followers",
     ])
-    .default("views"),
-  order: z.enum(["asc", "desc"]).default("desc"),
-  q: z.string().max(64).optional(),
+    .optional()
+    .default("tweets"),
+  asc: z.coerce.boolean().optional(),
+  order: z.enum(["asc", "desc"]).optional(), // old
+
+  // filters
+  q: z.string().optional(),
+  // NEW: comma-separated twitter_username list, case-insensitive
+  kols: z.string().optional(),
+  // kept only for back-compat; ignored when `kols` is provided
+  topKolsOnly: z.coerce.boolean().optional().default(false),
 });
 
-type SourceKey = "ca" | "ticker" | "phrase" | "hashtag" | "upper" | "llm";
+// Map UI sort keys -> SQL column names (safe list)
+function sortExpr(key: string): string {
+  switch (key) {
+    case "ticker":
+      return "ticker";
+    case "ca":
+      return "ca";
+    case "tweets":
+      return "total_tweets";
+    case "views":
+      return "total_views";
+    case "engs":
+      return "total_engs";
+    case "er":
+      return "er";
+    case "kols":
+      return "total_kols";
+    case "followers":
+      return "total_followers";
+    default:
+      return "total_tweets";
+  }
+}
+
+// Old behavior: default to full window [Epoch, Now)
+function legacyFullRange() {
+  return { from: new Date(0).toISOString(), to: new Date().toISOString() };
+}
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const q = Q.parse({
-      from: url.searchParams.get("from") ?? new Date(0).toISOString(),
-      to: url.searchParams.get("to") ?? new Date().toISOString(),
-      page: url.searchParams.get("page") ?? "1",
-      pageSize: url.searchParams.get("pageSize") ?? "20",
-      sort: url.searchParams.get("sort") ?? "views",
-      order: url.searchParams.get("order") ?? "desc",
+    const parsed = Query.parse({
+      from: url.searchParams.get("from") ?? undefined,
+      to: url.searchParams.get("to") ?? undefined,
+      page: url.searchParams.get("page") ?? undefined,
+      size: url.searchParams.get("size") ?? undefined,
+      pageSize: url.searchParams.get("pageSize") ?? undefined,
+      sort: url.searchParams.get("sort") ?? undefined,
+      asc: url.searchParams.get("asc") ?? undefined,
+      order: url.searchParams.get("order") ?? undefined,
       q: url.searchParams.get("q") ?? undefined,
+      kols: url.searchParams.get("kols") ?? undefined,
+      topKolsOnly: url.searchParams.get("topKolsOnly") ?? undefined,
     });
 
-    const timeFilter = and(
-      gte(kolTweets.publishDate, new Date(q.from)),
-      lte(kolTweets.publishDate, new Date(q.to)),
+    // ---------- Back-compat normalization ----------
+    const range =
+      parsed.from && parsed.to
+        ? { from: parsed.from, to: parsed.to }
+        : legacyFullRange(); // old default: full range
+
+    const page = parsed.page ?? 1;
+    const size = parsed.size ?? parsed.pageSize ?? 50; // honor old `pageSize`
+    const offset = (page - 1) * size;
+
+    // asc/desc normalization
+    const asc =
+      typeof parsed.asc === "boolean"
+        ? parsed.asc
+        : parsed.order
+          ? parsed.order === "asc"
+          : false;
+    const orderDir = asc ? "ASC" : "DESC";
+    const sortCol = sortExpr(parsed.sort!);
+
+    // ---------- WHERE filters (parameterized) ----------
+    const filters: any[] = [];
+    // time window
+    filters.push(
+      sql`t.publish_date >= ${range.from} AND t.publish_date < ${range.to}`,
     );
+    // manual exclusions
+    filters.push(sql`t.excluded = false`);
+    filters.push(sql`m.excluded = false`);
 
-    // Detail rows within time window
-    const rows = await db
-      .select({
-        tweetId: kolTweets.tweetId,
-        username: kolTweets.twitterUsername,
-        followers: kols.followers,
-        views: kolTweets.views,
-        engs: sql<number>`(${kolTweets.likes} + ${kolTweets.retweets} + ${kolTweets.replies})::int`,
-        tokenKey: tweetTokenMentions.tokenKey, // CA (original case)
-        tokenDisplay: tweetTokenMentions.tokenDisplay, // Ticker (can be null)
-        source: tweetTokenMentions.source,
-        priceUsdAt: tweetTokenMentions.priceUsdAt, // string | null
-      })
-      .from(tweetTokenMentions)
-      .innerJoin(kolTweets, eq(tweetTokenMentions.tweetId, kolTweets.tweetId))
-      .leftJoin(kols, eq(kolTweets.twitterUid, kols.twitterUid))
-      .where(timeFilter);
+    // NEW: explicit KOL usernames (comma-separated)
+    const kolNames = (parsed.kols ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^@+/, "").toLowerCase())
+      .filter(Boolean);
 
-    // Bucket by CA
-    type Bucket = {
-      ca: string;
-      tickerCounts: Map<string, number>;
-      ticker?: string | null;
-      totalTweets: number;
-      totalViews: number;
-      totalEngs: number;
-      totalKols: number;
-      totalFollowers: number;
-      topKols: Map<string, { count: number; followers?: number | null }>;
-      sources: Record<SourceKey, number>;
-      kolSeen: Set<string>;
-      tweetSeen: Set<string>;
-      // --- pricing stats per tweet for this CA ---
-      pricedTweets: Set<string>; // tweets that have at least one priced mention for this CA
-      nullPriceTweets: Set<string>; // tweets currently with no priced mention for this CA
-    };
-
-    const buckets = new Map<string, Bucket>();
-    const sourcesInit: Record<SourceKey, number> = {
-      ca: 0,
-      ticker: 0,
-      phrase: 0,
-      hashtag: 0,
-      upper: 0,
-      llm: 0,
-    };
-
-    for (const r of rows) {
-      const caRaw = (r.tokenKey ?? "").trim();
-      if (!caRaw) continue; // only group when CA exists
-      const ca = caRaw; // keep original case for URL/link correctness
-      const ticker =
-        (r.tokenDisplay ?? "").replace(/^\$/, "").trim().toUpperCase() || null;
-      const src = (r.source ?? "ticker") as SourceKey;
-      const tweetId = String(r.tweetId);
-
-      let b = buckets.get(ca);
-      if (!b) {
-        b = {
-          ca,
-          tickerCounts: new Map(),
-          ticker: null,
-          totalTweets: 0,
-          totalViews: 0,
-          totalEngs: 0,
-          totalKols: 0,
-          totalFollowers: 0,
-          topKols: new Map(),
-          sources: { ...sourcesInit },
-          kolSeen: new Set(),
-          tweetSeen: new Set(),
-          pricedTweets: new Set(),
-          nullPriceTweets: new Set(),
-        };
-        buckets.set(ca, b);
-      }
-
-      // count sources distribution
-      b.sources[src] = (b.sources[src] ?? 0) + 1;
-
-      // count ticker candidates
-      if (ticker)
-        b.tickerCounts.set(ticker, (b.tickerCounts.get(ticker) ?? 0) + 1);
-
-      // tweet-level aggregates (unique)
-      if (!b.tweetSeen.has(tweetId)) {
-        b.tweetSeen.add(tweetId);
-        b.totalTweets += 1;
-        b.totalViews += Number(r.views ?? 0);
-        b.totalEngs += Number(r.engs ?? 0);
-      }
-
-      // kol-level (unique)
-      if (r.username && !b.kolSeen.has(r.username)) {
-        b.kolSeen.add(r.username);
-        b.totalKols += 1;
-        b.totalFollowers += Number(r.followers ?? 0);
-      }
-
-      // top KOLs by mention count for this CA
-      if (r.username) {
-        const cur = b.topKols.get(r.username) ?? {
-          count: 0,
-          followers: r.followers ?? null,
-        };
-        cur.count += 1;
-        b.topKols.set(r.username, cur);
-      }
-
-      // --- price coverage per tweet ---
-      // If we see a priced mention for this tweet+CA, ensure it's marked priced and removed from "null".
-      if (r.priceUsdAt != null) {
-        b.pricedTweets.add(tweetId);
-        b.nullPriceTweets.delete(tweetId);
-      } else {
-        // Only add to null if we haven't already confirmed a priced mention for this tweet+CA
-        if (!b.pricedTweets.has(tweetId)) {
-          b.nullPriceTweets.add(tweetId);
-        }
-      }
+    if (kolNames.length) {
+      // Filter by kol_tweets.twitter_username (case-insensitive)
+      filters.push(
+        sql`LOWER(t.twitter_username) IN (${sql.join(
+          kolNames.map((n) => sql`${n}`),
+          sql`, `,
+        )})`,
+      );
+    } else if (parsed.topKolsOnly) {
+      // Legacy: only when kols is not provided
+      filters.push(sql`COALESCE(k.followers, 0) >= ${TOP_MIN}`);
     }
 
-    // Build output items
-    let items = Array.from(buckets.values()).map((b) => {
-      const topTicker =
-        Array.from(b.tickerCounts.entries()).sort(
-          (a, c) => c[1] - a[1],
-        )[0]?.[0] ?? null;
-
-      const er = b.totalViews > 0 ? b.totalEngs / b.totalViews : 0;
-      const topKols = Array.from(b.topKols.entries())
-        .sort((a, c) => c[1].count - a[1].count)
-        .slice(0, 3)
-        .map(([username, v]) => ({
-          username,
-          count: v.count,
-          followers: v.followers,
-        }));
-
-      const totalSources =
-        (b.sources.ca ?? 0) +
-        (b.sources.ticker ?? 0) +
-        (b.sources.phrase ?? 0) +
-        (b.sources.hashtag ?? 0) +
-        (b.sources.upper ?? 0) +
-        (b.sources.llm ?? 0);
-
-      return {
-        ticker: topTicker,
-        ca: b.ca,
-        totalTweets: b.totalTweets,
-        noPriceTweets: b.nullPriceTweets.size, // 👈 NEW: tweets lacking price for this CA
-        totalViews: b.totalViews,
-        totalEngagements: b.totalEngs,
-        er,
-        totalKols: b.totalKols,
-        totalFollowers: b.totalFollowers,
-        topKols,
-        sources: { ...b.sources, total: totalSources },
-        gmgn: `https://gmgn.ai/sol/token/${b.ca}`,
-      };
-    });
-
-    // Search (q) — match ca or ticker (case-insensitive)
-    if (q.q && q.q.trim()) {
-      const needle = q.q.trim().toLowerCase();
-      items = items.filter(
-        (it) =>
-          (it.ca ?? "").toLowerCase().includes(needle) ||
-          (it.ticker ?? "").toLowerCase().includes(needle),
+    // search over ticker / ca / token_name
+    if (parsed.q && parsed.q.trim()) {
+      const q = parsed.q.trim();
+      const likeUpper = `%${q.replace(/^\$/, "").toUpperCase()}%`;
+      filters.push(
+        sql`(
+          UPPER(COALESCE(c.token_ticker, '')) LIKE ${likeUpper}
+          OR UPPER(COALESCE(m.token_key, '')) LIKE ${likeUpper}
+          OR UPPER(COALESCE(c.token_name, '')) LIKE ${likeUpper}
+        )`,
       );
     }
 
-    // Sorting
-    const keyForSort = (it: any) => {
-      switch (q.sort) {
-        case "ticker":
-          return it.ticker ?? "";
-        case "ca":
-          return it.ca ?? "";
-        case "tweets":
-          return it.totalTweets;
-        case "views":
-          return it.totalViews;
-        case "engs":
-          return it.totalEngagements;
-        case "er":
-          return it.er;
-        case "kols":
-          return it.totalKols;
-        case "followers":
-          return it.totalFollowers;
-      }
-    };
-    const cmp = (a: any, b: any) => {
-      const da = keyForSort(a);
-      const db = keyForSort(b);
-      if (typeof da === "number" && typeof db === "number") {
-        return da - db;
-      }
-      return String(da).localeCompare(String(db), undefined, {
-        sensitivity: "base",
-      });
-    };
-    items.sort((a, b) => (q.order === "asc" ? cmp(a, b) : -cmp(a, b)));
+    const whereSql = filters.length ? sql.join(filters, sql` AND `) : sql`true`;
 
-    // Pagination
-    const total = items.length;
-    const start = (q.page - 1) * q.pageSize;
-    const end = start + q.pageSize;
+    // ---------- CTEs ----------
+    const baseCte = sql`
+      WITH base AS (
+        SELECT
+          m.token_key AS ca,
+          c.token_ticker AS ticker,
+          c.token_name AS token_name,
+          c.update_authority AS update_authority,
+          m.source,
+          (m.price_usd_at IS NULL) AS no_price,
+          t.tweet_id,
+          t.views::numeric AS views,
+          (t.likes + t.retweets + t.replies)::numeric AS engs,
+          t.twitter_uid,
+          t.twitter_username,
+          k.display_name AS display_name,
+          COALESCE(k.followers, 0) AS followers
+        FROM tweet_token_mentions m
+        JOIN kol_tweets t ON t.tweet_id = m.tweet_id
+        LEFT JOIN kols k ON k.twitter_uid = t.twitter_uid
+        LEFT JOIN coin_ca_ticker c ON c.contract_address = m.token_key
+        WHERE ${whereSql}
+      ),
+      agg AS (
+        SELECT
+          ca,
+          MAX(ticker) AS ticker,
+          MAX(token_name) AS token_name,
+          MAX(update_authority) AS update_authority,
+          COUNT(*)::bigint AS total_tweets,
+          SUM(CASE WHEN no_price THEN 1 ELSE 0 END)::bigint AS no_price_tweets,
+          SUM(views)::numeric AS total_views,
+          SUM(engs)::numeric AS total_engs,
+          SUM(CASE WHEN source = 'ca' THEN 1 ELSE 0 END)::bigint AS src_ca,
+          SUM(CASE WHEN source = 'ticker' THEN 1 ELSE 0 END)::bigint AS src_ticker,
+          SUM(CASE WHEN source = 'phrase' THEN 1 ELSE 0 END)::bigint AS src_phrase,
+          COUNT(DISTINCT twitter_uid)::bigint AS total_kols
+        FROM base
+        GROUP BY ca
+      ),
+      fol AS (
+        -- Sum followers per unique KOL per token (avoid double-counting)
+        SELECT ca, SUM(followers)::bigint AS total_followers
+        FROM (
+          SELECT DISTINCT ca, twitter_uid, followers FROM base
+        ) d
+        GROUP BY ca
+      ),
+      per_kol AS (
+        -- Aggregate per (coin, KOL)
+        SELECT
+          ca,
+          twitter_uid,
+          twitter_username,
+          MAX(display_name) AS display_name,
+          MAX(followers) AS followers,
+          COUNT(*) AS mentions
+        FROM base
+        GROUP BY ca, twitter_uid, twitter_username
+      ),
+      ranked AS (
+        SELECT
+          ca, twitter_uid, twitter_username, display_name, followers, mentions,
+          ROW_NUMBER() OVER (PARTITION BY ca ORDER BY followers DESC, mentions DESC, twitter_username ASC) AS rn
+        FROM per_kol
+      ),
+      topk AS (
+        SELECT
+          ca,
+          jsonb_agg(
+            jsonb_build_object(
+              'username', twitter_username,
+              'displayName', display_name,
+              'followers', followers,
+              'mentions', mentions
+            )
+            ORDER BY followers DESC, mentions DESC, twitter_username ASC
+          ) AS top_kols
+        FROM ranked
+        WHERE rn <= ${TOP_KOLS_PER_COIN}
+        GROUP BY ca
+      )
+    `;
+
+    const countSql = sql`
+      ${baseCte}
+      SELECT COUNT(*)::bigint AS total
+      FROM agg
+    `;
+    const countRes = await db.execute(countSql);
+    const total = Number((countRes.rows?.[0] as any)?.total ?? 0);
+
+    const rowsSql = sql`
+      ${baseCte}
+      SELECT
+        a.ca,
+        a.ticker,
+        a.token_name,
+        a.update_authority,
+        a.total_tweets,
+        a.no_price_tweets,
+        a.total_views,
+        a.total_engs,
+        CASE WHEN a.total_views > 0 THEN (a.total_engs / a.total_views) ELSE 0 END AS er,
+        a.total_kols,
+        COALESCE(f.total_followers, 0) AS total_followers,
+        jsonb_build_object(
+          'ca', a.src_ca,
+          'ticker', a.src_ticker,
+          'phrase', a.src_phrase
+        ) AS sources,
+        tk.top_kols
+      FROM agg a
+      LEFT JOIN fol f ON f.ca = a.ca
+      LEFT JOIN topk tk ON tk.ca = a.ca
+      ORDER BY ${sql.raw(sortExpr(parsed.sort!))} ${sql.raw(orderDir)} NULLS LAST
+      LIMIT ${size} OFFSET ${offset}
+    `;
+    const res = await db.execute(rowsSql);
+
+    const rows = (res.rows ?? []).map((r: any) => {
+      const topKols = Array.isArray(r.top_kols) ? r.top_kols : [];
+      // Build a short label like: "@alice, @bob, @carol +2"
+      const label =
+        topKols.length === 0
+          ? ""
+          : topKols
+              .slice(0, 3)
+              .map((k: any) => `@${k.username}`)
+              .join(", ") +
+            (topKols.length > 3 ? ` +${topKols.length - 3}` : "");
+
+      return {
+        ca: r.ca,
+        ticker: r.ticker,
+        tokenName: r.token_name,
+        updateAuthority: r.update_authority,
+        totalTweets: Number(r.total_tweets ?? 0),
+        noPriceTweets: Number(r.no_price_tweets ?? 0),
+        totalViews: Number(r.total_views ?? 0),
+        totalEngagements: Number(r.total_engs ?? 0),
+        er: Number(r.er ?? 0),
+        totalKols: Number(r.total_kols ?? 0),
+        totalFollowers: Number(r.total_followers ?? 0),
+        sources: r.sources ?? { ca: 0, ticker: 0, phrase: 0 },
+        topKols, // array of { username, displayName, followers, mentions }
+        topKolsLabel: label, // short text label (for legacy UI)
+      };
+    });
 
     return NextResponse.json({
       ok: true,
-      items: items.slice(start, end),
       total,
+      page,
+      size,
+      rows,
+      items: rows, // legacy alias for old UI
     });
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message ?? "failed" },
+      { ok: false, error: e?.message ?? "unknown" },
       { status: 400 },
     );
   }

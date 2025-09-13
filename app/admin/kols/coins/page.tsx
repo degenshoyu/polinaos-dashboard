@@ -24,6 +24,7 @@ export default function AdminKolsCoinsPage() {
   const [sort, setSort] = useState<SortKey>("views");
   const [asc, setAsc] = useState(false);
   const [q, setQ] = useState("");
+  const [selectedKols, setSelectedKols] = useState<string[]>([]);
 
   // ---- data state
   const [loading, setLoading] = useState(false);
@@ -76,6 +77,7 @@ export default function AdminKolsCoinsPage() {
       sp.set("sort", sort);
       sp.set("order", asc ? "asc" : "desc");
       if (q.trim()) sp.set("q", q.trim());
+      if (selectedKols.length) sp.set("kols", selectedKols.join(","));
 
       const r = await fetch(`/api/kols/coins/admin?${sp.toString()}`, {
         cache: "no-store",
@@ -113,7 +115,7 @@ export default function AdminKolsCoinsPage() {
   useEffect(() => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset, from, to, page, size, sort, asc]);
+  }, [preset, from, to, page, size, sort, asc, selectedKols]);
 
   // Inline CA edit handlers
   const startEdit = (idx: number, current?: string | null) => {
@@ -162,9 +164,56 @@ export default function AdminKolsCoinsPage() {
   const pageCount = Math.max(1, Math.ceil((total || 0) / size));
   const safePage = Math.min(page, pageCount);
 
+  // Delete a CA (and related mentions) then refresh
+  const deleteRow = async (ca: string) => {
+    if (!ca) return;
+    // Ask user which mode to use
+    const choice = window.prompt(
+      [
+        "Delete options:",
+        "1 = Remove from coin_ca_ticker and tweet_token_mentions",
+        "2 = Option 1 + mark related kol_tweets as excluded=true",
+        "",
+        "Enter 1 or 2:",
+      ].join("\n"),
+      "1",
+    );
+    if (!choice) return;
+    const excludeTweets = choice.trim() === "2";
+    const ok = window.confirm(
+      excludeTweets
+        ? "Confirm: remove CA + mentions AND set related tweets excluded=true?"
+        : "Confirm: remove CA + mentions only?",
+    );
+    if (!ok) return;
+    try {
+      const r = await fetch("/api/kols/coins/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ca, excludeTweets }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+      alert(
+        `Done.\nRemoved mentions: ${data.removedMentions}\nRemoved ticker rows: ${data.removedTicker}\n` +
+          (excludeTweets ? `Tweets excluded: ${data.excludedTweets}` : ""),
+      );
+      await fetchData();
+    } catch (e: any) {
+      alert(e?.message ?? "delete failed");
+    }
+  };
+
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Coins Mentioned</h1>
+      <h1 className="text-2xl font-semibold">
+        KOL Leaderboard - Mentioned Coins Manager
+        {selectedKols.length > 0 && (
+          <span className="ml-2 align-middle px-2 py-0.5 text-xs rounded-full border border-emerald-400/50 bg-emerald-400/10 text-emerald-200">
+            Filtered by KOLs ({selectedKols.length})
+          </span>
+        )}
+      </h1>
 
       <CoinsToolbar
         preset={preset}
@@ -198,6 +247,11 @@ export default function AdminKolsCoinsPage() {
         }}
         dupesOpen={dupesOpen}
         onToggleDupes={() => setDupesOpen((v) => !v)}
+        selectedKols={selectedKols}
+        onSelectedKolsChange={(list) => {
+          setSelectedKols(list);
+          setPage(1);
+        }}
       />
 
       {dupesOpen && (
@@ -222,6 +276,7 @@ export default function AdminKolsCoinsPage() {
         onPendingChange={onPendingChange}
         onSaveCa={saveCa}
         onShowTweets={openTweets}
+        onDeleteRow={(idx, ca) => deleteRow(ca)}
       />
 
       {/* Pagination */}
