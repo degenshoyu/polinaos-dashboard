@@ -36,6 +36,22 @@ import {
   type BasicIdentity,
 } from "@/lib/db/repos/coinCaTickerRepo";
 
+// --- rate control knobs for /api/mintmeta enrichment (with sane defaults) ---
+const MINTMETA_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.DETECT_MINTMETA_CONCURRENCY ?? 1),
+);
+const MINTMETA_SLEEP_MS = Math.max(
+  0,
+  Number(process.env.DETECT_MINTMETA_SLEEP_MS ?? 300),
+);
+const MINTMETA_JITTER_MS = Math.max(
+  0,
+  Number(process.env.DETECT_MINTMETA_JITTER_MS ?? 250),
+);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const jitter = (n: number) => (n > 0 ? Math.floor(Math.random() * n) : 0);
+
 // ------------ Public entry ------------
 export async function runDetectMentions(
   params: {
@@ -531,9 +547,15 @@ async function enrichAndPersistCoinMeta(
   // Unique CAs
   const cas = Array.from(new Set(finalRows.map((r) => r.tokenKey)));
 
-  const CONCURRENCY = 8; // cheap strategy hits metadata PDA only
-  for (let i = 0; i < cas.length; i += CONCURRENCY) {
-    const batch = cas.slice(i, i + CONCURRENCY);
+  for (let i = 0; i < cas.length; i += MINTMETA_CONCURRENCY) {
+    const batch = cas.slice(i, i + MINTMETA_CONCURRENCY);
+    log({
+      event: "ca_meta_batch_begin",
+      offset: i,
+      size: batch.length,
+      total: cas.length,
+      concurrency: MINTMETA_CONCURRENCY,
+    });
     await Promise.all(
       batch.map(async (ca) => {
         try {
@@ -587,6 +609,15 @@ async function enrichAndPersistCoinMeta(
         }
       }),
     );
+    log({
+      event: "ca_meta_batch_end",
+      offset: i,
+      size: batch.length,
+      total: cas.length,
+    });
+    if (MINTMETA_SLEEP_MS > 0) {
+      await sleep(MINTMETA_SLEEP_MS + jitter(MINTMETA_JITTER_MS));
+    }
   }
 }
 

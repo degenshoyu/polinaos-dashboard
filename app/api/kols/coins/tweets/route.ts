@@ -16,6 +16,7 @@ const Q = z
     pageSize: z.coerce.number().int().min(1).max(200).default(50),
     ticker: z.string().optional(),
     ca: z.string().optional(),
+    source: z.enum(["ca", "ticker", "phrase"]).optional(),
   })
   .refine((v) => !!v.ticker || !!v.ca, { message: "ticker or ca required" });
 
@@ -29,6 +30,7 @@ export async function GET(req: Request) {
       pageSize: url.searchParams.get("pageSize") ?? "50",
       ticker: url.searchParams.get("ticker") ?? undefined,
       ca: url.searchParams.get("ca") ?? undefined,
+      source: url.searchParams.get("source") ?? undefined,
     });
 
     const timeFilter = and(
@@ -45,6 +47,9 @@ export async function GET(req: Request) {
       filters.push(
         sql`upper(trim(both ' $' from ${tweetTokenMentions.tokenDisplay})) = ${norm}`,
       );
+    }
+    if (q.source) {
+      filters.push(eq(tweetTokenMentions.source, q.source));
     }
 
     // Count (distinct tweets)

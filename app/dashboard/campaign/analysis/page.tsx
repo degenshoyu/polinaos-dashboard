@@ -185,10 +185,16 @@ function AnalysisClient() {
 
         // 4) 拉最近一次 AI understanding（若有历史 insight 直接使用）
         try {
-          const u = await fetch(
-            `/api/aiUnderstanding?job_id=${encodeURIComponent(deeplinkJob)}`,
+          let u = await fetch(
+            `/api/ai-understanding?job_id=${encodeURIComponent(deeplinkJob)}`,
             { cache: "no-store" }
           );
+          if (u.status === 404) {
+            u = await fetch(
+              `/api/aiUnderstanding?job_id=${encodeURIComponent(deeplinkJob)}`,
+              { cache: "no-store" }
+            );
+          }
           const uj = (await u.json()) as UnderstandingResp;
           if (u.ok) {
             if (typeof uj.summary === "string" && !summary)
