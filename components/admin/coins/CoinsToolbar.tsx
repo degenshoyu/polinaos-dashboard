@@ -47,6 +47,10 @@ type Props = {
   // This prop is ignored in UI now.
   topKolsOnly?: boolean;
   onTopKolsOnlyChange?: (v: boolean) => void;
+
+  // ----- coins filter -----
+  coinFilter: "all" | "no-price";
+  onCoinFilterChange: (v: "all" | "no-price") => void;
 };
 
 export default function CoinsToolbar({
@@ -54,6 +58,7 @@ export default function CoinsToolbar({
   q, onQChange, onSearch, sort, asc, onSortChange, onToggleOrder, pageSize, onSizeChange,
   dupesOpen, onToggleDupes,
   selectedKols, onSelectedKolsChange,
+  coinFilter, onCoinFilterChange,
 }: Props) {
   // ---------- KOL multi-select dropdown state ----------
   const [open, setOpen] = useState(false);
@@ -61,6 +66,19 @@ export default function CoinsToolbar({
   const [options, setOptions] = useState<KolOption[]>([]);
   const [fetching, setFetching] = useState(false);
   const popref = useRef<HTMLDivElement | null>(null);
+
+  // ---------- Coins filter dropdown state ----------
+  const [coinsOpen, setCoinsOpen] = useState(false);
+  const coinsRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!coinsOpen) return;
+      if (!coinsRef.current) return;
+      if (!coinsRef.current.contains(e.target as Node)) setCoinsOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [coinsOpen]);
 
   // Close on click outside
   useEffect(() => {
@@ -188,7 +206,55 @@ export default function CoinsToolbar({
 
       {/* Search + KOLs multi-select + sort + size */}
       <div className="flex items-center gap-2">
-        {/* NEW: KOLs multi-select */}
+        {/* Coins filter (All / No Price) */}
+        <div className="relative" ref={coinsRef}>
+          <button
+            type="button"
+            onClick={() => setCoinsOpen((v) => !v)}
+            className="inline-flex items-center gap-2 px-2 py-2 rounded-md border border-white/10 bg-black/30 hover:bg-white/10 text-sm"
+            aria-haspopup="listbox"
+            aria-expanded={coinsOpen}
+            title="Filter coins"
+          >
+            Coins
+            {coinFilter === "no-price" && (
+              <span className="text-xs rounded-full px-1.5 py-0.5 bg-emerald-500/20 text-emerald-200 border border-emerald-400/30">
+                No Price
+              </span>
+            )}
+          </button>
+          {coinsOpen && (
+            <div
+              className="absolute right-0 z-20 mt-2 w-40 rounded-xl border border-white/10 bg-[#0B0B0E] shadow-xl p-2"
+              role="listbox"
+              aria-label="Coins filter"
+            >
+              <button
+                className={`w-full text-left px-2 py-2 rounded-md text-sm hover:bg-white/10 ${coinFilter === "all" ? "bg-white/10" : ""}`}
+                onClick={() => {
+                  onCoinFilterChange("all");
+                  setCoinsOpen(false);
+                }}
+                role="option"
+                aria-selected={coinFilter === "all"}
+              >
+                All
+              </button>
+              <button
+                className={`mt-1 w-full text-left px-2 py-2 rounded-md text-sm hover:bg-white/10 ${coinFilter === "no-price" ? "bg-white/10" : ""}`}
+                onClick={() => {
+                  onCoinFilterChange("no-price");
+                  setCoinsOpen(false);
+                }}
+                role="option"
+                aria-selected={coinFilter === "no-price"}
+              >
+                No Price
+              </button>
+            </div>
+          )}
+        </div>
+        {/* KOLs multi-select */}
         <div className="relative" ref={popref}>
           <button
             type="button"

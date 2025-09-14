@@ -48,6 +48,7 @@ const Query = z.object({
   kols: z.string().optional(),
   // kept only for back-compat; ignored when `kols` is provided
   topKolsOnly: z.coerce.boolean().optional().default(false),
+  coins: z.enum(["all", "no-price"]).optional(),
 });
 
 // Map UI sort keys -> SQL column names (safe list)
@@ -94,6 +95,7 @@ export async function GET(req: Request) {
       q: url.searchParams.get("q") ?? undefined,
       kols: url.searchParams.get("kols") ?? undefined,
       topKolsOnly: url.searchParams.get("topKolsOnly") ?? undefined,
+      coins: url.searchParams.get("coins") ?? undefined,
     });
 
     // ---------- Back-compat normalization ----------
@@ -115,6 +117,7 @@ export async function GET(req: Request) {
           : false;
     const orderDir = asc ? "ASC" : "DESC";
     const sortCol = sortExpr(parsed.sort!);
+    const onlyNoPrice = parsed.coins === "no-price";
 
     // ---------- WHERE filters (parameterized) ----------
     const filters: any[] = [];
@@ -248,6 +251,7 @@ export async function GET(req: Request) {
       ${baseCte}
       SELECT COUNT(*)::bigint AS total
       FROM agg
+      ${onlyNoPrice ? sql`WHERE no_price_tweets > 0` : sql``}
     `;
     const countRes = await db.execute(countSql);
     const total = Number((countRes.rows?.[0] as any)?.total ?? 0);
@@ -275,6 +279,7 @@ export async function GET(req: Request) {
       FROM agg a
       LEFT JOIN fol f ON f.ca = a.ca
       LEFT JOIN topk tk ON tk.ca = a.ca
+      ${onlyNoPrice ? sql`WHERE a.no_price_tweets > 0` : sql``}
       ORDER BY ${sql.raw(sortExpr(parsed.sort!))} ${sql.raw(orderDir)} NULLS LAST
       LIMIT ${size} OFFSET ${offset}
     `;

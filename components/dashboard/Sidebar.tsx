@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Users,           // Leaderboard: KOLs
   Folder,          // Leaderboard: Projects
+  Home,            // Dashboard
 } from "lucide-react";
 
 type NavItem = {
@@ -33,6 +34,10 @@ const campaignItems: NavItem[] = [
 const leaderboardItems: NavItem[] = [
   { href: "/dashboard/leaderboard/kols",     label: "KOLs",     locked: false, Icon: Users },
   { href: "/dashboard/leaderboard/projects", label: "Projects", locked: true,  Icon: Folder },
+];
+
+const dashboardItems: NavItem[] = [
+  { href: "/dashboard/dashboard", label: "Dashboard", locked: false, Icon: Home },
 ];
 
 export default function Sidebar() {
@@ -123,7 +128,7 @@ export default function Sidebar() {
         {/* Leaderboard header + collapse */}
         <div className="flex items-center justify-between px-3 py-3">
           <div className="text-xs uppercase tracking-wider text-gray-400">
-            {!collapsed ? "Leaderboard" : <span className="sr-only">Leaderboard</span>}
+            {!collapsed ? "Dashboard" : <span className="sr-only">Dashboard</span>}
           </div>
           <button
             onClick={() => setCollapsed((v) => !v)}
@@ -137,6 +142,17 @@ export default function Sidebar() {
           </button>
         </div>
 
+        {/* Dashboard nav */}
+        <nav className="px-2 pb-2 space-y-1">
+          {dashboardItems.map(renderItem)}
+        </nav>
+
+        {/* Leaderboard header */}
+        <div className="px-3 pt-2 pb-2">
+          <div className="text-xs uppercase tracking-wider text-gray-400">
+            {!collapsed ? "Leaderboard" : <span className="sr-only">Leaderboard</span>}
+          </div>
+        </div>
         {/* Leaderboard nav */}
         <nav className="px-2 pb-2 space-y-1">
           {leaderboardItems.map(renderItem)}
@@ -170,7 +186,7 @@ export default function Sidebar() {
         aria-label="Bottom navigation"
       >
         <ul className="flex gap-1 overflow-x-auto no-scrollbar">
-          {[...leaderboardItems, ...campaignItems]
+          {[...dashboardItems, ...leaderboardItems, ...campaignItems]
             .filter((i) => !i.locked) // mobile: hide locked tabs
             .map(({ href, label, Icon }) => {
               const active = pathname.startsWith(href);

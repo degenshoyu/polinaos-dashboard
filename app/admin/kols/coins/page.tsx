@@ -25,6 +25,7 @@ export default function AdminKolsCoinsPage() {
   const [asc, setAsc] = useState(false);
   const [q, setQ] = useState("");
   const [selectedKols, setSelectedKols] = useState<string[]>([]);
+  const [coinFilter, setCoinFilter] = useState<"all" | "no-price">("all");
 
   // ---- data state
   const [loading, setLoading] = useState(false);
@@ -78,6 +79,7 @@ export default function AdminKolsCoinsPage() {
       sp.set("order", asc ? "asc" : "desc");
       if (q.trim()) sp.set("q", q.trim());
       if (selectedKols.length) sp.set("kols", selectedKols.join(","));
+      sp.set("coins", coinFilter);
 
       const r = await fetch(`/api/kols/coins/admin?${sp.toString()}`, {
         cache: "no-store",
@@ -115,7 +117,7 @@ export default function AdminKolsCoinsPage() {
   useEffect(() => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset, from, to, page, size, sort, asc, selectedKols]);
+  }, [preset, from, to, page, size, sort, asc, selectedKols, coinFilter]);
 
   // Inline CA edit handlers
   const startEdit = (idx: number, current?: string | null) => {
@@ -250,6 +252,12 @@ export default function AdminKolsCoinsPage() {
         selectedKols={selectedKols}
         onSelectedKolsChange={(list) => {
           setSelectedKols(list);
+          setPage(1);
+        }}
+        // coins filter props
+        coinFilter={coinFilter}
+        onCoinFilterChange={(v) => {
+          setCoinFilter(v);
           setPage(1);
         }}
       />

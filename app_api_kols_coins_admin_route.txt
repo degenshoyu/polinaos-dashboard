@@ -1,0 +1,279 @@
+// app/api/kols/coins/admin/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { sql } from "drizzle-orm";
+import { db } from "@/lib/db/client";
+
+/* -------------------- Tunables -------------------- */
+const PAGE_SIZE_DEFAULT = 50;
+const TOP_KOLS_PER_COIN = 12;
+const TOP_MIN_FOLLOWERS = 0; // 若要“仅大号”，可设阈值
+
+type SortKey =
+  | "mentions"
+  | "tweets"
+  | "avg_views"
+  | "avg_engs"
+  | "er"
+  | "latest";
+
+type SourceKey = "all" | "ca" | "ticker" | "phrase";
+type CoinsKey = "all" | "no-price";
+
+/* -------------------- Helpers -------------------- */
+
+// 安全取 number
+function toNum(v: string | null, def: number) {
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : def;
+}
+
+// 默认时间范围：最近 30 天
+function defaultRange() {
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(to.getDate() - 30);
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+  };
+}
+
+// 解析 bool
+function toBool(v: string | null, def = false) {
+  if (v == null) return def;
+  const s = v.toLowerCase();
+  return s === "1" || s === "true" || s === "yes";
+}
+
+// 排序映射
+function sortExpr(k: SortKey) {
+  switch (k) {
+    case "tweets":
+      return sql`a.total_tweets`;
+    case "mentions":
+      return sql`a.total_mentions`;
+    case "avg_views":
+      return sql`a.avg_views`;
+    case "avg_engs":
+      return sql`a.avg_engs`;
+    case "er":
+      return sql`a.er`;
+    case "latest":
+      return sql`a.latest_publish`;
+    default:
+      return sql`a.total_mentions`;
+  }
+}
+
+// 构造 ILIKE 模糊匹配（处理 $ticker）
+function buildSearchLike(qRaw: string) {
+  const q = qRaw.trim();
+  if (!q) return null;
+  const noDollar = q.replace(/^\$/, "");
+  return `%${noDollar}%`;
+}
+
+/* -------------------- Handler -------------------- */
+
+export async function GET(req: NextRequest) {
+  try {
+    const url = new URL(req.url);
+
+    // 基本分页与日期
+    const page = Math.max(1, toNum(url.searchParams.get("page"), 1));
+    const pageSize = Math.max(
+      1,
+      toNum(url.searchParams.get("pageSize"), PAGE_SIZE_DEFAULT),
+    );
+    const off = (page - 1) * pageSize;
+
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
+    const { from: defFrom, to: defTo } = defaultRange();
+    const fromISO = from || defFrom;
+    const toISO = to || defTo;
+
+    // 排序
+    const sortParam = (url.searchParams.get("sort") as SortKey) || "mentions";
+    const asc = toBool(url.searchParams.get("asc"));
+    const dir = asc ? sql`asc` : sql`desc`;
+    const orderBy = sortExpr(sortParam);
+
+    // 过滤：source / coins / kols / q / topKolsOnly
+    const source = (url.searchParams.get("source") || "all") as SourceKey;
+    const coins = (url.searchParams.get("coins") || "all") as CoinsKey;
+    const qRaw = url.searchParams.get("q") || "";
+    const qLike = buildSearchLike(qRaw);
+    const kolsStr = (url.searchParams.get("kols") || "").trim();
+    const onlyTop = toBool(url.searchParams.get("topKolsOnly"));
+
+    const kols = kolsStr
+      ? kolsStr
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean)
+      : [];
+
+    // base where（全库过滤；不是“按页过滤”）
+    const baseFilters = [
+      sql`t.publish_date >= ${fromISO}`,
+      sql`t.publish_date < ${toISO}`,
+      sql`t.excluded = false`,
+      sql`m.excluded = false`,
+    ];
+
+    if (source !== "all") {
+      baseFilters.push(sql`m.source = ${source}`);
+    }
+
+    if (kols.length > 0) {
+      // username IN (...)
+      baseFilters.push(
+        sql`lower(t.twitter_username) IN (${sql.join(
+          kols.map((u) => sql`${u}`),
+          sql`, `,
+        )})`,
+      );
+    } else if (onlyTop && TOP_MIN_FOLLOWERS > 0) {
+      baseFilters.push(sql`coalesce(t.followers, 0) >= ${TOP_MIN_FOLLOWERS}`);
+    }
+
+    if (qLike) {
+      // 同时匹配 $ticker（token_display 处理掉 $ 并转大写）和 token_key（CA）
+      baseFilters.push(
+        sql`(
+          upper(trim(both ' $' from m.token_display)) ILIKE ${qLike}
+          OR m.token_key ILIKE ${qLike}
+        )`,
+      );
+    }
+
+    // CTE：base → uniq（去重）→ agg（汇总）→ topk
+    const ctes = sql`
+      WITH base AS (
+        SELECT
+          m.token_key                    AS ca,
+          NULLIF(upper(trim(both ' $' from m.token_display)), '') AS tkr,
+          /* 归一化：优先 ticker，否则用 ca */
+          COALESCE(upper(trim(both ' $' from m.token_display)), m.token_key) AS norm,
+          m.source                       AS source,
+          m.price_usd_at                 AS price_usd_at,
+          t.tweet_id                     AS tweet_id,
+          t.twitter_username             AS username,
+          t.publish_date                 AS publish_date,
+          COALESCE(t.views, 0)::bigint   AS views,
+          (COALESCE(t.likes,0)+COALESCE(t.retweets,0)+COALESCE(t.replies,0))::bigint AS engs,
+          COALESCE(t.followers,0)::bigint AS followers
+        FROM tweet_token_mentions m
+        JOIN kol_tweets t ON t.tweet_id = m.tweet_id
+        WHERE ${sql.join(baseFilters, sql` AND `)}
+      ),
+      /* 每条推文对同一 norm 仅记一次，避免重复计数 */
+      uniq AS (
+        SELECT DISTINCT ON (tweet_id, norm)
+          norm, tkr, ca, source, price_usd_at,
+          tweet_id, username, publish_date, views, engs, followers
+        FROM base
+        ORDER BY tweet_id, norm
+      ),
+      agg AS (
+        SELECT
+          norm                                         AS token,
+          MAX(tkr)::text                               AS ticker,
+          MAX(ca)::text                                AS ca,
+          COUNT(*)::int                                AS total_mentions,
+          COUNT(DISTINCT tweet_id)::int                AS total_tweets,
+          SUM(views)::bigint                           AS total_views,
+          SUM(engs)::bigint                            AS total_engs,
+          AVG(views)::numeric                          AS avg_views,
+          AVG(engs)::numeric                           AS avg_engs,
+          AVG(CASE WHEN views > 0 THEN engs::numeric / views::numeric END) AS er,
+          COUNT(DISTINCT username)::int                AS total_kols,
+          SUM(followers)::bigint                       AS total_followers,
+          MAX(publish_date)                            AS latest_publish,
+          /* 至少有一条 NULL 价格的推文条数（基于 uniq） */
+          SUM(CASE WHEN price_usd_at IS NULL THEN 1 ELSE 0 END)::int AS no_price_tweets
+        FROM uniq
+        GROUP BY norm
+      ),
+      /* 取每个 token 的 Top KOLs（前 N） */
+      topk AS (
+        SELECT
+          x.token,
+          json_agg(
+            json_build_object('username', x.username, 'count', x.cnt)
+            ORDER BY x.cnt DESC
+          ) AS top_kols
+        FROM (
+          SELECT
+            u.norm AS token,
+            u.username,
+            COUNT(*) AS cnt,
+            ROW_NUMBER() OVER (PARTITION BY u.norm ORDER BY COUNT(*) DESC) AS rn
+          FROM uniq u
+          GROUP BY u.norm, u.username
+        ) x
+        WHERE x.rn <= ${TOP_KOLS_PER_COIN}
+        GROUP BY x.token
+      )
+    `;
+
+    // agg 层的 where（coins=no-price / q 再次兜底）
+    const aggWhere = [
+      coins === "no-price" ? sql`a.no_price_tweets > 0` : sql`TRUE`,
+      qLike
+        ? sql`(a.ticker ILIKE ${qLike} OR a.ca ILIKE ${qLike} OR a.token ILIKE ${qLike})`
+        : sql`TRUE`,
+    ];
+
+    // 总数
+    const countSql = sql`
+      ${ctes}
+      SELECT COUNT(*)::int AS n
+      FROM agg a
+      WHERE ${sql.join(aggWhere, sql` AND `)}
+    `;
+
+    const { rows: countRows } = await db.execute<{ n: number }>(countSql);
+    const total = Number(countRows?.[0]?.n ?? 0);
+
+    // 行数据
+    const rowsSql = sql`
+      ${ctes}
+      SELECT
+        a.token,
+        a.ticker,
+        a.ca,
+        a.total_mentions,
+        a.total_tweets,
+        a.total_views,
+        a.total_engs,
+        a.avg_views,
+        a.avg_engs,
+        a.er,
+        a.total_kols,
+        a.total_followers,
+        a.latest_publish,
+        a.no_price_tweets,
+        COALESCE(k.top_kols, '[]'::json) AS top_kols
+      FROM agg a
+      LEFT JOIN topk k ON k.token = a.token
+      WHERE ${sql.join(aggWhere, sql` AND `)}
+      ORDER BY ${orderBy} ${dir}, a.token ASC
+      LIMIT ${pageSize} OFFSET ${off}
+    `;
+
+    const { rows: items } = await db.execute(rowsSql);
+
+    return NextResponse.json({
+      ok: true,
+      page,
+      pageSize,
+      total,
+      items,
+    });
+  } catch (err: any) {
+    const message = err?.message || "unknown error";
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+  }
+}

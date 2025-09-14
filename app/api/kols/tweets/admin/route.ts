@@ -1,8 +1,8 @@
 // app/api/kols/tweets/admin/route.ts
 import { NextRequest } from "next/server";
 import { z } from "zod";
-import { db } from "@/lib/db/client";
-import { kolTweets, tweetTokenMentions } from "@/lib/db/schema";
+import { db } from "@/lib/db/client"; // ← 若你的 db 客户端路径不同，改这里
+import { kolTweets, tweetTokenMentions } from "@/lib/db/schema"; // ← 若表名/路径不同，改这里
 import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
@@ -29,6 +29,12 @@ const Q = z.object({
     ])
     .default("publish_date_time"),
   order: z.enum(["asc", "desc"]).default("desc"),
+  // NEW: full-dataset source filter
+  // "any" = All coins (exists any mention)
+  // "ca" | "ticker" | "phrase" = filter by mention source
+  source: z.enum(["any", "ca", "ticker", "phrase"]).optional(),
+
+  // Back-compat: keep old flag. If true, it's equivalent to source=any
   onlyCoin: z
     .union([
       z.literal("1"),
@@ -37,14 +43,15 @@ const Q = z.object({
       z.literal("false"),
     ])
     .optional(),
-  handle: z.string().optional(), // 可选的按用户名过滤
+
+  handle: z.string().optional(), // optional twitter handle filter (username without @)
 });
 
 type CoinPair = {
   ticker?: string | null;
   ca?: string | null;
   source?: string | null; // 'ca' | 'ticker' | 'phrase' | 'hashtag' | 'upper' | 'llm'
-  triggerText?: string | null; // 原始触发文本
+  triggerText?: string | null; // raw trigger text
   tokenKey?: string | null;
   tokenDisplay?: string | null;
   confidence?: number | null;
@@ -66,10 +73,16 @@ export async function GET(req: NextRequest) {
     }
 
     const { page, pageSize, sort, order } = parsed.data;
+
+    // Back-compat: onlyCoin → treat as source=any
     const onlyCoin =
       parsed.data.onlyCoin === "1" || parsed.data.onlyCoin === "true"
         ? true
         : false;
+
+    const sourceParam =
+      (parsed.data.source as "any" | "ca" | "ticker" | "phrase" | undefined) ??
+      (onlyCoin ? "any" : undefined);
 
     const now = new Date();
     const to = parsed.data.to ? new Date(parsed.data.to) : now;
@@ -79,32 +92,47 @@ export async function GET(req: NextRequest) {
 
     const handle = parsed.data.handle?.trim()?.replace(/^@/, "");
 
-    // ---- WHERE 子句 ----
+    // ---- WHERE (full-dataset) ----
     const whereClauses: any[] = [
       gte(kolTweets.publishDate, from),
       lte(kolTweets.publishDate, to),
     ];
     if (handle) whereClauses.push(eq(kolTweets.twitterUsername, handle));
-    if (onlyCoin) {
-      // 仅包含存在 mentions 的推文
+
+    // Source-aware filtering (applies BEFORE pagination/count)
+    if (sourceParam === "any") {
+      // All coins → exists any mention
       whereClauses.push(
         sql`EXISTS (SELECT 1 FROM ${tweetTokenMentions} ttm WHERE ttm.tweet_id = ${kolTweets.tweetId})`,
+      );
+    } else if (
+      sourceParam === "ca" ||
+      sourceParam === "ticker" ||
+      sourceParam === "phrase"
+    ) {
+      // Specific source
+      whereClauses.push(
+        sql`EXISTS (
+          SELECT 1
+          FROM ${tweetTokenMentions} ttm
+          WHERE ttm.tweet_id = ${kolTweets.tweetId}
+            AND ttm.source = ${sourceParam}
+        )`,
       );
     }
     const whereFinal = and(...whereClauses);
 
-    // ---- total 计数（distinct by tweet_id when onlyCoin, but EXISTS already ensures uniqueness） ----
+    // ---- total ----
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(kolTweets)
       .where(whereFinal);
-
     const total = Number(count || 0);
     if (total === 0) {
       return Response.json({ ok: true, items: [], total: 0, page, pageSize });
     }
 
-    // ---- 排序表达式 ----
+    // ---- sorting ----
     const engagementsExpr = sql<number>`
       (COALESCE(${kolTweets.likes},0)
      + COALESCE(${kolTweets.retweets},0)
@@ -141,19 +169,36 @@ export async function GET(req: NextRequest) {
         orderExpr = kolTweets.lastSeenAt;
         break;
       case "coins":
-        // 用一个代理排序：是否有 coin（1/0），再按发布时间
-        orderExpr = sql<number>`
-          (CASE WHEN EXISTS (SELECT 1 FROM ${tweetTokenMentions} ttm WHERE ttm.tweet_id = ${kolTweets.tweetId})
-           THEN 1 ELSE 0 END)
-        `;
+        // Source-aware proxy sort:
+        // - if source=ca|ticker|phrase → order by existence of that source
+        // - else (including any/undefined) → order by existence of any mention
+        if (
+          sourceParam === "ca" ||
+          sourceParam === "ticker" ||
+          sourceParam === "phrase"
+        ) {
+          orderExpr = sql<number>`
+            (CASE WHEN EXISTS (
+              SELECT 1 FROM ${tweetTokenMentions} ttm
+              WHERE ttm.tweet_id = ${kolTweets.tweetId}
+                AND ttm.source = ${sourceParam}
+            ) THEN 1 ELSE 0 END)
+          `;
+        } else {
+          orderExpr = sql<number>`
+            (CASE WHEN EXISTS (
+              SELECT 1 FROM ${tweetTokenMentions} ttm
+              WHERE ttm.tweet_id = ${kolTweets.tweetId}
+            ) THEN 1 ELSE 0 END)
+          `;
+        }
         break;
       default:
         orderExpr = kolTweets.publishDate;
     }
-
     const direction = order === "asc" ? sql`ASC` : sql`DESC`;
 
-    // ---- 分页查询 ----
+    // ---- page rows ----
     const rows = await db
       .select({
         twitter_username: kolTweets.twitterUsername,
@@ -176,9 +221,9 @@ export async function GET(req: NextRequest) {
       return Response.json({ ok: true, items: [], total, page, pageSize });
     }
 
+    // ---- mentions for tweets on this page ----
     const tweetIds = rows.map((r) => r.tweet_id);
 
-    // ---- mentions（当前页的 tweetIds）----
     const mentionRows = await db
       .select({
         tweet_id: tweetTokenMentions.tweetId,
@@ -210,14 +255,17 @@ export async function GET(req: NextRequest) {
       };
 
       if (m.source === "ca") {
+        // identified by contract address
         arr.push({ ...base, ca: tokenKey, ticker: display ?? null });
       } else if (m.source === "ticker") {
+        // identified by ticker; may also carry a CA in tokenKey if it looks like one
         arr.push({
           ...base,
           ticker: display ?? tokenKey,
           ca: looksLikeCA(tokenKey) ? tokenKey : null,
         });
       } else {
+        // phrase / hashtag / upper / llm ...
         if (looksLikeCA(tokenKey)) {
           arr.push({ ...base, ca: tokenKey, ticker: display ?? null });
         } else {
@@ -227,7 +275,7 @@ export async function GET(req: NextRequest) {
       coinsByTweet.set(m.tweet_id, arr);
     }
 
-    // ---- 组装返回（去重）----
+    // ---- assemble items (dedupe per row) ----
     const items = rows.map((r) => {
       const list = coinsByTweet.get(r.tweet_id) ?? [];
       const seen = new Set<string>();
