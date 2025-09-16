@@ -31,7 +31,7 @@ export default function KolsLeaderboardClient({
   const daysFromUrl = Math.max(1, Math.min(30, Number(sp.get("days") || "7") || 7)) as 7 | 30;
 
   const [query, setQuery] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("tweets");
+  const [sortKey, setSortKey] = useState<SortKey>("views");
   const [scope, setScope] = useState<ScopeKey>("shills");
   const [coinKey, setCoinKey] = useState<string | null>(null);
   const [page, setPage] = useState<number>(1);             // 1-based
@@ -215,6 +215,7 @@ export default function KolsLeaderboardClient({
           onSetScope={setScope}
           onQueryChange={setQuery}
           onSetCoinKey={setCoinKey}
+          hideScope
         />
       </div>
 

@@ -22,6 +22,7 @@ export function KolsHeaderControls({
   onSetScope,
   onQueryChange,
   onSetCoinKey,
+  hideScope = false,
 }: {
   days: 7 | 30;
   sortKey: SortKey;
@@ -34,6 +35,7 @@ export function KolsHeaderControls({
   onSetScope: (s: ScopeKey) => void;
   onQueryChange: (q: string) => void;
   onSetCoinKey: (k: string | null) => void;
+  hideScope?: boolean;
 }) {
   return (
     <div className="
@@ -88,29 +90,31 @@ export function KolsHeaderControls({
           <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
         </Dropdown>
 
-        {/* Scope toggle: Total | Shills */}
-        <div className="inline-flex rounded-lg border border-white/10 bg-white/5 p-1">
-          <button
-            onClick={() => onSetScope("total")}
-            className={[
-              "px-3 py-1 text-sm rounded-md",
-              scope === "total" ? "bg-emerald-400/15 text-emerald-200" : "text-gray-200 hover:bg-white/5",
-            ].join(" ")}
-            aria-pressed={scope === "total"}
-          >
-            Total
-          </button>
-          <button
-            onClick={() => onSetScope("shills")}
-            className={[
-              "px-3 py-1 text-sm rounded-md",
-              scope === "shills" ? "bg-emerald-400/15 text-emerald-200" : "text-gray-200 hover:bg-white/5",
-            ].join(" ")}
-            aria-pressed={scope === "shills"}
-          >
-            Shills
-          </button>
-        </div>
+        {/* Scope toggle: Total | Shills (optional) */}
+        {!hideScope && (
+          <div className="inline-flex rounded-lg border border-white/10 bg-white/5 p-1">
+            <button
+              onClick={() => onSetScope("total")}
+              className={[
+                "px-3 py-1 text-sm rounded-md",
+                scope === "total" ? "bg-emerald-400/15 text-emerald-200" : "text-gray-200 hover:bg-white/5",
+              ].join(" ")}
+              aria-pressed={scope === "total"}
+            >
+              Total
+            </button>
+            <button
+              onClick={() => onSetScope("shills")}
+              className={[
+                "px-3 py-1 text-sm rounded-md",
+                scope === "shills" ? "bg-emerald-400/15 text-emerald-200" : "text-gray-200 hover:bg-white/5",
+              ].join(" ")}
+              aria-pressed={scope === "shills"}
+            >
+              Shills
+            </button>
+          </div>
+        )}
 
         {/* Coin filter */}
         <Dropdown
