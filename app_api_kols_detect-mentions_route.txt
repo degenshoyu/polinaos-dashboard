@@ -1,0 +1,106 @@
+// app/api/kols/detect-mentions/route.ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
+import { runDetectMentions } from "@/lib/kols/detectMentionsService";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// Input schema for the route
+const Body = z.object({
+  screen_name: z.string().min(1), // handle or "*" / "all"
+  days: z.number().int().min(1).max(30).optional().default(7),
+  missingOnly: z.boolean().optional().default(true),
+  dbLog: z.boolean().optional(),
+  stream: z.boolean().optional(), // stream NDJSON when true
+});
+
+// Allow cron/m2m calls via shared secret (query ?secret= or headers)
+function allowByCronSecret(req: Request) {
+  const expected = (process.env.CRON_SECRET || "").trim();
+  if (!expected) return false;
+
+  const url = new URL(req.url);
+  const q = url.searchParams.get("secret")?.trim() || "";
+  const h =
+    req.headers.get("x-cron-secret")?.trim() ||
+    req.headers.get("x-api-key")?.trim() ||
+    "";
+
+  return q === expected || h === expected;
+}
+
+export async function POST(req: Request) {
+  // AuthZ: admin session OR cron secret
+  const session = await getServerSession(authOptions);
+  const isAdmin = Boolean((session?.user as any)?.isAdmin);
+  const bySecret = allowByCronSecret(req);
+  if (!isAdmin && !bySecret) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden" },
+      { status: 403 },
+    );
+  }
+
+  // Parse inputs
+  const url = new URL(req.url);
+  const wantStreamQuery =
+    url.searchParams.get("stream") === "1" ||
+    url.searchParams.get("stream") === "true";
+
+  const body = Body.parse(await req.json().catch(() => ({})));
+  const params = {
+    screen_name: body.screen_name,
+    days: body.days,
+    missingOnly: body.missingOnly,
+    dbLog: body.dbLog ?? false,
+    origin: url.origin, // pass to service to call local APIs
+  };
+  const wantStream = wantStreamQuery || Boolean(body.stream);
+
+  // Streaming NDJSON
+  if (wantStream) {
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          const write = (obj: any) =>
+            controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+          const emit = (evt: string, data: any = {}) =>
+            write({ t: Date.now(), evt, ...data });
+
+          (async () => {
+            try {
+              emit("hello");
+              const result = await runDetectMentions(params, (e) =>
+                typeof e === "object" && e?.event
+                  ? emit(e.event, { ...e, event: undefined })
+                  : emit("log", { data: e }),
+              );
+              emit("result", result);
+              controller.close();
+            } catch (e: any) {
+              emit("error", { message: e?.message || String(e) });
+              controller.close();
+            }
+          })();
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-ndjson",
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+        },
+      },
+    );
+  }
+
+  // Non-streaming JSON
+  const result = await runDetectMentions(params, () => {});
+  return NextResponse.json(result);
+}

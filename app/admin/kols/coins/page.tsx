@@ -166,28 +166,9 @@ export default function AdminKolsCoinsPage() {
   const pageCount = Math.max(1, Math.ceil((total || 0) / size));
   const safePage = Math.min(page, pageCount);
 
-  // Delete a CA (and related mentions) then refresh
-  const deleteRow = async (ca: string) => {
+  // Delete a CA (and related mentions) then refresh — receives the mode from the dialog
+  const deleteRow = async (ca: string, excludeTweets: boolean) => {
     if (!ca) return;
-    // Ask user which mode to use
-    const choice = window.prompt(
-      [
-        "Delete options:",
-        "1 = Remove from coin_ca_ticker and tweet_token_mentions",
-        "2 = Option 1 + mark related kol_tweets as excluded=true",
-        "",
-        "Enter 1 or 2:",
-      ].join("\n"),
-      "1",
-    );
-    if (!choice) return;
-    const excludeTweets = choice.trim() === "2";
-    const ok = window.confirm(
-      excludeTweets
-        ? "Confirm: remove CA + mentions AND set related tweets excluded=true?"
-        : "Confirm: remove CA + mentions only?",
-    );
-    if (!ok) return;
     try {
       const r = await fetch("/api/kols/coins/delete", {
         method: "POST",
@@ -196,10 +177,8 @@ export default function AdminKolsCoinsPage() {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
-      alert(
-        `Done.\nRemoved mentions: ${data.removedMentions}\nRemoved ticker rows: ${data.removedTicker}\n` +
-          (excludeTweets ? `Tweets excluded: ${data.excludedTweets}` : ""),
-      );
+      // Optional: keep a lightweight success hint; admin简洁为主
+      // console.info("Delete done", data);
       await fetchData();
     } catch (e: any) {
       alert(e?.message ?? "delete failed");
@@ -284,7 +263,7 @@ export default function AdminKolsCoinsPage() {
         onPendingChange={onPendingChange}
         onSaveCa={saveCa}
         onShowTweets={openTweets}
-        onDeleteRow={(idx, ca) => deleteRow(ca)}
+        onDeleteRow={(idx, ca, exclude) => deleteRow(ca, exclude)}
       />
 
       {/* Pagination */}

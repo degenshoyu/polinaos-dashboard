@@ -5,21 +5,27 @@ import * as React from "react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
 import { X } from "lucide-react"
 
-import { cn } from "@/lib/utils" // 如果你没有 cn 工具，改成自定义 className 拼接即可
+import { cn } from "@/lib/utils"
 
 const Dialog = DialogPrimitive.Root
 const DialogTrigger = DialogPrimitive.Trigger
 const DialogPortal = DialogPrimitive.Portal
 const DialogClose = DialogPrimitive.Close
 
+// Allow toggling animation via `animated` prop (default: true)
+type OverlayProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay> & {
+  /** When false, disables enter/exit animations. */
+  animated?: boolean;
+};
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(({ className, ...props }, ref) => (
+  OverlayProps
+>(({ className, animated = true, ...props }, ref) => (
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      "fixed inset-0 z-50 bg-black/60 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out",
+      "fixed inset-0 z-50 bg-black/60 backdrop-blur-sm",
+      animated && "data-[state=open]:animate-in data-[state=closed]:animate-out",
       className
     )}
     {...props}
@@ -27,17 +33,21 @@ const DialogOverlay = React.forwardRef<
 ))
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 
+type ContentProps = React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+  /** When false, disables enter/exit animations (also applied to Overlay). */
+  animated?: boolean;
+};
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+  ContentProps
+>(({ className, children, animated = true, ...props }, ref) => (
   <DialogPortal>
-    <DialogOverlay />
+    <DialogOverlay animated={animated} />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
         "fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 border border-white/10 bg-[#0B0B0E] p-4 rounded-2xl shadow-lg",
-        "data-[state=open]:animate-in data-[state=closed]:animate-out",
+        animated && "data-[state=open]:animate-in data-[state=closed]:animate-out",
         className
       )}
       {...props}

@@ -23,13 +23,11 @@ async function getInitialRowsFromDB(days: number): Promise<
     shillViews?: number;
     shillEngagements?: number;
     coinsTop?: CoinStat[];
+    coinsTopAll?: CoinStat[];
   })[]
 > {
-  const now = new Date();
-  const since = new Date(now);
-  since.setDate(now.getDate() - (days - 1));
-  const until = new Date(now);
-  until.setDate(now.getDate() + 1);
+  const until = new Date(); // now
+  const since = new Date(Date.now() - days * 864e5);
 
   // 1) Base totals windowed
   const base = await db
@@ -122,20 +120,22 @@ async function getInitialRowsFromDB(days: number): Promise<
   const shillVEBy = new Map(
     shillVE.map((r) => [r.handle, { v: toNum(r.shillViews), e: toNum(r.shillEngs) }]),
   );
-  const coinsBy = new Map<string, CoinStat[]>();
+  const coinsByAll = new Map<string, CoinStat[]>();  // full list per handle
+  const coinsByTop = new Map<string, CoinStat[]>();  // top N per handle
   for (const row of coinsAgg) {
     const key = row.handle;
-    const list = coinsBy.get(key) ?? [];
+     const list = coinsByAll.get(key) ?? [];
     list.push({
       tokenKey: String(row.tokenKey),
       tokenDisplay: row.tokenDisplay ?? String(row.tokenKey).toUpperCase(),
       count: toNum(row.c),
     });
-    coinsBy.set(key, list);
+    coinsByAll.set(key, list);
   }
-  for (const [k, list] of coinsBy) {
-    list.sort((a, b) => b.count - a.count);
-    coinsBy.set(k, list.slice(0, 6)); // Top6
+  for (const [k, list] of coinsByAll) {
+    const sorted = [...list].sort((a, b) => b.count - a.count);
+    coinsByTop.set(k, sorted.slice(0, 6)); // keep Top6 only for display
+    coinsByAll.set(k, sorted);             // keep full sorted list for filtering6
   }
 
   return base.map((r) => ({
@@ -152,7 +152,8 @@ async function getInitialRowsFromDB(days: number): Promise<
     shillViews: shillVEBy.get(r.twitterUsername)?.v ?? 0,
     shillEngagements: shillVEBy.get(r.twitterUsername)?.e ?? 0,
 
-    coinsTop: coinsBy.get(r.twitterUsername) ?? [],
+    coinsTop: coinsByTop.get(r.twitterUsername) ?? [],
+    coinsTopAll: coinsByAll.get(r.twitterUsername) ?? [],
   })) as any;
 }
 
@@ -165,4 +166,3 @@ export default async function Page(props: { searchParams: Promise<SearchParams> 
   const initialRows = await getInitialRowsFromDB(days);
   return <KolsLeaderboardClient initialRows={initialRows} />;
 }
-

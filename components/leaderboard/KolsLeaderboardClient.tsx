@@ -49,7 +49,8 @@ export default function KolsLeaderboardClient({
     type Item = { tokenKey: string; tokenDisplay: string; count: number };
     const merged = new Map<string, Item>();
     for (const r of rows) {
-      const list = ((r as any).coinsTop || []) as CoinStat[];
+      const list =
+       (((r as any).coinsTopAll || (r as any).coinsTop) || []) as CoinStat[];
       for (const c of list) {
         const keyRaw = (c.tokenKey || c.tokenDisplay || "").trim();
         if (!keyRaw) continue;
@@ -77,7 +78,9 @@ export default function KolsLeaderboardClient({
 
       // coin filter
       if (!ck) return textOk;
-      const coins = (((r as any).coinsTop || []) as CoinStat[]);
+      const coins = (
+        ((r as any).coinsTopAll || (r as any).coinsTop) || []
+      ) as CoinStat[];
       const hit = coins.some((c) => {
         const key = (c.tokenKey || c.tokenDisplay || "").trim().toLowerCase();
         return key === ck;
@@ -101,7 +104,9 @@ export default function KolsLeaderboardClient({
       const shEngs = Number((r as any).shillEngagements || 0);
       const shER = shViews ? shEngs / shViews : 0;
 
-      const coins: CoinStat[] = (((r as any).coinsTop || []) as CoinStat[]);
+      const coins = (
+        ((r as any).coinsTopAll || (r as any).coinsTop) || []
+      ) as CoinStat[];
 
       return {
         row: r,

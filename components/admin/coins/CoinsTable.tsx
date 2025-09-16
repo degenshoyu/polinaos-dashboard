@@ -1,7 +1,7 @@
 // components/admin/coins/CoinsTable.tsx
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { CoinRow, SortKey, fmtNum, shortCa } from "./types";
 import { Pencil, List, Trash2 } from "lucide-react";
 import {
@@ -73,6 +73,174 @@ type Props = {
   onDeleteRow: (rowIndex: number, ca: string, excludeTweets: boolean) => Promise<void> | void;
 };
 
+/** Lightweight shape for the delete target */
+type DeleteTarget = {
+  idx: number;
+  ca: string;
+  ticker?: string | null;
+  tokenName?: string | null;
+};
+
+/**
+ * Delete dialog with two-step confirmation:
+ * Step 1: choose Option 1 or Option 2 (does NOT execute deletion).
+ * Step 2: "Are you sure?" panel + "Confirm Option X" button to execute.
+ * Notes:
+ * - Keep DialogDescription inline-only (it renders as <p>).
+ * - In admin we disable motion (animated={false}) for a clean UX.
+ */
+function DeleteTokenDialog({
+  open,
+  target,
+  deleting,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  target: { idx: number; ca: string; ticker?: string | null; tokenName?: string | null } | null;
+  deleting: false | "basic" | "exclude";
+  onClose: () => void;
+  onConfirm: (mode: "basic" | "exclude") => void;
+}) {
+  // Shorten CA for secondary display
+  const caShort = target?.ca ? `${target.ca.slice(0, 4)}…${target.ca.slice(-4)}` : "";
+  // Second step guard to prevent accidental deletion
+  const [pendingMode, setPendingMode] = useState<null | "basic" | "exclude">(null);
+
+  // Reset internal state when dialog closes
+  const handleClose = () => {
+    setPendingMode(null);
+    onClose();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
+      <DialogContent className="max-w-lg sm:max-w-xl" animated={false}>
+        <DialogHeader>
+          <DialogTitle>Delete token mapping</DialogTitle>
+
+          {/* IMPORTANT: DialogDescription renders a <p>. Keep it inline-only. */}
+          <DialogDescription>
+            Contract Address:{" "}
+            <code className="px-1.5 py-0.5 rounded bg-black/30 border border-white/10">
+              {target?.ca ?? ""}
+            </code>{" "}
+            <span className="text-gray-500">({caShort})</span>
+          </DialogDescription>
+        </DialogHeader>
+
+        {/* Block-level details MUST live outside DialogDescription */}
+        <div className="space-y-1 text-sm">
+          {target?.ticker && (
+            <div>
+              <span className="text-gray-400">Ticker:</span>{" "}
+              <span className="font-medium">{target.ticker}</span>
+            </div>
+          )}
+          {target?.tokenName && (
+            <div>
+              <span className="text-gray-400">Token Name:</span>{" "}
+              <span className="font-medium">{target.tokenName}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Option cards */}
+        <div className="space-y-3 text-sm">
+          <div className="rounded-lg border border-white/10 p-3 bg-white/5">
+            <div className="font-medium mb-1">Option 1</div>
+            <p>
+              Remove from <code>coin_ca_ticker</code> and <code>tweet_token_mentions</code>.
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/10 p-3 bg-white/5">
+            <div className="font-medium mb-1">Option 2</div>
+            <p>
+              Do Option 1, <span className="underline">and</span> set related{" "}
+              <code>kol_tweets</code> to <code>excluded=true</code> so they won’t be counted again.
+            </p>
+          </div>
+        </div>
+
+        {/* Are you sure step (only visible after selecting an option) */}
+        {pendingMode && (
+          <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm">
+            <div className="mb-1 font-medium text-red-300">Are you sure?</div>
+            <p className="text-red-200">
+              You are about to{" "}
+              {pendingMode === "basic"
+                ? "remove this token mapping and related mentions"
+                : "remove this token mapping and related mentions, and mark related tweets as excluded=true"}
+              . This action cannot be undone.
+            </p>
+          </div>
+        )}
+
+        {/* Footer: two-step confirm to prevent accidental deletion */}
+        {!pendingMode ? (
+          // Step 1: choose an option (Option 1 left of Option 2)
+          <DialogFooter className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+            <Button
+              variant="destructive"
+              className="shrink-0 whitespace-nowrap"
+              disabled={!!deleting}
+              onClick={() => setPendingMode("basic")}
+            >
+              Delete (Option 1)
+            </Button>
+            <Button
+              variant="destructive"
+              className="shrink-0 whitespace-nowrap"
+              disabled={!!deleting}
+              onClick={() => setPendingMode("exclude")}
+            >
+              Delete + Exclude (Option 2)
+            </Button>
+            <div className="grow" />
+            <Button
+              variant="secondary"
+              className="shrink-0 whitespace-nowrap"
+              onClick={handleClose}
+              disabled={!!deleting}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        ) : (
+          // Step 2: confirm the selected option
+          <DialogFooter className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+            <Button
+              variant="destructive"
+              className="shrink-0 whitespace-nowrap"
+              disabled={!!deleting}
+              onClick={() => onConfirm(pendingMode)}
+            >
+              {deleting ? "Deleting…" : pendingMode === "basic" ? "Confirm Option 1" : "Confirm Option 2"}
+            </Button>
+            <Button
+              variant="secondary"
+              className="shrink-0 whitespace-nowrap"
+              onClick={() => setPendingMode(null)}
+              disabled={!!deleting}
+            >
+              Back
+            </Button>
+            <div className="grow" />
+            <Button
+              variant="secondary"
+              className="shrink-0 whitespace-nowrap"
+              onClick={handleClose}
+              disabled={!!deleting}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function CoinsTable({
   rows,
   loading,
@@ -89,7 +257,7 @@ export default function CoinsTable({
   onDeleteRow,
 }: Props) {
   const [copiedRow, setCopiedRow] = useState<number | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{ idx: number; ca: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = useState<false | "basic" | "exclude">(false);
 
   return (
@@ -303,7 +471,16 @@ export default function CoinsTable({
                       <button
                         className="p-1 rounded-md border border-red-400/40 bg-red-400/10 hover:bg-red-400/20"
                         title="Delete token & related mentions"
-                        onClick={() => setDeleteTarget({ idx: i, ca: r.ca! })}
+                        // Open two-step delete dialog with extra metadata
+                        onClick={() =>
+                          setDeleteTarget({
+                            idx: i,
+                            ca: r.ca!,
+                            ticker: r.ticker ?? null,
+                            // tokenName is optional; if your CoinRow uses a different key, map it here
+                            tokenName: (r as any).tokenName ?? (r as any).name ?? null,
+                          })
+                        }
                       >
                         <Trash2 size={14} />
                       </button>
@@ -327,76 +504,23 @@ export default function CoinsTable({
         </tbody>
       </table>
 
-      {/* Delete dialog with two options */}
-      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Delete token mapping</DialogTitle>
-            <DialogDescription>
-              Contract Address:{" "}
-              <code className="px-1.5 py-0.5 rounded bg-black/30 border border-white/10">
-                {deleteTarget?.ca ?? ""}
-              </code>
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 text-sm">
-            <div className="rounded-lg border border-white/10 p-3 bg-white/5">
-              <div className="font-medium mb-1">Option 1</div>
-              <p>Remove from <code>coin_ca_ticker</code> and <code>tweet_token_mentions</code>.</p>
-            </div>
-            <div className="rounded-lg border border-white/10 p-3 bg-white/5">
-              <div className="font-medium mb-1">Option 2</div>
-              <p>
-                Do Option 1, <span className="underline">and</span> set related{" "}
-                <code>kol_tweets</code> to <code>excluded=true</code> so they won’t be counted again.
-              </p>
-            </div>
-          </div>
-
-          <DialogFooter className="gap-2 sm:gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => setDeleteTarget(null)}
-              disabled={!!deleting}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={!!deleting}
-              onClick={async () => {
-                if (!deleteTarget) return;
-                try {
-                  setDeleting("basic");
-                  await onDeleteRow(deleteTarget.idx, deleteTarget.ca, false);
-                  setDeleteTarget(null);
-                } finally {
-                  setDeleting(false);
-                }
-              }}
-            >
-              {deleting === "basic" ? "Deleting…" : "Delete (Option 1)"}
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={!!deleting}
-              onClick={async () => {
-                if (!deleteTarget) return;
-                try {
-                  setDeleting("exclude");
-                  await onDeleteRow(deleteTarget.idx, deleteTarget.ca, true);
-                  setDeleteTarget(null);
-                } finally {
-                  setDeleting(false);
-                }
-              }}
-            >
-              {deleting === "exclude" ? "Working…" : "Delete + Exclude (Option 2)"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Two-step delete dialog (no numeric input; admin motion disabled) */}
+      <DeleteTokenDialog
+        open={!!deleteTarget}
+        target={deleteTarget}
+        deleting={deleting}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={async (mode) => {
+          if (!deleteTarget) return;
+          try {
+            setDeleting(mode);
+            await onDeleteRow(deleteTarget.idx, deleteTarget.ca, mode === "exclude");
+            setDeleteTarget(null);
+          } finally {
+            setDeleting(false);
+          }
+        }}
+      />
     </div>
   );
 }
