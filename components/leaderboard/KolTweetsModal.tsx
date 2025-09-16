@@ -466,14 +466,14 @@ export default function KolTweetsModal({
         className="
           absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
           w-[min(100vw-24px,1100px)]
-          max-h-[85vh] overflow-hidden
+          max-h-[85vh] flex flex-col overflow-hidden
           rounded-2xl border border-white/10 bg-gradient-to-br from-[#0d1312] to-[#0a0f0e] shadow-2xl
         "
       >
         {header}
 
         {/* Body */}
-        <div className="p-4 overflow-auto max-h-[calc(85vh-56px-64px)]">
+        <div className="p-4 overflow-auto flex-1">
           {loading && <div className="text-sm text-gray-400">Loading tweets…</div>}
           {err && <div className="text-sm text-red-300">❌ {err}</div>}
           {!loading && !err && data && sortedItems.length === 0 && (
