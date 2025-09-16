@@ -249,12 +249,15 @@ async function recordUnresolved(opts: {
  */
 async function resolvePhraseFromDBOnly(nameRaw: string) {
   const name = stripCoinSuffix(nameRaw);
-  if (!name || name.length < 2) return null;
+  if (!name) return null;
+  const isMultiWord = /\s/.test(name);
+  // Guard: for single-word phrases, enforce min length = 4
+  if (!isMultiWord && name.length < 4) return null;
 
   const byName = await db
     .select()
     .from(coinCaTicker)
-    .where(eq(coinCaTicker.tokenName, name))
+    .where(sql`${coinCaTicker.tokenName} ILIKE ${name}`)
     .orderBy(desc(coinCaTicker.priority), desc(coinCaTicker.updatedAt))
     .limit(1);
   if (byName.length) {
@@ -286,20 +289,22 @@ async function resolvePhraseFromDBOnly(nameRaw: string) {
     }
   }
 
-  const likeRows = await db
-    .select()
-    .from(coinCaTicker)
-    .where(sql`${coinCaTicker.tokenName} ILIKE ${"%" + name + "%"}`)
-    .orderBy(desc(coinCaTicker.priority), desc(coinCaTicker.updatedAt))
-    .limit(1);
-  if (likeRows.length) {
-    const r = likeRows[0]!;
-    return {
-      contractAddress: r.contractAddress,
-      tokenTicker: r.tokenTicker ?? null,
-      tokenName: r.tokenName ?? null,
-      primaryPoolAddress: r.primaryPoolAddress ?? null,
-    };
+  if (isMultiWord) {
+    const likeRows = await db
+      .select()
+      .from(coinCaTicker)
+      .where(sql`${coinCaTicker.tokenName} ILIKE ${"%" + name + "%"}`)
+      .orderBy(desc(coinCaTicker.priority), desc(coinCaTicker.updatedAt))
+      .limit(1);
+    if (likeRows.length) {
+      const r = likeRows[0]!;
+      return {
+        contractAddress: r.contractAddress,
+        tokenTicker: r.tokenTicker ?? null,
+        tokenName: r.tokenName ?? null,
+        primaryPoolAddress: r.primaryPoolAddress ?? null,
+      };
+    }
   }
 
   return null;

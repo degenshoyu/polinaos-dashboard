@@ -174,7 +174,9 @@ export async function processTweetsToRows(
       // - drop empty/too-short phrases after normalization
       if (m.source === "phrase") {
         const core = input.trim();
-        if (!core || core.length < 2) continue;
+        const isMultiWord = /\s/.test(core);
+        if (!core) continue;
+        if (!isMultiWord && core.length < 4) continue;
       }
       // - drop majors tickers early (saves work downstream)
       if (m.source === "ticker") {

@@ -9,19 +9,11 @@ import { and, sql } from "drizzle-orm";
 import { resolveCAtoMeta } from "@/lib/tokens/resolve";
 import { fetchMintMeta } from "@/lib/mintmeta/fetch";
 import { canonAddr } from "@/lib/chains/address";
+// ⬇️ 新增：直接用 GT 的地址解析（支持 EVM）
 import { resolveContractsToMeta } from "@/lib/markets/geckoterminal";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// Narrow the type of nameMeta for better TS safety
-type NameMeta = {
-  symbol: string | null;
-  tokenName: string | null;
-  primaryPoolAddress: string | null;
-  source: string;
-  snapshot: any;
-} | null;
 
 /**
  * Body:
@@ -67,7 +59,7 @@ function numToDate(n?: number | null): Date | null {
  *  1) resolveCAtoMeta (Solana-only)
  *  2) resolveContractsToMeta([addr]) from geckoterminal (works for EVM too)
  */
-async function getNameMetaByAddress(addr: string): Promise<NameMeta> {
+async function getNameMetaByAddress(addr: string) {
   // 1) Solana fast-path
   const sol = await resolveCAtoMeta(addr).catch(() => null);
   if (sol?.symbol && sol?.tokenName) {
@@ -126,34 +118,17 @@ async function enrichOne(req: Request, tickerUpper: string, toCaRaw: string) {
   // Map to DB columns
   const setData: Record<string, any> = { updatedAt: now };
 
-  if (nameMeta || mintmeta) {
-    const pick = (...cands: Array<unknown>) => {
-      for (const c of cands) {
-        if (typeof c === "string" && c.trim()) return c.trim();
-      }
-      return null;
-    };
-    const clean = (s: string) => s.replace(/\u0000/g, "").trim();
-
-    const mmName =
-      (mintmeta as any)?.name ??
-      (mintmeta as any)?.onchain?.name ??
-      (mintmeta as any)?.json?.name ??
-      null;
-
-    const chosen =
-      pick(mmName, nameMeta?.tokenName, nameMeta?.symbol, tickerUpper) ??
-      tickerUpper;
-
-    setData.tokenName = clean(chosen);
-
-    if (nameMeta && Object.prototype.hasOwnProperty.call(nameMeta, "primaryPoolAddress")) {
+  // token_name / primary_pool_address / token_metadata
+  if (nameMeta) {
+    const tokenName = nameMeta.tokenName || nameMeta.symbol || tickerUpper; // always give a non-empty fallback
+    setData.tokenName = tokenName;
+    if (Object.prototype.hasOwnProperty.call(nameMeta, "primaryPoolAddress")) {
       setData.primaryPoolAddress = nameMeta.primaryPoolAddress ?? null;
     }
-    // keep both snapshots for auditing (handle null safely)
+    // keep both snapshots for auditing
     setData.tokenMetadata = {
-      source: nameMeta?.source ?? (mintmeta ? "mintmeta-only" : "unknown"),
-      resolve: nameMeta?.snapshot ?? null,
+      source: nameMeta.source,
+      resolve: nameMeta.snapshot ?? null,
       mintmeta,
     };
   } else {
