@@ -345,6 +345,53 @@ export const tweetTokenMentionsRelations = relations(
   }),
 );
 
+// --- Price source enum ---
+export const priceSource = pgEnum("price_source", [
+  "geckoterminal",
+  "defillama",
+  "manual",
+  "client_push",
+]);
+
+// --- coin_price table (time-series prices per contract) ---
+export const coinPrice = pgTable(
+  "coin_price",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    // We don't hard-FK to coin_ca_ticker.contract_address because it's not unique in schema.
+    // Contract address should be base58 (Solana mint) or EVM address, normalized lowercase if EVM.
+    contractAddress: text("contract_address").notNull(),
+    // Optional pool address (DEX pool / AMM LP address)
+    poolAddress: text("pool_address"),
+    // Source enum: geckoterminal/defillama/manual
+    source: priceSource("source").notNull().default("geckoterminal"),
+    // Price in USD (high precision decimal)
+    priceUsd: numeric("price_usd", { precision: 18, scale: 8 })
+      .$type<string>()
+      .notNull(),
+    // Timestamp for the price snapshot (server time or exchange-provided)
+    priceAt: timestamp("price_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Optional confidence score (0-100 or 0-1 scaled as you prefer)
+    confidence: numeric("confidence", { precision: 6, scale: 3 }),
+    ...timestamps,
+  },
+  (t) => ({
+    // One snapshot per (CA, source, price_at) is unique
+    uniqPricePoint: uniqueIndex("uniq_coin_price_casrcat").on(
+      t.contractAddress,
+      t.source,
+      t.priceAt,
+    ),
+    byCaAt: index("idx_coin_price_ca_at").on(t.contractAddress, t.priceAt),
+    byAt: index("idx_coin_price_at").on(t.priceAt),
+    bySource: index("idx_coin_price_source").on(t.source),
+  }),
+);
+
 /* ===================== Inferred Types ===================== */
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;

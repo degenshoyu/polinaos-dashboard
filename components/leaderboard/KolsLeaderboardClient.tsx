@@ -1,21 +1,24 @@
-// components/leaderboard/KolsLeaderboardClient.tsx
-
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import type { KolRow } from "@/components/types";
 import { totalsFromRow } from "@/lib/kols";
-import { useKolAggregations } from "@/hooks/useKolAggregations";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { KolsHeaderControls, type SortKey, type ScopeKey, type CoinOpt } from "./KolsHeaderControls";
+import {
+  KolsHeaderControls,
+  type SortKey,
+  type ScopeKey,
+  type CoinOpt,
+  type BasisKey,
+} from "./KolsHeaderControls";
 import { LeaderboardHeader } from "./LeaderboardHeader";
 import { LeaderboardRow, type CoinStat } from "./LeaderboardRow";
 import { Pagination, PAGE_SIZE_OPTIONS } from "./Pagination";
 import MobileRow from "./MobileRow";
 import KolTweetsModal from "./KolTweetsModal";
 
-/* ---------- local utils ---------- */
+/* ---------- Client container for KOL leaderboard ---------- */
 export default function KolsLeaderboardClient({
   initialRows,
 }: {
@@ -28,20 +31,31 @@ export default function KolsLeaderboardClient({
 }) {
   const router = useRouter();
   const sp = useSearchParams();
-  const daysFromUrl = Math.max(1, Math.min(30, Number(sp.get("days") || "7") || 7)) as 7 | 30;
 
+  // Days: we only support 7 / 30 in UI. Coerce to that domain.
+  const daysFromUrl = (Math.max(
+    1,
+    Math.min(30, Number(sp.get("days") || "7") || 7),
+  ) === 30
+    ? 30
+    : 7) as 7 | 30;
+
+  // UI states
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("views");
   const [scope, setScope] = useState<ScopeKey>("shills");
-  const [coinKey, setCoinKey] = useState<string | null>(null);
-  const [page, setPage] = useState<number>(1);             // 1-based
-  const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
+  const [basis, setBasis] = useState<BasisKey>("earliest");
+  const [coinKey, setCoinKey] = useState<string | null>(null); // <-- added
+  const [page, setPage] = useState<number>(1); // 1-based
+  const [pageSize, setPageSize] =
+    useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
 
-  const { refreshing, refreshVisible } = useKolAggregations();
   const rows = initialRows ?? [];
 
   const [selectedKol, setSelectedKol] = useState<{
-    twitterUsername: string; displayName?: string; profileImgUrl?: string;
+    twitterUsername: string;
+    displayName?: string;
+    profileImgUrl?: string;
   } | null>(null);
 
   /** Build coin options for filter (merge by tokenKey/tokenDisplay) */
@@ -50,7 +64,7 @@ export default function KolsLeaderboardClient({
     const merged = new Map<string, Item>();
     for (const r of rows) {
       const list =
-       (((r as any).coinsTopAll || (r as any).coinsTop) || []) as CoinStat[];
+        (((r as any).coinsTopAll || (r as any).coinsTop) || []) as CoinStat[];
       for (const c of list) {
         const keyRaw = (c.tokenKey || c.tokenDisplay || "").trim();
         if (!keyRaw) continue;
@@ -58,11 +72,19 @@ export default function KolsLeaderboardClient({
         const display = (c.tokenDisplay || c.tokenKey || "UNKNOWN").trim();
         const prev = merged.get(key);
         if (prev) prev.count += Number(c.count || 0);
-        else merged.set(key, { tokenKey: key, tokenDisplay: display, count: Number(c.count || 0) });
+        else
+          merged.set(key, {
+            tokenKey: key,
+            tokenDisplay: display,
+            count: Number(c.count || 0),
+          });
       }
     }
     const out = Array.from(merged.values());
-    out.sort((a, b) => (b.count - a.count) || a.tokenDisplay.localeCompare(b.tokenDisplay));
+    out.sort(
+      (a, b) =>
+        b.count - a.count || a.tokenDisplay.localeCompare(b.tokenDisplay),
+    );
     return out;
   }, [rows]);
 
@@ -82,7 +104,9 @@ export default function KolsLeaderboardClient({
         ((r as any).coinsTopAll || (r as any).coinsTop) || []
       ) as CoinStat[];
       const hit = coins.some((c) => {
-        const key = (c.tokenKey || c.tokenDisplay || "").trim().toLowerCase();
+        const key = (c.tokenKey || c.tokenDisplay || "")
+          .trim()
+          .toLowerCase();
         return key === ck;
       });
       return textOk && hit;
@@ -142,11 +166,16 @@ export default function KolsLeaderboardClient({
       const B = pick(b);
 
       switch (sortKey) {
-        case "tweets": return B.tweets - A.tweets;
-        case "views": return B.views - A.views;
-        case "engs":  return B.engs - A.engs;
-        case "er":    return B.er - A.er;
-        default: return 0;
+        case "tweets":
+          return B.tweets - A.tweets;
+        case "views":
+          return B.views - A.views;
+        case "engs":
+          return B.engs - A.engs;
+        case "er":
+          return B.er - A.er;
+        default:
+          return 0;
       }
     });
     return arr;
@@ -161,7 +190,9 @@ export default function KolsLeaderboardClient({
   const paged = ranked.slice(start, end);
 
   // Reset to page 1 when filters/sorts change
-  useEffect(() => { setPage(1); }, [query, coinKey, sortKey, scope, daysFromUrl]);
+  useEffect(() => {
+    setPage(1);
+  }, [query, coinKey, sortKey, scope, daysFromUrl]);
 
   // URL setter for days
   function setDays(d: 7 | 30) {
@@ -174,22 +205,34 @@ export default function KolsLeaderboardClient({
   /* ----- header tooltips (dynamic by days) ----- */
   const totalTooltip = (
     <div className="space-y-1">
-      <div className="font-semibold text-white text-[13px]">Total ({daysFromUrl} days)</div>
-      <div className="text-gray-300">Total Tweets data in last {daysFromUrl} days</div>
+      <div className="text-[13px] font-semibold text-white">
+        Total ({daysFromUrl} days)
+      </div>
+      <div className="text-gray-300">
+        Total Tweets data in last {daysFromUrl} days
+      </div>
     </div>
   );
   const shillTooltip = (
     <div className="space-y-1">
-      <div className="font-semibold text-white text-[13px]">Shills ({daysFromUrl} days)</div>
-      <div className="text-gray-300">Tweets data that shill coins in last {daysFromUrl} days</div>
+      <div className="text-[13px] font-semibold text-white">
+        Shills ({daysFromUrl} days)
+      </div>
+      <div className="text-gray-300">
+        Tweets data that shill coins in last {daysFromUrl} days
+      </div>
     </div>
   );
 
   const scopeLabel = scope === "total" ? "Total" : "Shill";
   const metricLabel =
-    sortKey === "tweets" ? "Tweets" :
-    sortKey === "views"  ? "Views"  :
-    sortKey === "engs"   ? "Engagements" : "Engagement Rate";
+    sortKey === "tweets"
+      ? "Tweets"
+      : sortKey === "views"
+      ? "Views"
+      : sortKey === "engs"
+      ? "Engagements"
+      : "Engagement Rate";
 
   return (
     <div className="space-y-4">
@@ -210,11 +253,13 @@ export default function KolsLeaderboardClient({
           query={query}
           coinKey={coinKey}
           coins={coinOptions}
+          basis={basis}
           onSetDays={setDays}
           onSetSortKey={setSortKey}
           onSetScope={setScope}
           onQueryChange={setQuery}
           onSetCoinKey={setCoinKey}
+          onSetBasis={setBasis}
           hideScope
         />
       </div>
@@ -222,7 +267,9 @@ export default function KolsLeaderboardClient({
       {/* === Mobile list (cards) === */}
       <div className="md:hidden space-y-3">
         {ranked.length === 0 ? (
-          <div className="px-3 py-6 text-center text-sm text-gray-400">No KOLs found.</div>
+          <div className="px-3 py-6 text-center text-sm text-gray-400">
+            No KOLs found.
+          </div>
         ) : (
           ranked.map((x, idx) => (
             <MobileRow
@@ -241,7 +288,11 @@ export default function KolsLeaderboardClient({
                 engs: x.shEngs,
                 er: x.shER,
               }}
-              coinsAll={(x.coins || (x.row as any).coinsTop || []) as CoinStat[]}
+              coinsAll={
+                (x.coins || (x.row as any).coinsTop || []) as CoinStat[]
+              }
+              basis={basis}              // pass for consistency
+              days={daysFromUrl}         // pass for consistency
             />
           ))
         )}
@@ -253,23 +304,32 @@ export default function KolsLeaderboardClient({
         page={safePage}
         pageSize={pageSize}
         onPageChange={setPage}
-        onPageSizeChange={(s) => { setPageSize(s); setPage(1); }}
+        onPageSizeChange={(s) => {
+          setPageSize(s);
+          setPage(1);
+        }}
       />
 
       {/* === Desktop table === */}
-      <div className="relative z-0 hidden md:block rounded-2xl border border-white/10 bg-white/5 overflow-visible">
-        <LeaderboardHeader days={daysFromUrl} totalTooltip={totalTooltip} shillTooltip={shillTooltip} />
+      <div className="relative z-0 hidden overflow-visible rounded-2xl border border-white/10 bg-white/5 md:block">
+        <LeaderboardHeader
+          days={daysFromUrl}
+          totalTooltip={totalTooltip}
+          shillTooltip={shillTooltip}
+        />
 
         {/* BODY */}
         <div className="divide-y divide-white/10">
           {empty ? (
-            <div className="px-3 py-6 text-center text-sm text-gray-400">No KOLs found.</div>
+            <div className="px-3 py-6 text-center text-sm text-gray-400">
+              No KOLs found.
+            </div>
           ) : (
             paged.map((x, idx) => (
               <LeaderboardRow
                 key={(x.row as any).twitterUsername || idx}
                 r={x.row}
-                rank={(start + idx) + 1}
+                rank={start + idx + 1}
                 totals={{
                   tweets: x.totalTweets,
                   views: x.totalViews,
@@ -282,7 +342,11 @@ export default function KolsLeaderboardClient({
                   engs: x.shEngs,
                   er: x.shER,
                 }}
-                coinsAll={(x.coins || (x.row as any).coinsTop || []) as CoinStat[]}
+                coinsAll={
+                  (x.coins || (x.row as any).coinsTop || []) as CoinStat[]
+                }
+                basis={basis}
+                days={daysFromUrl}
                 onOpen={(info) => setSelectedKol(info)}
               />
             ))
@@ -300,14 +364,19 @@ export default function KolsLeaderboardClient({
           initialDays={daysFromUrl as 7 | 30}
         />
       )}
+
       {/* Bottom pagination */}
       <Pagination
         total={total}
         page={safePage}
         pageSize={pageSize}
         onPageChange={setPage}
-        onPageSizeChange={(s) => { setPageSize(s); setPage(1); }}
+        onPageSizeChange={(s) => {
+          setPageSize(s);
+          setPage(1);
+        }}
       />
     </div>
   );
 }
+

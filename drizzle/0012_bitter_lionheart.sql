@@ -1,0 +1,1 @@
+ALTER TYPE "public"."price_source" ADD VALUE 'client_push';

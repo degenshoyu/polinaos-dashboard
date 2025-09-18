@@ -7,6 +7,7 @@ import { Dropdown, MenuItem } from "./primitives";
 
 export type SortKey = "tweets" | "views" | "engs" | "er";
 export type ScopeKey = "total" | "shills";
+export type BasisKey = "earliest" | "latest" | "lowest" | "highest";
 
 export type CoinOpt = { tokenKey: string; tokenDisplay: string; count: number };
 
@@ -17,11 +18,13 @@ export function KolsHeaderControls({
   query,
   coinKey,
   coins,
+  basis,
   onSetDays,
   onSetSortKey,
   onSetScope,
   onQueryChange,
   onSetCoinKey,
+  onSetBasis,
   hideScope = false,
 }: {
   days: 7 | 30;
@@ -30,11 +33,13 @@ export function KolsHeaderControls({
   query: string;
   coinKey: string | null;
   coins: CoinOpt[];
+  basis: BasisKey;
   onSetDays: (d: 7 | 30) => void;
   onSetSortKey: (k: SortKey) => void;
   onSetScope: (s: ScopeKey) => void;
   onQueryChange: (q: string) => void;
   onSetCoinKey: (k: string | null) => void;
+  onSetBasis: (b: BasisKey) => void;
   hideScope?: boolean;
 }) {
   return (
@@ -88,6 +93,17 @@ export function KolsHeaderControls({
           <MenuItem active={sortKey === "views"} onClick={() => onSetSortKey("views")}>Views</MenuItem>
           <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Engagements</MenuItem>
           <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
+        </Dropdown>
+
+        {/* Mention Price basis */}
+        <Dropdown
+          label={`Basis: ${basis === "earliest" ? "Earliest" : basis === "latest" ? "Latest" : basis === "lowest" ? "Lowest" : "Highest"}`}
+          icon={<Filter size={16} className="text-gray-300" />}
+        >
+          <MenuItem active={basis === "earliest"} onClick={() => onSetBasis("earliest")}>Earliest</MenuItem>
+          <MenuItem active={basis === "latest"} onClick={() => onSetBasis("latest")}>Latest</MenuItem>
+          <MenuItem active={basis === "lowest"} onClick={() => onSetBasis("lowest")}>Lowest</MenuItem>
+          <MenuItem active={basis === "highest"} onClick={() => onSetBasis("highest")}>Highest</MenuItem>
         </Dropdown>
 
         {/* Scope toggle: Total | Shills (optional) */}

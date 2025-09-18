@@ -5,7 +5,17 @@ import { coinCaTicker } from "@/lib/db/schema";
 import { eq, desc, sql } from "drizzle-orm";
 import { resolveTickersToContracts } from "@/lib/markets/geckoterminal";
 
-const BLOCK_TICKERS = new Set(["BTC", "ETH", "SOL", "USDT", "USDC", "DOGE", "AVAX"]);
+const BLOCK_TICKERS = new Set([
+  "BTC",
+  "ETH",
+  "SOL",
+  "BNB",
+  "USDT",
+  "USDC",
+  "DOGE",
+  "AVAX",
+  "XRP",
+]);
 
 const STRICT_RESOLVE = process.env.RESOLVE_STRICT !== "0"; // default strict on
 
