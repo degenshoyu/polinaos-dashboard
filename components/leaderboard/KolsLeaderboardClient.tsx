@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KolRow } from "@/components/types";
 import { totalsFromRow } from "@/lib/kols";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -18,6 +18,7 @@ import { Pagination, PAGE_SIZE_OPTIONS } from "./Pagination";
 import MobileRow from "./MobileRow";
 import KolTweetsModal from "./KolTweetsModal";
 
+/** ---- Avg ROI helpers ---- */
 function computeAvgRoi(items: Array<{ roi: number | null }>): number | null {
   if (!Array.isArray(items)) return null;
   const vals = items
@@ -28,18 +29,57 @@ function computeAvgRoi(items: Array<{ roi: number | null }>): number | null {
   return Number(mean.toFixed(4));
 }
 
-async function fetchAvgRoi(handle: string, basis: BasisKey, days: 7 | 30) {
+async function fetchAvgRoi(
+  handle: string,
+  basis: BasisKey,
+  days: 7 | 30,
+  signal?: AbortSignal,
+) {
   const qs = new URLSearchParams({
     handle,
-    mode: basis,               // earliest | latest | lowest | highest
+    mode: basis, // earliest | latest | lowest | highest
     days: String(days),
     limitPerKol: "64",
   });
-  const r = await fetch(`/api/kols/coin-roi?${qs.toString()}`, { cache: "no-store" });
+  const r = await fetch(`/api/kols/coin-roi?${qs.toString()}`, {
+    cache: "no-store",
+    signal,
+  });
   if (!r.ok) return null;
   const j: any = await r.json().catch(() => ({}));
-  const items: Array<{ roi: number | null }> = Array.isArray(j?.items) ? j.items : [];
+  const items: Array<{ roi: number | null }> = Array.isArray(j?.items)
+    ? j.items
+    : [];
   return computeAvgRoi(items);
+}
+
+/** Fill a batch of missing Avg ROI with limited concurrency (default: 4) */
+async function fillMissingAvgRoi(opts: {
+  handles: string[];
+  basis: BasisKey;
+  days: 7 | 30;
+  signal?: AbortSignal;
+  onValue: (handle: string, v: number | null) => void;
+  concurrency?: number;
+}) {
+  const { handles, basis, days, signal, onValue, concurrency = 4 } = opts;
+  let i = 0;
+  const limit = Math.min(concurrency, Math.max(1, handles.length));
+  async function worker() {
+    while (i < handles.length && !signal?.aborted) {
+      const idx = i++;
+      const h = handles[idx];
+      try {
+        const v = await fetchAvgRoi(h, basis, days, signal);
+        if (signal?.aborted) return;
+        onValue(h, v);
+      } catch {
+        if (signal?.aborted) return;
+        onValue(h, null);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, worker));
 }
 
 /* ---------- Client container for KOL leaderboard ---------- */
@@ -69,10 +109,12 @@ export default function KolsLeaderboardClient({
   const [sortKey, setSortKey] = useState<SortKey>("views");
   const [scope, setScope] = useState<ScopeKey>("shills");
   const [basis, setBasis] = useState<BasisKey>("earliest");
-  const [coinKey, setCoinKey] = useState<string | null>(null); // <-- added
+  const [coinKey, setCoinKey] = useState<string | null>(null);
   const [page, setPage] = useState<number>(1); // 1-based
   const [pageSize, setPageSize] =
     useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
+
+  // cache: handle|basis|days -> avgRoi
   const [avgRoiMap, setAvgRoiMap] = useState<Record<string, number | null>>({});
   const keyFor = (h: string) => `${h}|${basis}|${daysFromUrl}`;
 
@@ -140,29 +182,78 @@ export default function KolsLeaderboardClient({
     return out;
   }, [rows, query, coinKey]);
 
-  // Load missing avg ROI for the current filtered set (basis/days aware)
+  /** ---- Improvement #2: Fetch missing Avg ROI with limited concurrency & abort on deps change ---- */
   useEffect(() => {
-    let cancelled = false;
+    const ac = new AbortController();
     (async () => {
-      // which handles are missing in cache?
       const missing = filtered
         .map((r) => r.twitterUsername)
         .filter((h) => avgRoiMap[keyFor(h)] === undefined);
       if (!missing.length) return;
-      // fetch sequentially to be gentle on API
-      for (const handle of missing) {
-        if (cancelled) break;
-        const val = await fetchAvgRoi(handle, basis, daysFromUrl as 7 | 30);
-        if (cancelled) break;
-        setAvgRoiMap((m) => ({ ...m, [keyFor(handle)]: val }));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [filtered, basis, daysFromUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Enrich, compute totals & shills metrics, then sort by (scope × sortKey) */
+      await fillMissingAvgRoi({
+        handles: missing,
+        basis,
+        days: daysFromUrl as 7 | 30,
+        signal: ac.signal,
+        concurrency: 4, // you can tune this
+        onValue: (handle, v) =>
+          setAvgRoiMap((m) => ({ ...m, [keyFor(handle)]: v })),
+      });
+    })();
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, basis, daysFromUrl]);
+
+  /** ---- Improvement #1: use fallback sort key while Avg ROI is still loading to avoid jitter ---- */
+  const waitingAvgRoi = useMemo(() => {
+    if (sortKey !== "avgRoi") return false;
+    return filtered.some(
+      (r) => avgRoiMap[keyFor(r.twitterUsername)] === undefined,
+    );
+  }, [filtered, sortKey, avgRoiMap, basis, daysFromUrl]); // keyFor uses basis/days
+
+  const effectiveSortKey: SortKey = waitingAvgRoi ? "engs" : sortKey; // fallback → engagements
+
+  /** ---- NEW: lightweight UI loading flags for period/sort/basis ---- */
+  const [loadingDays, setLoadingDays] = useState(false);
+  const [loadingSort, setLoadingSort] = useState(false);
+  const [loadingBasis, setLoadingBasis] = useState(false);
+  const prevDaysRef = useRef(daysFromUrl);
+  const prevSortRef = useRef(sortKey);
+  const prevBasisRef = useRef(basis);
+
+  // When days/sort/basis change, flash a tiny loading window (500-700ms)
+  useEffect(() => {
+    if (prevDaysRef.current !== daysFromUrl) {
+      prevDaysRef.current = daysFromUrl;
+      setLoadingDays(true);
+      const id = setTimeout(() => setLoadingDays(false), 650);
+      return () => clearTimeout(id);
+    }
+  }, [daysFromUrl]);
+  useEffect(() => {
+    if (prevSortRef.current !== sortKey) {
+      prevSortRef.current = sortKey;
+      setLoadingSort(true);
+      const id = setTimeout(() => setLoadingSort(false), 500);
+      return () => clearTimeout(id);
+    }
+  }, [sortKey]);
+  useEffect(() => {
+    if (prevBasisRef.current !== basis) {
+      prevBasisRef.current = basis;
+      setLoadingBasis(true);
+      const id = setTimeout(() => setLoadingBasis(false), 600);
+      return () => clearTimeout(id);
+    }
+  }, [basis]);
+
+  // Table/body busy when切换 或 AvgROI 等待中
+  const tableBusy =
+    loadingDays || loadingSort || loadingBasis || (sortKey === "avgRoi" && waitingAvgRoi);
+
+  /** Enrich, compute totals & shills metrics, then sort by (scope × effectiveSortKey) */
   const ranked = useMemo(() => {
     const arr = filtered.map((r) => {
       const t = totalsFromRow(r);
@@ -216,7 +307,7 @@ export default function KolsLeaderboardClient({
       const A = pick(a);
       const B = pick(b);
 
-      switch (sortKey) {
+      switch (effectiveSortKey) {
         case "tweets":
           return B.tweets - A.tweets;
         case "views":
@@ -229,6 +320,7 @@ export default function KolsLeaderboardClient({
           const ar = typeof a.avgRoi === "number" ? a.avgRoi : -Infinity;
           const br = typeof b.avgRoi === "number" ? b.avgRoi : -Infinity;
           if (br !== ar) return br - ar; // higher first
+          // tie-breaker for stability
           return B.engs - A.engs;
         }
         default:
@@ -236,7 +328,7 @@ export default function KolsLeaderboardClient({
       }
     });
     return arr;
-  }, [filtered, sortKey, scope]);
+  }, [filtered, scope, effectiveSortKey, avgRoiMap, basis, daysFromUrl]);
 
   const empty = ranked.length === 0;
   const total = ranked.length;
@@ -320,11 +412,21 @@ export default function KolsLeaderboardClient({
           onSetCoinKey={setCoinKey}
           onSetBasis={setBasis}
           hideScope
+          /* loading indicators in controls */
+          loadingDays={loadingDays}
+          loadingSort={loadingSort || (sortKey === "avgRoi" && waitingAvgRoi)}
+          loadingBasis={loadingBasis}
+          waitingAvgRoi={sortKey === "avgRoi" && waitingAvgRoi}
         />
       </div>
 
       {/* === Mobile list (cards) === */}
-      <div className="md:hidden space-y-3">
+      <div
+        className={[
+          "md:hidden space-y-3 transition-opacity",
+          tableBusy ? "opacity-60 pointer-events-none animate-pulse" : "",
+        ].join(" ")}
+      >
         {ranked.length === 0 ? (
           <div className="px-3 py-6 text-center text-sm text-gray-400">
             No KOLs found.
@@ -350,8 +452,8 @@ export default function KolsLeaderboardClient({
               coinsAll={
                 (x.coins || (x.row as any).coinsTop || []) as CoinStat[]
               }
-              basis={basis}              // pass for consistency
-              days={daysFromUrl}         // pass for consistency
+              basis={basis}
+              days={daysFromUrl}
             />
           ))
         )}
@@ -370,7 +472,17 @@ export default function KolsLeaderboardClient({
       />
 
       {/* === Desktop table === */}
-      <div className="relative z-0 hidden overflow-visible rounded-2xl border border-white/10 bg-white/5 md:block">
+      <div
+        className={[
+          "relative z-0 hidden overflow-visible rounded-2xl border border-white/10 bg-white/5 md:block transition-opacity",
+          tableBusy ? "opacity-60 pointer-events-none animate-pulse" : "",
+        ].join(" ")}
+      >
+        {/* Thin amber top bar while busy */}
+        {tableBusy && (
+          <div className="absolute inset-x-0 top-0 h-0.5 bg-amber-400/80" />
+        )}
+
         <LeaderboardHeader
           days={daysFromUrl}
           totalTooltip={totalTooltip}

@@ -26,6 +26,10 @@ export function KolsHeaderControls({
   onSetCoinKey,
   onSetBasis,
   hideScope = false,
+  loadingDays,
+  loadingSort,
+  loadingBasis,
+  waitingAvgRoi,
 }: {
   days: 7 | 30;
   sortKey: SortKey;
@@ -41,6 +45,10 @@ export function KolsHeaderControls({
   onSetCoinKey: (k: string | null) => void;
   onSetBasis: (b: BasisKey) => void;
   hideScope?: boolean;
+  loadingDays?: boolean;
+  loadingSort?: boolean;
+  loadingBasis?: boolean;
+  waitingAvgRoi?: boolean;
 }) {
   return (
     <div className="
@@ -69,7 +77,7 @@ export function KolsHeaderControls({
       {/* Right group */}
       <div className="ml-auto flex flex-col items-stretch gap-2 md:flex-row md:flex-wrap md:items-center">
         {/* Period */}
-        <div className="w-full md:w-auto">
+        <div className="w-full md:w-auto inline-flex items-center gap-1">
         <Dropdown
           label={`${days === 7 ? "7d" : "30d"} Period`}
           icon={<CalendarDays size={16} className="text-gray-300" />}
@@ -77,36 +85,43 @@ export function KolsHeaderControls({
           <MenuItem active={days === 7} onClick={() => onSetDays(7)}>7 days</MenuItem>
           <MenuItem active={days === 30} onClick={() => onSetDays(30)}>30 days</MenuItem>
         </Dropdown>
+        {loadingDays ? <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping" aria-hidden /> : null}
         </div>
 
         {/* Sort metric (only four options) */}
-        <Dropdown
-          label={
-            sortKey === "tweets" ? "Sort: Tweets" :
-            sortKey === "views" ? "Sort: Views" :
-            sortKey === "engs" ? "Sort: Engagements" :
-            sortKey === "er"    ? "Sort: ER" :
-            "Sort: Avg ROI"
-          }
-          icon={<ArrowUpDown size={16} className="text-gray-300" />}
-        >
-          <MenuItem active={sortKey === "tweets"} onClick={() => onSetSortKey("tweets")}>Tweets</MenuItem>
-          <MenuItem active={sortKey === "views"} onClick={() => onSetSortKey("views")}>Views</MenuItem>
-          <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Engagements</MenuItem>
-          <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
-          <MenuItem active={sortKey === "avgRoi"} onClick={() => onSetSortKey("avgRoi")}>Avg ROI</MenuItem>
-        </Dropdown>
+        <div className="inline-flex items-center gap-1">
+          <Dropdown
+            label={
+              sortKey === "tweets" ? "Sort: Tweets" :
+              sortKey === "views" ? "Sort: Views" :
+              sortKey === "engs" ? "Sort: Engagements" :
+              sortKey === "er"    ? "Sort: ER" :
+              "Sort: Avg ROI"
+            }
+            icon={<ArrowUpDown size={16} className="text-gray-300" />}
+          >
+            <MenuItem active={sortKey === "tweets"} onClick={() => onSetSortKey("tweets")}>Tweets</MenuItem>
+            <MenuItem active={sortKey === "views"} onClick={() => onSetSortKey("views")}>Views</MenuItem>
+            <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Engagements</MenuItem>
+            <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
+            <MenuItem active={sortKey === "avgRoi"} onClick={() => onSetSortKey("avgRoi")}>Avg ROI</MenuItem>
+          </Dropdown>
+          {(loadingSort || waitingAvgRoi) ? <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping" aria-hidden /> : null}
+        </div>
 
         {/* Mention Price basis */}
-        <Dropdown
-          label={`Basis: ${basis === "earliest" ? "Earliest" : basis === "latest" ? "Latest" : basis === "lowest" ? "Lowest" : "Highest"}`}
-          icon={<Filter size={16} className="text-gray-300" />}
-        >
-          <MenuItem active={basis === "earliest"} onClick={() => onSetBasis("earliest")}>Earliest</MenuItem>
-          <MenuItem active={basis === "latest"} onClick={() => onSetBasis("latest")}>Latest</MenuItem>
-          <MenuItem active={basis === "lowest"} onClick={() => onSetBasis("lowest")}>Lowest</MenuItem>
-          <MenuItem active={basis === "highest"} onClick={() => onSetBasis("highest")}>Highest</MenuItem>
-        </Dropdown>
+        <div className="inline-flex items-center gap-1">
+          <Dropdown
+            label={`Basis: ${basis === "earliest" ? "Earliest" : basis === "latest" ? "Latest" : basis === "lowest" ? "Lowest" : "Highest"}`}
+            icon={<Filter size={16} className="text-gray-300" />}
+          >
+            <MenuItem active={basis === "earliest"} onClick={() => onSetBasis("earliest")}>Earliest</MenuItem>
+            <MenuItem active={basis === "latest"} onClick={() => onSetBasis("latest")}>Latest</MenuItem>
+            <MenuItem active={basis === "lowest"} onClick={() => onSetBasis("lowest")}>Lowest</MenuItem>
+            <MenuItem active={basis === "highest"} onClick={() => onSetBasis("highest")}>Highest</MenuItem>
+          </Dropdown>
+          {loadingBasis ? <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping" aria-hidden /> : null}
+        </div>
 
         {/* Scope toggle: Total | Shills (optional) */}
         {!hideScope && (
