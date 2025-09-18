@@ -2,6 +2,7 @@
 
 import { Info } from "lucide-react";
 import { Tooltip, Dropdown, MenuItem } from "./primitives";
+import { usePriceRefreshQueue } from "@/hooks/usePriceRefreshQueue";
 
 /** Mention price picking strategy used across the leaderboard. */
 export type MentionMode = "earliest" | "latest" | "lowest" | "highest";
@@ -21,6 +22,12 @@ export function LeaderboardHeader({
   /** Optional callback to notify parent when user picks a different strategy. */
   onChangeMentionMode?: (m: MentionMode) => void;
 }) {
+  // Global queue progress shown at header (Coins, right side)
+  const queue = usePriceRefreshQueue();
+  const { total, done, inFlight } = queue.progress;
+  const updating = queue.updating;
+  const showProg = updating || (total > 0 && done < total);
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   // Human-friendly label for the dropdown
   const modeLabel = (m: MentionMode) =>
     m === "earliest"
@@ -64,35 +71,63 @@ export function LeaderboardHeader({
               <div className="text-sm font-extrabold text-white">Coins</div>
             </div>
 
-            {/* Mention price picker - optional; only shown if handler provided */}
-            {onChangeMentionMode && (
-              <Dropdown label={`Mention: ${modeLabel(mentionMode)}`}>
-                <MenuItem
-                  active={mentionMode === "earliest"}
-                  onClick={() => onChangeMentionMode("earliest")}
+            <div className="flex items-center gap-3">
+              {/* Fancy progress bar (shows only when updating / has remaining) */}
+              {showProg && (
+                <div
+                  className="flex items-center gap-2"
+                  aria-live="polite"
+                  aria-label={`Updating prices ${done} of ${total}${inFlight ? `, ${inFlight} in flight` : ""}`}
                 >
-                  Earliest
-                </MenuItem>
-                <MenuItem
-                  active={mentionMode === "latest"}
-                  onClick={() => onChangeMentionMode("latest")}
-                >
-                  Latest
-                </MenuItem>
-                <MenuItem
-                  active={mentionMode === "lowest"}
-                  onClick={() => onChangeMentionMode("lowest")}
-                >
-                  Lowest
-                </MenuItem>
-                <MenuItem
-                  active={mentionMode === "highest"}
-                  onClick={() => onChangeMentionMode("highest")}
-                >
-                  Highest
-                </MenuItem>
-              </Dropdown>
-            )}
+                  {/* progress bar with amber color & pulse */}
+                  <div className="relative h-1.5 w-28 overflow-hidden rounded-full bg-white/10 ring-1 ring-amber-300/30">
+                    {/* fill */}
+                    <div
+                      className="h-full bg-amber-400 transition-[width] duration-300 animate-pulse"
+                      style={{ width: `${pct}%` }}
+                    />
+                    {/* ambient glow */}
+            <div className="pointer-events-none absolute -inset-0.5 rounded-full bg-amber-400/20 blur-md" />
+          </div>
+
+          {/* label + counter */}
+          <div className="text-[10px] tabular-nums text-amber-200/90">
+            <span className="mr-1">Updating price...</span>
+            {done}/{total}
+          </div>
+        </div>
+      )}
+
+              {/* Mention price picker - optional; only shown if handler provided */}
+              {onChangeMentionMode && (
+                <Dropdown label={`Mention: ${modeLabel(mentionMode)}`}>
+                  <MenuItem
+                    active={mentionMode === "earliest"}
+                    onClick={() => onChangeMentionMode("earliest")}
+                  >
+                    Earliest
+                  </MenuItem>
+                  <MenuItem
+                    active={mentionMode === "latest"}
+                    onClick={() => onChangeMentionMode("latest")}
+                  >
+                    Latest
+                  </MenuItem>
+                  <MenuItem
+                    active={mentionMode === "lowest"}
+                    onClick={() => onChangeMentionMode("lowest")}
+                  >
+                    Lowest
+                  </MenuItem>
+                  <MenuItem
+                    active={mentionMode === "highest"}
+                    onClick={() => onChangeMentionMode("highest")}
+                  >
+                    Highest
+                  </MenuItem>
+                </Dropdown>
+              )}
+            </div>
           </div>
 
           {/* Sub-headers for the ROI columns */}

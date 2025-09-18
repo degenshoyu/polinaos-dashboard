@@ -276,9 +276,14 @@ function CoinsRoiList({
               return (
                 <div className={cls} aria-live="polite">
                   {cpTxt}
-                  {cur == null && queueUpdating && (
-                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400/80 ml-1 animate-pulse align-middle" />
-                  )}
+                  {/* Industrial warning light: amber blinking when not fresh; solid green when fresh */}
+                  <span className="relative inline-flex ml-1 align-middle" aria-hidden>
+                    <span className={`h-2 w-2 rounded-full ${isFresh ? "bg-emerald-400" : "bg-amber-400"}`} />
+                    {!isFresh && (
+                      <span className="absolute inline-flex h-2 w-2 rounded-full animate-ping bg-amber-400 opacity-75" />
+                    )}
+                  </span>
+                  <span className="sr-only">{isFresh ? "Price up to date" : "Refreshing price"}</span>
                 </div>
               );
             })()}
@@ -307,14 +312,6 @@ function CoinsRoiList({
         >
           {openAll ? "Show less" : `Show all (${items.length - INITIAL_LIMIT})`}
         </button>
-      )}
-
-      {/* Optional: global queue progress indicator */}
-      {queueUpdating && (
-        <div className="text-[10px] text-emerald-400/90">
-          Updating prices… {queueProgress.done}/{queueProgress.total}
-          {queueProgress.inFlight > 0 ? ` (in flight: ${queueProgress.inFlight})` : null}
-        </div>
       )}
     </div>
   );
