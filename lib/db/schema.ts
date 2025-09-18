@@ -371,6 +371,10 @@ export const coinPrice = pgTable(
     priceUsd: numeric("price_usd", { precision: 18, scale: 8 })
       .$type<string>()
       .notNull(),
+    // Market cap in USD for the same snapshot (nullable if provider didn't return)
+    marketCapUsd: numeric("market_cap_usd", { precision: 30, scale: 2 }).$type<
+      string | null
+    >(),
     // Timestamp for the price snapshot (server time or exchange-provided)
     priceAt: timestamp("price_at", { withTimezone: true })
       .notNull()

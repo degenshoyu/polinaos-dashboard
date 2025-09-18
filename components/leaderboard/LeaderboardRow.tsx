@@ -4,12 +4,54 @@ import { Crown, Medal } from "lucide-react";
 import React from "react";
 import { usePriceRefreshQueue } from "@/hooks/usePriceRefreshQueue";
 
+/** Price formatter with fixed 6 decimals and $ prefix */
+function formatDollar6(n: number | null | undefined) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  return `$${Number(n).toFixed(6)}`;
+}
+
+/** Reusable cell: white blinking until fresh, then emerald; with industrial warning light */
+function RealtimeCell({
+  text,
+  isFresh,
+  srWhenFresh,
+  srWhenRefreshing,
+}: {
+  text: string;
+  isFresh: boolean;
+  srWhenFresh: string;
+  srWhenRefreshing: string;
+}) {
+  const needBlink = !isFresh;
+  const cls = [
+    "tabular-nums",
+    needBlink
+      ? "text-white animate-pulse"
+      : isFresh
+      ? "text-emerald-400 font-medium"
+      : "text-gray-300",
+  ].join(" ");
+  return (
+    <div className={cls} aria-live="polite">
+      {text}
+      <span className="relative inline-flex ml-1 align-middle" aria-hidden>
+        <span className={`h-2 w-2 rounded-full ${isFresh ? "bg-emerald-400" : "bg-amber-400"}`} />
+        {!isFresh && (
+          <span className="absolute inline-flex h-2 w-2 rounded-full animate-ping bg-amber-400 opacity-75" />
+        )}
+      </span>
+      <span className="sr-only">{isFresh ? srWhenFresh : srWhenRefreshing}</span>
+    </div>
+  );
+}
+
 export type CoinStat = { tokenKey: string; tokenDisplay: string; count: number };
 type RoiItem = {
   tokenKey: string;            // Contract address or raw key (keep original casing; Solana is case-sensitive)
   tokenDisplay: string;        // Ticker for display
   mentionPrice: number | null;
   currentPrice: number | null; // DB snapshot (may be overridden by live price)
+  currentMc?: number | null;
   roi: number | null;
   mentionCount?: number;
 };
@@ -106,6 +148,18 @@ export function LeaderboardRow({
           <div className="truncate text-xs text-gray-400">
             {nCompact(r.followers || 0)} followers
           </div>
+        {(() => {
+          const v = r?.avgRoi;
+          const ready = typeof v === "number" && Number.isFinite(v);
+          const txt = ready ? `${(v * 100).toFixed(1)}%` : "—";
+          const cls = ready ? (v > 0 ? "text-emerald-400" : v < 0 ? "text-rose-400" : "text-gray-400") : "text-gray-400";
+          return (
+            <div className="mt-0.5 text-[11px]">
+              <span className="text-gray-400">AVG ROI: </span>
+              <span className={`tabular-nums font-medium ${cls}`}>{txt}</span>
+            </div>
+          );
+        })()}
         </div>
       </div>
 
@@ -163,8 +217,6 @@ function CoinsRoiList({
   const queue = usePriceRefreshQueue({ delayMs: [600, 1200], maxRetries: 2 });
   const liveGet = queue.get;
   const enqueueMany = queue.enqueueMany;
-  const queueUpdating = queue.updating;
-  const queueProgress = queue.progress;
   // Guard to avoid duplicate fetch in React 18 StrictMode (dev only)
   const didRunOnceRef = React.useRef(false);
 
@@ -228,24 +280,29 @@ function CoinsRoiList({
       {!data && (<><SkeletonRow/><SkeletonRow/><SkeletonRow/></>)}
 
       {data?.map((it) => {
-        const mpTxt = it.mentionPrice == null ? "—" : `$${Number(it.mentionPrice).toFixed(6)}`;
+        const mpTxt = formatDollar6(it.mentionPrice);
 
         // Prefer live price from queue; fallback to DB current
         const liveCp = liveGet(it.tokenKey);
         const cur = (liveCp ?? it.currentPrice) ?? null;
-        const cpTxt = cur == null ? "—" : `$${Number(cur).toFixed(6)}`;
+        const cpTxt = formatDollar6(cur);
 
         // ROI uses the latest 'cur' (live or DB)
         const roiTxt = (it.mentionPrice == null || cur == null)
           ? "—"
           : `${(((cur - it.mentionPrice) / it.mentionPrice) * 100).toFixed(1)}%`;
 
+        const liveMc = (queue as any).getMc?.(it.tokenKey);
+        const curMc = (liveMc ?? it.currentMc) ?? null;
+        const mcTxt = curMc == null ? "—" : `$${nCompact(curMc)}`;
+
         const cnt = it.mentionCount ?? 1;
+        const isFresh = queue.isDbFresh(it.tokenKey);
 
         return (
           <div
             key={`${it.tokenKey}::${it.tokenDisplay}`}
-            className="grid grid-cols-[1.2fr_1fr_1fr_1fr] items-center gap-2 text-xs"
+            className="grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr] items-center gap-2 text-xs"
           >
             {/* Token pill + mention count */}
             <div className="truncate" title={it.tokenDisplay}>
@@ -261,32 +318,14 @@ function CoinsRoiList({
             {/* Mention price */}
             <div className="tabular-nums text-gray-300">{mpTxt}</div>
 
-            {/* Current price with "white blinking until refreshed-then-green" */}
-            {(() => {
-              const isFresh = queue.isDbFresh(it.tokenKey);
-              const needBlink = !isFresh;
-              const cls = [
-                "tabular-nums",
-                needBlink
-                  ? "text-white animate-pulse"
-                  : isFresh
-                  ? "text-emerald-400 font-medium"
-                  : "text-gray-300",
-              ].join(" ");
-              return (
-                <div className={cls} aria-live="polite">
-                  {cpTxt}
-                  {/* Industrial warning light: amber blinking when not fresh; solid green when fresh */}
-                  <span className="relative inline-flex ml-1 align-middle" aria-hidden>
-                    <span className={`h-2 w-2 rounded-full ${isFresh ? "bg-emerald-400" : "bg-amber-400"}`} />
-                    {!isFresh && (
-                      <span className="absolute inline-flex h-2 w-2 rounded-full animate-ping bg-amber-400 opacity-75" />
-                    )}
-                  </span>
-                  <span className="sr-only">{isFresh ? "Price up to date" : "Refreshing price"}</span>
-                </div>
-              );
-            })()}
+            <RealtimeCell
+              text={cpTxt}
+              isFresh={isFresh}
+              srWhenFresh="Price up to date"
+              srWhenRefreshing="Refreshing price"
+            />
+
+
 
             {/* ROI (colored by gain/loss) */}
             <div
@@ -299,6 +338,13 @@ function CoinsRoiList({
             >
               {roiTxt}
             </div>
+
+            <RealtimeCell
+              text={mcTxt}
+              isFresh={isFresh}
+              srWhenFresh="Market cap up to date"
+              srWhenRefreshing="Refreshing market cap"
+            />
           </div>
         );
       })}
@@ -318,13 +364,14 @@ function CoinsRoiList({
 }
 
 /** Simple skeleton row for initial loading state (unchanged style) */
-function SkeletonRow() {
+const SkeletonRow = React.memo(function SkeletonRow() {
   return (
-    <div className="grid grid-cols-[1.2fr_1fr_1fr_1fr] items-center gap-2 text-xs">
+    <div className="grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr] items-center gap-2 text-xs">
       <div className="h-5 w-32 rounded-full bg-white/10" />
       <div className="h-4 w-16 rounded bg-white/10" />
       <div className="h-4 w-16 rounded bg-white/10" />
       <div className="h-4 w-10 rounded bg-white/10" />
+      <div className="h-4 w-16 rounded bg-white/10" />
     </div>
   );
-}
+});

@@ -9,12 +9,10 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const Q = z.object({
-  // 逗号分隔的合约地址
   addresses: z.string().min(1),
 });
 
 const looksLikeEvm = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
-// 仅 EVM 小写；Solana（base58）保持大小写（大小写敏感）
 const normalizeCA = (s: string) => (looksLikeEvm(s) ? s.toLowerCase() : s);
 
 export async function GET(req: NextRequest) {
@@ -22,7 +20,6 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const parsed = Q.parse({ addresses: searchParams.get("addresses") });
 
-    // 规范化 + 去重
     const list = Array.from(
       new Set(
         parsed.addresses
@@ -36,8 +33,6 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ items: [] }, { status: 200 });
     }
 
-    // 子查询：每个 contract_address 的最新 price_at
-    // 注意：max(...) 必须在表达式上 .as('lastAt')，否则 Drizzle 报 alias 错误
     const latestPerCa = db.$with("latest_per_ca").as(
       db
         .select({
@@ -49,12 +44,12 @@ export async function GET(req: NextRequest) {
         .groupBy(coinPrice.contractAddress),
     );
 
-    // 连接：锁定到“每个地址的最新一条”
     const rows = await db
       .with(latestPerCa)
       .select({
         contract_address: coinPrice.contractAddress,
-        price_usd: coinPrice.priceUsd, // Drizzle numeric => string
+        price_usd: coinPrice.priceUsd,
+        market_cap_usd: coinPrice.marketCapUsd, // <-- NEW
         price_at: coinPrice.priceAt,
         source: coinPrice.source,
       })
@@ -72,6 +67,8 @@ export async function GET(req: NextRequest) {
         items: rows.map((r) => ({
           contract_address: String(r.contract_address),
           price_usd: String(r.price_usd),
+          market_cap_usd:
+            r.market_cap_usd == null ? null : String(r.market_cap_usd),
           price_at: (r.price_at as Date).toISOString(),
           source: String(r.source),
         })),
@@ -80,7 +77,9 @@ export async function GET(req: NextRequest) {
     );
   } catch (e: any) {
     console.error("[/api/coin-prices] GET error:", e);
-    return NextResponse.json({ error: e?.message || "Bad Request" }, { status: 400 });
+    return NextResponse.json(
+      { error: e?.message || "Bad Request" },
+      { status: 400 },
+    );
   }
 }
-

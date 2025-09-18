@@ -131,11 +131,12 @@ export function LeaderboardHeader({
           </div>
 
           {/* Sub-headers for the ROI columns */}
-          <div className="grid grid-cols-4 text-[11px] text-gray-400">
+          <div className="grid grid-cols-5 text-[11px] text-gray-400">
             <div className="text-left">Token</div>
             <div className="text-left">Mention</div>
             <div className="text-left">Current</div>
             <div className="text-left">ROI</div>
+            <div className="text-left">MC</div>
           </div>
         </div>
       </div>

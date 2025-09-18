@@ -15,6 +15,8 @@ export const PriceUpsertSchema = z.object({
     .default("geckoterminal"),
   poolAddress: z.string().optional(),
   confidence: z.union([z.string(), z.number()]).optional(),
+  // NEW: market cap (optional)
+  marketCapUsd: z.union([z.string(), z.number()]).optional(),
 });
 export type PriceUpsert = z.infer<typeof PriceUpsertSchema>;
 
@@ -30,10 +32,12 @@ export async function insertPriceSnapshot(p: PriceUpsert) {
     .values({
       contractAddress: data.contractAddress,
       poolAddress: data.poolAddress ?? null,
-      source: data.source, // <-- now includes "client_push"
+      source: data.source,
       priceUsd: String(data.priceUsd),
       priceAt: data.priceAt ?? new Date(),
       confidence: data.confidence != null ? String(data.confidence) : null,
+      marketCapUsd:
+        data.marketCapUsd != null ? String(data.marketCapUsd) : null,
     })
     .onConflictDoNothing({
       target: [coinPrice.contractAddress, coinPrice.source, coinPrice.priceAt],
@@ -58,23 +62,22 @@ export async function getLatestPrices(params: {
   // optional source filter
   const srcFilter = source ? sql`AND ${coinPrice.source} = ${source}` : sql``;
 
-  // Use DISTINCT ON to pick the newest row per contract_address
-  // NOTE: db.execute(...) returns a QueryResult with a `rows` array
+  // DISTINCT ON picks the newest row per CA
   const res = await db.execute(sql`
     SELECT DISTINCT ON (${coinPrice.contractAddress})
-      ${coinPrice.id}          AS id,
-      ${coinPrice.contractAddress} AS contract_address,
-      ${coinPrice.poolAddress}     AS pool_address,
-      ${coinPrice.source}          AS source,
-      ${coinPrice.priceUsd}        AS price_usd,
-      ${coinPrice.priceAt}         AS price_at
+      ${coinPrice.id}               AS id,
+      ${coinPrice.contractAddress}  AS contract_address,
+      ${coinPrice.poolAddress}      AS pool_address,
+      ${coinPrice.source}           AS source,
+      ${coinPrice.priceUsd}         AS price_usd,
+      ${coinPrice.marketCapUsd}     AS market_cap_usd,
+      ${coinPrice.priceAt}          AS price_at
     FROM ${coinPrice}
     WHERE ${inArray(coinPrice.contractAddress, contractAddresses)}
     ${srcFilter}
     ORDER BY ${coinPrice.contractAddress}, ${coinPrice.priceAt} DESC
   `);
 
-  // Properly return the rows
   const rows = (res as unknown as { rows: any[] }).rows;
 
   return rows as Array<{
@@ -83,6 +86,7 @@ export async function getLatestPrices(params: {
     pool_address: string | null;
     source: (typeof priceSource.enumValues)[number];
     price_usd: string;
+    market_cap_usd: string | null;
     price_at: string;
   }>;
 }
@@ -106,6 +110,7 @@ export async function getWindowPrices(params: {
   const items = await db
     .select({
       priceUsd: coinPrice.priceUsd,
+      marketCapUsd: coinPrice.marketCapUsd,
       priceAt: coinPrice.priceAt,
       source: coinPrice.source,
       poolAddress: coinPrice.poolAddress,

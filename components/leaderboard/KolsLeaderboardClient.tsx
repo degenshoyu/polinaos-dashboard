@@ -18,6 +18,30 @@ import { Pagination, PAGE_SIZE_OPTIONS } from "./Pagination";
 import MobileRow from "./MobileRow";
 import KolTweetsModal from "./KolTweetsModal";
 
+function computeAvgRoi(items: Array<{ roi: number | null }>): number | null {
+  if (!Array.isArray(items)) return null;
+  const vals = items
+    .map((x) => (typeof x?.roi === "number" && isFinite(x.roi) ? x.roi : null))
+    .filter((v): v is number => v !== null);
+  if (!vals.length) return null;
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  return Number(mean.toFixed(4));
+}
+
+async function fetchAvgRoi(handle: string, basis: BasisKey, days: 7 | 30) {
+  const qs = new URLSearchParams({
+    handle,
+    mode: basis,               // earliest | latest | lowest | highest
+    days: String(days),
+    limitPerKol: "64",
+  });
+  const r = await fetch(`/api/kols/coin-roi?${qs.toString()}`, { cache: "no-store" });
+  if (!r.ok) return null;
+  const j: any = await r.json().catch(() => ({}));
+  const items: Array<{ roi: number | null }> = Array.isArray(j?.items) ? j.items : [];
+  return computeAvgRoi(items);
+}
+
 /* ---------- Client container for KOL leaderboard ---------- */
 export default function KolsLeaderboardClient({
   initialRows,
@@ -49,6 +73,8 @@ export default function KolsLeaderboardClient({
   const [page, setPage] = useState<number>(1); // 1-based
   const [pageSize, setPageSize] =
     useState<(typeof PAGE_SIZE_OPTIONS)[number]>(20);
+  const [avgRoiMap, setAvgRoiMap] = useState<Record<string, number | null>>({});
+  const keyFor = (h: string) => `${h}|${basis}|${daysFromUrl}`;
 
   const rows = initialRows ?? [];
 
@@ -114,6 +140,28 @@ export default function KolsLeaderboardClient({
     return out;
   }, [rows, query, coinKey]);
 
+  // Load missing avg ROI for the current filtered set (basis/days aware)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // which handles are missing in cache?
+      const missing = filtered
+        .map((r) => r.twitterUsername)
+        .filter((h) => avgRoiMap[keyFor(h)] === undefined);
+      if (!missing.length) return;
+      // fetch sequentially to be gentle on API
+      for (const handle of missing) {
+        if (cancelled) break;
+        const val = await fetchAvgRoi(handle, basis, daysFromUrl as 7 | 30);
+        if (cancelled) break;
+        setAvgRoiMap((m) => ({ ...m, [keyFor(handle)]: val }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [filtered, basis, daysFromUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /** Enrich, compute totals & shills metrics, then sort by (scope × sortKey) */
   const ranked = useMemo(() => {
     const arr = filtered.map((r) => {
@@ -132,8 +180,10 @@ export default function KolsLeaderboardClient({
         ((r as any).coinsTopAll || (r as any).coinsTop) || []
       ) as CoinStat[];
 
+      const avgRoi = avgRoiMap[keyFor(r.twitterUsername)] ?? null;
+      const rowWithAvg = { ...(r as any), avgRoi }; // attach for row rendering
       return {
-        row: r,
+        row: rowWithAvg,
         totalTweets,
         totalViews,
         totalEngs,
@@ -143,6 +193,7 @@ export default function KolsLeaderboardClient({
         shEngs,
         shER,
         coins,
+        avgRoi,
       };
     });
 
@@ -174,6 +225,12 @@ export default function KolsLeaderboardClient({
           return B.engs - A.engs;
         case "er":
           return B.er - A.er;
+        case "avgRoi": {
+          const ar = typeof a.avgRoi === "number" ? a.avgRoi : -Infinity;
+          const br = typeof b.avgRoi === "number" ? b.avgRoi : -Infinity;
+          if (br !== ar) return br - ar; // higher first
+          return B.engs - A.engs;
+        }
         default:
           return 0;
       }
@@ -232,7 +289,9 @@ export default function KolsLeaderboardClient({
       ? "Views"
       : sortKey === "engs"
       ? "Engagements"
-      : "Engagement Rate";
+      : sortKey === "er"
+      ? "Engagement Rate"
+      : "Avg ROI";
 
   return (
     <div className="space-y-4">
@@ -379,4 +438,3 @@ export default function KolsLeaderboardClient({
     </div>
   );
 }
-

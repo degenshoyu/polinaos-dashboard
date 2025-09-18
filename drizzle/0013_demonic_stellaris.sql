@@ -1,0 +1,1 @@
+ALTER TABLE "coin_price" ADD COLUMN "market_cap_usd" numeric(30, 2);

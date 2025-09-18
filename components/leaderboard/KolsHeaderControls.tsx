@@ -5,7 +5,7 @@
 import { CalendarDays, ArrowUpDown, Search, Filter } from "lucide-react";
 import { Dropdown, MenuItem } from "./primitives";
 
-export type SortKey = "tweets" | "views" | "engs" | "er";
+export type SortKey = "tweets" | "views" | "engs" | "er" | "avgRoi";
 export type ScopeKey = "total" | "shills";
 export type BasisKey = "earliest" | "latest" | "lowest" | "highest";
 
@@ -85,7 +85,8 @@ export function KolsHeaderControls({
             sortKey === "tweets" ? "Sort: Tweets" :
             sortKey === "views" ? "Sort: Views" :
             sortKey === "engs" ? "Sort: Engagements" :
-            "Sort: ER"
+            sortKey === "er"    ? "Sort: ER" :
+            "Sort: Avg ROI"
           }
           icon={<ArrowUpDown size={16} className="text-gray-300" />}
         >
@@ -93,6 +94,7 @@ export function KolsHeaderControls({
           <MenuItem active={sortKey === "views"} onClick={() => onSetSortKey("views")}>Views</MenuItem>
           <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Engagements</MenuItem>
           <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
+          <MenuItem active={sortKey === "avgRoi"} onClick={() => onSetSortKey("avgRoi")}>Avg ROI</MenuItem>
         </Dropdown>
 
         {/* Mention Price basis */}

@@ -98,9 +98,9 @@ export async function GET(req: NextRequest) {
     // Pull raw mentions for this KOL
     const rows = await db
       .select({
-        tokenKey: tweetTokenMentions.tokenKey,      // raw key (CA or ticker)
+        tokenKey: tweetTokenMentions.tokenKey, // raw key (CA or ticker)
         tokenDisplay: tweetTokenMentions.tokenDisplay, // ticker text (nullable)
-        priceUsdAt: tweetTokenMentions.priceUsdAt,  // string | null
+        priceUsdAt: tweetTokenMentions.priceUsdAt, // string | null
         createdAt: kolTweets.publishDate,
       })
       .from(kolTweets)
@@ -199,7 +199,7 @@ export async function GET(req: NextRequest) {
      */
     type Group = {
       keyForPrice: string | null; // canonical CA to query price with, or null for raw/ticker groups
-      tokenDisplay: string;       // display text (ticker or best display)
+      tokenDisplay: string; // display text (ticker or best display)
       list: M[];
     };
     const groups = new Map<string, Group>(); // groupKey -> group
@@ -222,11 +222,11 @@ export async function GET(req: NextRequest) {
 
     /** Compute mention price per group, and build final rows */
     const results: Array<{
-      tokenKey: string;         // For the frontend: CA or a raw key (ticker)
-      tokenDisplay: string;     // For UI display
+      tokenKey: string; // For the frontend: CA or a raw key (ticker)
+      tokenDisplay: string; // For UI display
       mentionPrice: number | null;
       mentionCount: number;
-      _isCA: boolean;           // marks CA groups
+      _isCA: boolean; // marks CA groups
     }> = [];
 
     for (const [gk, g] of groups) {
@@ -305,22 +305,31 @@ export async function GET(req: NextRequest) {
       ? await getLatestPrices({ contractAddresses: cas })
       : [];
     const latestBy = new Map(
-      latest.map((x) => [String(x.contract_address), Number(x.price_usd)]),
+      latest.map((x) => [
+        String(x.contract_address),
+        {
+          price: Number(x.price_usd),
+          mc: x.market_cap_usd == null ? null : Number(x.market_cap_usd),
+        },
+      ]),
     );
 
     // Final shape
     const out = results
       .map((r) => {
-        const cur = r._isCA ? (latestBy.get(r.tokenKey) ?? null) : null;
+        const rec = r._isCA ? latestBy.get(r.tokenKey) : null;
+        const cur = rec ? rec.price : null;
+        const curMc = rec ? rec.mc : null;
         const roi =
           r.mentionPrice != null && cur != null && r.mentionPrice > 0
             ? (cur - r.mentionPrice) / r.mentionPrice
             : null;
         return {
-          tokenKey: r.tokenKey,                 // CA (canonical) or ticker
+          tokenKey: r.tokenKey, // CA (canonical) or ticker
           tokenDisplay: r.tokenDisplay,
           mentionPrice: to6(r.mentionPrice),
           currentPrice: to6(cur),
+          currentMc: curMc, // keep number for compact display on client
           roi,
           mentionCount: r.mentionCount,
         };
@@ -347,4 +356,3 @@ export async function GET(req: NextRequest) {
     );
   }
 }
-

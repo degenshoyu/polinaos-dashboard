@@ -28,7 +28,7 @@ const looksLikeEvm = (s: string) => /^0x[a-fA-F0-9]{40}$/.test(s);
 const normalizeCA = (s: string) => (looksLikeEvm(s) ? s.toLowerCase() : s);
 
 /** DB snapshot shape for a CA */
-type DbSnap = { price: number; priceAt: number } | null;
+type DbSnap = { price: number; priceAt: number; mc: number | null } | null;
 
 /** GET latest DB snapshot for one CA. Returns null if not found. */
 async function fetchDbSnapshot(caRaw: string): Promise<DbSnap> {
@@ -47,9 +47,10 @@ async function fetchDbSnapshot(caRaw: string): Promise<DbSnap> {
 
     if (!item) return null;
     const p = Number(item.price_usd);
+    const mc = item.market_cap_usd == null ? null : Number(item.market_cap_usd);
     const t = Date.parse(item.price_at);
     if (!Number.isFinite(p) || Number.isNaN(t)) return null;
-    return { price: p, priceAt: t };
+    return { price: p, priceAt: t, mc };
   } catch {
     return null;
   }
@@ -77,6 +78,7 @@ async function serverRefreshOnce(caRaw: string): Promise<number | null> {
 
 /** -------------------- Module-scope singleton stores -------------------- */
 let pricesStore: PricesMap = {}; // latest known price shown in UI
+let mcStore: PricesMap = {};
 let dbFreshStore: FreshMap = {}; // true if confirmed fresh (either <=10min or read-back after refresh)
 let updatingStore = false; // worker running flag
 let totalStore = 0; // enqueue count
@@ -116,6 +118,9 @@ async function runWorker(opts: {
         const now = Date.now();
         if (snap) {
           pricesStore = { ...pricesStore, [ca]: Number(snap.price.toFixed(6)) };
+          if (snap.mc != null) {
+            mcStore = { ...mcStore, [ca]: Number(snap.mc) };
+          }
           emit();
         }
 
@@ -135,11 +140,11 @@ async function runWorker(opts: {
           }
 
           // 4) Read-back from DB to confirm; mark as fresh on success
-          let confirmed: number | null = null;
+          let confirmed: DbSnap | null = null;
           for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {
             const dbNow = await fetchDbSnapshot(caRaw);
             if (dbNow != null) {
-              confirmed = dbNow.price;
+              confirmed = dbNow;
               dbFreshStore = { ...dbFreshStore, [ca]: true };
               emit();
               break;
@@ -151,8 +156,11 @@ async function runWorker(opts: {
           if (confirmed != null) {
             pricesStore = {
               ...pricesStore,
-              [ca]: Number(confirmed.toFixed(6)),
+              [ca]: Number(confirmed.price.toFixed(6)),
             };
+            if (confirmed.mc != null) {
+              mcStore = { ...mcStore, [ca]: Number(confirmed.mc) };
+            }
             emit();
           }
         }
@@ -238,6 +246,7 @@ export function usePriceRefreshQueue(options?: {
 
     // helpers
     get,
+    getMc: (ca: string) => mcStore[normalizeCA(ca)],
     isDbFresh,
     enqueueMany,
     resetProgress,
