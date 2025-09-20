@@ -37,7 +37,7 @@ const leaderboardItems: NavItem[] = [
 ];
 
 const dashboardItems: NavItem[] = [
-  { href: "/dashboard/dashboard", label: "Dashboard", locked: false, Icon: Home },
+  { href: "/dashboard/home", label: "Home", locked: false, Icon: Home },
 ];
 
 export default function Sidebar() {
