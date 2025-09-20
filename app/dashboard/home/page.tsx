@@ -5,7 +5,7 @@ import TopKolsCard from "@/components/dashboard/TopKolsCard";
 import { db } from "@/lib/db/client";
 import { kols, kolTweets, tweetType, tweetTokenMentions, coinCaTicker, coinPrice } from "@/lib/db/schema";
 import { and, eq, gte, lt, desc, sql } from "drizzle-orm";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +32,14 @@ async function getWindowStats(days: 7 | 30) {
   const sumAllViews = async (a: Date, b: Date) => {
     const [r] = await db.select({ v: sql<number>`COALESCE(SUM(${kolTweets.views}),0)` }).from(kolTweets).where(and(gte(kolTweets.publishDate, a), lt(kolTweets.publishDate, b)));
     return toNum(r?.v);
+  };
+
+  const sumAllEngs = async (a: Date, b: Date) => {
+    const [r] = await db
+      .select({ e: sql<number>`COALESCE(SUM(${kolTweets.likes}+${kolTweets.retweets}+${kolTweets.replies}),0)` })
+      .from(kolTweets)
+      .where(and(gte(kolTweets.publishDate, a), lt(kolTweets.publishDate, b)));
+    return toNum(r?.e);
   };
 
   const sumCoinViewsEngs = async (a: Date, b: Date) => {
@@ -87,34 +95,37 @@ async function getWindowStats(days: 7 | 30) {
   };
 
   // current window
-  const [activeKOLs, totalTweets, coinShills, totalViews, ve] = await Promise.all([
+  const [activeKOLs, totalTweets, coinShills, totalViews, totalEngs, ve] = await Promise.all([
     countActiveKols(since, until),
     countTweets(since, until),
     countShills(since, until),
     sumAllViews(since, until),
+    sumAllEngs(since, until),
     sumCoinViewsEngs(since, until),
   ]);
   const coinsViews = ve.views;
   const coinsEngs = ve.engs;
 
   // previous window
-  const [pActiveKOLs, pTotalTweets, pCoinShills, pTotalViews, pve] = await Promise.all([
+  const [pActiveKOLs, pTotalTweets, pCoinShills, pTotalViews, pTotalEngs, pve] = await Promise.all([
     countActiveKols(prevSince, prevUntil),
     countTweets(prevSince, prevUntil),
     countShills(prevSince, prevUntil),
     sumAllViews(prevSince, prevUntil),
+    sumAllEngs(prevSince, prevUntil),
     sumCoinViewsEngs(prevSince, prevUntil),
   ]);
 
   const pct = (cur: number, prev: number) => (prev ? cur / prev - 1 : 0);
 
   return {
-    current: { activeKOLs, totalTweets, coinShills, totalViews, coinsViews, coinsEngs },
+    current: { activeKOLs, totalTweets, coinShills, totalViews, totalEngs, coinsViews, coinsEngs },
     delta: {
       activeKOLs: pct(activeKOLs, pActiveKOLs),
       totalTweets: pct(totalTweets, pTotalTweets),
       coinShills: pct(coinShills, pCoinShills),
       totalViews: pct(Number(totalViews), Number(pTotalViews)),
+      totalEngs: pct(Number(totalEngs), Number(pTotalEngs)),
       coinsViews: pct(Number(coinsViews), Number(pve.views)),
       coinsEngs: pct(Number(coinsEngs), Number(pve.engs)),
     },
@@ -383,6 +394,23 @@ export default async function Page({ searchParams }: { searchParams?: Promise<Se
   const [{ current, delta }, topKols, topCoins] = await Promise.all([getWindowStats(days), getTopKols(days), getTopCoins(days)]);
 
   const fromLabel = days === 30 ? "from last month" : "from last week";
+  /** Render a compact delta pair line like: "12.34% ↑ / 5.67% ↓ from last week" */
+  function DeltaPair({ a, b, label }: { a: number; b: number; label: string }) {
+    const AIcon = a >= 0 ? ArrowUpRight : ArrowDownRight;
+    const BIcon = b >= 0 ? ArrowUpRight : ArrowDownRight;
+    return (
+      <div className="mt-1 text-[11px] text-gray-300 flex items-center gap-1">
+        <span className="inline-flex items-center gap-1">
+          {fmtPct(Math.abs(a))} <AIcon className={a >= 0 ? "h-3 w-3 text-emerald-300" : "h-3 w-3 text-red-300"} />
+        </span>
+        <span className="opacity-60">/</span>
+        <span className="inline-flex items-center gap-1">
+          {fmtPct(Math.abs(b))} <BIcon className={b >= 0 ? "h-3 w-3 text-emerald-300" : "h-3 w-3 text-red-300"} />
+        </span>
+        <span className="ml-1 opacity-80">{label}</span>
+      </div>
+    );
+  }
   return (
     <div className="p-4 md:p-6 space-y-6">
       {/* Header */}
@@ -410,11 +438,8 @@ export default async function Page({ searchParams }: { searchParams?: Promise<Se
           <div className="mt-1 text-2xl font-semibold">
             {fmtCompact(current.totalTweets)} <span className="opacity-60">/</span> {fmtCompact(current.coinShills)}
           </div>
-          <div className="mt-1 text-xs text-emerald-300">
-            {Math.sign(delta.totalTweets) < 0
-              ? `${fmtPct(Math.abs(delta.totalTweets))} Down ${fromLabel}`
-              : `${fmtPct(delta.totalTweets)} Up ${fromLabel}`}
-          </div>
+          {/* Compact dual-delta: left = Tweets, right = Shills */}
+          <DeltaPair a={delta.totalTweets} b={delta.coinShills} label={fromLabel} />
         </div>
 
         {/* 3. Total Views / Coins Views */}
@@ -423,24 +448,18 @@ export default async function Page({ searchParams }: { searchParams?: Promise<Se
           <div className="mt-1 text-2xl font-semibold">
             {fmtCompact(current.totalViews)} <span className="opacity-60">/</span> {fmtCompact(current.coinsViews)}
           </div>
-          <div className="mt-1 text-xs text-emerald-300">
-            {Math.sign(delta.coinsViews) < 0
-              ? `${fmtPct(Math.abs(delta.coinsViews))} Down ${fromLabel}`
-              : `${fmtPct(delta.coinsViews)} Up ${fromLabel}`}
-          </div>
+          {/* Compact dual-delta: left = Total, right = Coins */}
+          <DeltaPair a={delta.totalViews} b={delta.coinsViews} label={fromLabel} />
         </div>
 
         {/* 4. Total Engs / Coins Engs */}
         <div className="group relative rounded-2xl border border-white/10 bg-white/[0.03] p-4">
           <div className="text-sm text-gray-300">Total Engs / Coins Engs</div>
           <div className="mt-1 text-2xl font-semibold">
-            {fmtCompact(current.coinsEngs + (current.totalViews ? 0 : 0))} <span className="opacity-60">/</span> {fmtCompact(current.coinsEngs)}
+            {fmtCompact(current.totalEngs)} <span className="opacity-60">/</span> {fmtCompact(current.coinsEngs)}
           </div>
-          <div className="mt-1 text-xs text-emerald-300">
-            {Math.sign(delta.coinsEngs) < 0
-              ? `${fmtPct(Math.abs(delta.coinsEngs))} Down ${fromLabel}`
-              : `${fmtPct(delta.coinsEngs)} Up ${fromLabel}`}
-          </div>
+          {/* Compact dual-delta: left = Total, right = Coins */}
+          <DeltaPair a={delta.totalEngs} b={delta.coinsEngs} label={fromLabel} />
         </div>
       </div>
 
