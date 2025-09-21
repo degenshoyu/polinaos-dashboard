@@ -3,6 +3,7 @@
 import { Crown, Medal } from "lucide-react";
 import React from "react";
 import { usePriceRefreshQueue } from "@/hooks/usePriceRefreshQueue";
+import { beginBatch as beginMaxBatch, markDone as markMaxDone } from "@/hooks/useMaxRoiProgress";
 
 /** Price formatter with fixed 6 decimals and $ prefix */
 function formatDollar6(n: number | null | undefined) {
@@ -278,11 +279,11 @@ function CoinsRoiList({
           return tooOld && x.chosenMentionId && x.tokenKey;
         });
         if (stale.length) {
+          beginMaxBatch(stale.length);
           const body = {
             items: stale.map((s) => ({
               ca: s.tokenKey!,
               mentionId: s.chosenMentionId!,
-              publishDate: new Date().toISOString(),
               network: "solana",
               minutePatch: true,
               minuteAgg: 15,
@@ -323,6 +324,7 @@ function CoinsRoiList({
               });
             });
           }
+          markMaxDone(stale.length);
         }
       } catch {}
       // No immediate reload: UI reads live prices from queue state

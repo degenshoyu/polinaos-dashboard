@@ -19,10 +19,15 @@ import MobileRow from "./MobileRow";
 import KolTweetsModal from "./KolTweetsModal";
 
 /** ---- Avg ROI helpers ---- */
-function computeAvgRoi(items: Array<{ roi: number | null }>): number | null {
+function computeAvgRoi(items: Array<{ roi?: number | null; maxRoi?: number | null }>): number | null {
   if (!Array.isArray(items)) return null;
   const vals = items
-    .map((x) => (typeof x?.roi === "number" && isFinite(x.roi) ? x.roi : null))
+    .map((x) => {
+      const m = typeof x?.maxRoi === "number" && isFinite(x.maxRoi) ? x.maxRoi : null;
+      if (m !== null) return m;
+      const r = typeof x?.roi === "number" && isFinite(x.roi) ? x.roi : null;
+      return r;
+    })
     .filter((v): v is number => v !== null);
   if (!vals.length) return null;
   const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
@@ -47,7 +52,7 @@ async function fetchAvgRoi(
   });
   if (!r.ok) return null;
   const j: any = await r.json().catch(() => ({}));
-  const items: Array<{ roi: number | null }> = Array.isArray(j?.items)
+  const items: Array<{ roi?: number | null; maxRoi?: number | null }> = Array.isArray(j?.items)
     ? j.items
     : [];
   return computeAvgRoi(items);

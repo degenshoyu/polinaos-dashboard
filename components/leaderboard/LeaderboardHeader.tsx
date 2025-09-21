@@ -3,6 +3,7 @@
 import { Info } from "lucide-react";
 import { Tooltip, Dropdown, MenuItem } from "./primitives";
 import { usePriceRefreshQueue } from "@/hooks/usePriceRefreshQueue";
+import { useMaxRoiProgress } from "@/hooks/useMaxRoiProgress";
 
 /** Mention price picking strategy used across the leaderboard. */
 export type MentionMode = "earliest" | "latest" | "lowest" | "highest";
@@ -23,11 +24,17 @@ export function LeaderboardHeader({
   onChangeMentionMode?: (m: MentionMode) => void;
 }) {
   // Global queue progress shown at header (Coins, right side)
-  const queue = usePriceRefreshQueue();
-  const { total, done, inFlight } = queue.progress;
-  const updating = queue.updating;
-  const showProg = updating || (total > 0 && done < total);
+  const price = usePriceRefreshQueue();
+  const { total: pTotal, done: pDone, inFlight: pInFlight } = price.progress;
+  const pUpdating = price.updating;
+  const { progress: m } = useMaxRoiProgress(); // MAX ROI 进度
+  const total = pTotal + m.total;
+  const done = pDone + m.done;
+  const inFlight = pInFlight + m.inFlight;
+  const updating = pUpdating || m.updating;
+  const initializing = total === 0 && done === 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const completed = !updating && total > 0 && done >= total;
   // Human-friendly label for the dropdown
   const modeLabel = (m: MentionMode) =>
     m === "earliest"
@@ -73,30 +80,48 @@ export function LeaderboardHeader({
 
             <div className="flex items-center gap-3">
               {/* Fancy progress bar (shows only when updating / has remaining) */}
-              {showProg && (
+              <div
+                className="flex items-center gap-2"
+                aria-live="polite"
+                aria-label={
+                  updating
+                    ? `Updating ${done} of ${total}${inFlight ? `, ${inFlight} in flight` : ""}`
+                    : (completed ? "Update completed" : "Up to date")
+                }
+              >
                 <div
-                  className="flex items-center gap-2"
-                  aria-live="polite"
-                  aria-label={`Updating prices ${done} of ${total}${inFlight ? `, ${inFlight} in flight` : ""}`}
+                  className={[
+                    "relative h-1.5 w-28 overflow-hidden rounded-full ring-1",
+                    updating ? "bg-white/10 ring-amber-300/30" : "bg-white/10 ring-emerald-300/30",
+                  ].join(" ")}
                 >
-                  {/* progress bar with amber color & pulse */}
-                  <div className="relative h-1.5 w-28 overflow-hidden rounded-full bg-white/10 ring-1 ring-amber-300/30">
-                    {/* fill */}
-                    <div
-                      className="h-full bg-amber-400 transition-[width] duration-300 animate-pulse"
-                      style={{ width: `${pct}%` }}
-                    />
-                    {/* ambient glow */}
-            <div className="pointer-events-none absolute -inset-0.5 rounded-full bg-amber-400/20 blur-md" />
-          </div>
+                  <div
+                    className={[
+                      "h-full transition-[width] duration-300",
+                      updating ? "bg-amber-400 animate-pulse" : "bg-emerald-400",
+                    ].join(" ")}
+                    style={{ width: `${pct}%` }}
+                  />
+                  <div
+                    className={[
+                      "pointer-events-none absolute -inset-0.5 rounded-full blur-md",
+                      updating ? "bg-amber-400/20" : "bg-emerald-400/20",
+                    ].join(" ")}
+                  />
+                </div>
 
-          {/* label + counter */}
-          <div className="text-[10px] tabular-nums text-amber-200/90">
-            <span className="mr-1">Updating price...</span>
-            {done}/{total}
-          </div>
-        </div>
-      )}
+                <div
+                  className={[
+                    "text-[10px] tabular-nums",
+                    updating ? "text-amber-200/90" : "text-emerald-200/90",
+                  ].join(" ")}
+                >
+                  <span className="mr-1">
+                    {initializing ? "Initializing..." : (updating ? "Updating..." : completed ? "Update completed" : "Up to date")}
+                  </span>
+                  {total > 0 && <span>{done}/{total}</span>}
+                </div>
+              </div>
 
               {/* Mention price picker - optional; only shown if handler provided */}
               {onChangeMentionMode && (

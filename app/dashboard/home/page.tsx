@@ -174,49 +174,46 @@ async function getTopKols(days: 7 | 30) {
     .orderBy(desc(sql`COUNT(${tweetTokenMentions.id})`))
     .limit(10);
 
-  // Avg ROI（基于你之前逻辑的“最低成本法”）
   const resRoi = await db.execute(sql`
-    WITH m_raw AS (
-      SELECT
-        kt.twitter_username AS handle,
-        CASE WHEN tm.source='ca' THEN tm.token_key ELSE cct.contract_address END AS ca,
-        (tm.price_usd_at)::numeric AS price_at
-      FROM ${tweetTokenMentions} tm
-      JOIN ${kolTweets} kt ON kt.tweet_id = tm.tweet_id
-      LEFT JOIN ${coinCaTicker} cct
-        ON LOWER(cct.token_ticker) = LOWER(tm.token_key)
-        OR LOWER(cct.token_ticker) = LOWER(REPLACE(COALESCE(tm.token_display,''),'$',''))
-      WHERE kt.publish_date >= ${since}
-        AND kt.publish_date <  ${until}
-        AND tm.source IN ('ticker','phrase','ca')
-        AND tm.excluded = false
-    ),
-    m AS (
-      SELECT handle, ca, MIN(price_at) AS price_at
-      FROM m_raw
-      WHERE ca IS NOT NULL AND price_at IS NOT NULL
-      GROUP BY handle, ca
-    ),
-    latest AS (
-      SELECT DISTINCT ON (cp.contract_address)
-        cp.contract_address,
-        (cp.price_usd)::numeric AS price_latest
-      FROM ${coinPrice} cp
-      ORDER BY cp.contract_address, cp.price_at DESC
-    ),
-    samples AS (
-      SELECT m.handle, (l.price_latest / NULLIF(m.price_at,0) - 1) AS roi
-      FROM m
-      JOIN latest l ON l.contract_address = m.ca
-      WHERE m.price_at > 0 AND l.price_latest IS NOT NULL
-    )
-    SELECT handle, AVG(roi) AS value
-    FROM samples
-    GROUP BY handle
-    ORDER BY AVG(roi) DESC
-    LIMIT 10;
-  `);
-  const avgRoi = ((resRoi as any).rows as Array<{ handle: string; value: number }>).map((r) => ({ handle: r.handle, value: Number(r.value) || 0 }));
+  WITH m_raw AS (
+    SELECT
+      kt.twitter_username AS handle,
+      CASE WHEN tm.source='ca' THEN tm.token_key ELSE cct.contract_address END AS ca,
+      kt.publish_date AS pub_at,
+      (tm.price_usd_at)::numeric              AS price_at,
+      (tm.max_price_since_mention)::numeric   AS max_px
+    FROM ${tweetTokenMentions} tm
+    JOIN ${kolTweets} kt ON kt.tweet_id = tm.tweet_id
+    LEFT JOIN ${coinCaTicker} cct
+      ON LOWER(cct.token_ticker) = LOWER(tm.token_key)
+      OR LOWER(cct.token_ticker) = LOWER(REPLACE(COALESCE(tm.token_display,''),'$',''))
+    WHERE kt.publish_date >= ${since}
+      AND kt.publish_date <  ${until}
+      AND tm.source IN ('ticker','phrase','ca')
+      AND tm.excluded = false
+      AND (CASE WHEN tm.source='ca' THEN tm.token_key IS NOT NULL ELSE cct.contract_address IS NOT NULL END)
+  ),
+  m_pick AS (
+    SELECT DISTINCT ON (handle, ca)
+      handle, ca, price_at, max_px
+    FROM m_raw
+    WHERE price_at > 0 AND max_px IS NOT NULL
+    ORDER BY handle, ca, pub_at ASC
+  ),
+  samples AS (
+    SELECT handle, (max_px / NULLIF(price_at,0) - 1) AS roi
+    FROM m_pick
+  )
+  SELECT handle, AVG(roi) AS value
+  FROM samples
+  GROUP BY handle
+  ORDER BY AVG(roi) DESC
+  LIMIT 10;
+`);
+const avgRoi = ((resRoi as any).rows as Array<{ handle: string; value: number }>).map((r) => ({
+  handle: r.handle,
+  value: Number(r.value) || 0,
+}));
 
   // 头像 + 粉丝 enrich（修复 IN 展开）
   const enrich = async (rows: Array<{ handle: string; value: number }>): Promise<KolRow[]> => {
