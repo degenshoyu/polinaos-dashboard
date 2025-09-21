@@ -3,7 +3,7 @@
 import { Crown, Medal } from "lucide-react";
 import React from "react";
 import { usePriceRefreshQueue } from "@/hooks/usePriceRefreshQueue";
-import { beginBatch as beginMaxBatch, markDone as markMaxDone } from "@/hooks/useMaxRoiProgress";
+import { useMaxRoiProgress, beginBatch as beginMaxBatch, markDone as markMaxDone } from "@/hooks/useMaxRoiProgress";
 
 /** Price formatter with fixed 6 decimals and $ prefix */
 function formatDollar6(n: number | null | undefined) {
@@ -228,6 +228,7 @@ function CoinsRoiList({
   const queue = usePriceRefreshQueue({ delayMs: [600, 1200], maxRetries: 2 });
   const liveGet = queue.get;
   const enqueueMany = queue.enqueueMany;
+  const { progress: maxProg } = useMaxRoiProgress();
 
   /** Load DB-based ROI list once (and on filters change) */
   async function load(): Promise<RoiItem[]> {
@@ -282,6 +283,8 @@ function CoinsRoiList({
         });
         if (stale.length) {
           beginMaxBatch(stale.length);
+          const staleIds = new Set(stale.map(s => String(s.chosenMentionId)));
+          const refreshedAt = new Date().toISOString();
           const body = {
             items: stale.map((s) => ({
               ca: s.tokenKey!,
@@ -305,28 +308,32 @@ function CoinsRoiList({
               return arr.map((it: RoiItem) => {
                 if (!it.chosenMentionId) return it;
 
-                const u = map.get(String(it.chosenMentionId)) as
+                const id = String(it.chosenMentionId);
+                const u = map.get(id) as
                   | { id: string; maxPriceSinceMention: number | null; maxPriceAtSinceMention: string | null; refreshedAt?: string }
                   | undefined;
 
-                if (!u) return it;
-
-                const maxPx = u.maxPriceSinceMention != null ? Number(u.maxPriceSinceMention) : null;
-
-                return {
-                  ...it,
-                  maxPriceSinceMention: maxPx ?? it.maxPriceSinceMention ?? null,
-                  maxPriceAtSinceMention: u.maxPriceAtSinceMention ?? it.maxPriceAtSinceMention ?? null,
-                  maxRoiFreshAt: u.refreshedAt ?? new Date().toISOString(),
-                  maxRoi:
-                    maxPx != null && it.mentionPrice != null && it.mentionPrice > 0
-                      ? (maxPx - it.mentionPrice) / it.mentionPrice
-                      : 0,
-                };
+                if (u) {
+                  const maxPx = u.maxPriceSinceMention != null ? Number(u.maxPriceSinceMention) : null;
+                  return {
+                    ...it,
+                    maxPriceSinceMention: maxPx ?? it.maxPriceSinceMention ?? null,
+                    maxPriceAtSinceMention: u.maxPriceAtSinceMention ?? it.maxPriceAtSinceMention ?? null,
+                    maxRoiFreshAt: u.refreshedAt ?? refreshedAt,
+                    maxRoi:
+                      maxPx != null && it.mentionPrice != null && it.mentionPrice > 0
+                        ? (maxPx - it.mentionPrice) / it.mentionPrice
+                        : 0,
+                  };
+                }
+                if (staleIds.has(id)) {
+                  return { ...it, maxRoiFreshAt: refreshedAt };
+                }
+                return it;
               });
             });
           }
-          markMaxDone(stale.length);
+          if (!aborted) markMaxDone(stale.length);
         }
       } catch {}
       // No immediate reload: UI reads live prices from queue state
@@ -363,9 +370,16 @@ function CoinsRoiList({
             ? `${(it.maxRoi * 100).toFixed(1)}%`
             : "—";
         const freshMs = it.maxRoiFreshAt ? Date.parse(it.maxRoiFreshAt) : 0;
-        const isMaxFresh = freshMs
-          ? (Date.now() - freshMs) <= 10 * 60 * 1000
-          : (it.maxPriceAtSinceMention ? (Date.now() - Date.parse(it.maxPriceAtSinceMention) <= 10 * 60 * 1000) : false);
+        const isMaxFresh = !ca
+          ? true
+          : (!maxProg.updating
+              ? true
+              : freshMs
+                ? (Date.now() - freshMs) <= 10 * 60 * 1000
+                : (it.maxPriceAtSinceMention
+                    ? (Date.now() - Date.parse(it.maxPriceAtSinceMention) <= 10 * 60 * 1000)
+                    : false)
+            );
 
         const liveMc = ca ? (queue as any).getMc?.(ca) : undefined;
         const curMc = (liveMc ?? it.currentMc) ?? null;
