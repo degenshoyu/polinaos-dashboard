@@ -1,6 +1,4 @@
-// hooks/useMaxRoiProgress.ts
 "use client";
-
 import * as React from "react";
 
 type Progress = {
@@ -20,6 +18,15 @@ let state: Store = {
 };
 const subs = new Set<() => void>();
 const emit = () => subs.forEach((fn) => fn());
+
+// 保证不变量，防止 done>total / inFlight<0 等异常
+function normalize() {
+  state.total = Math.max(0, state.total);
+  state.done = Math.min(state.total, Math.max(0, state.done));
+  const maxInFlight = Math.max(0, state.total - state.done);
+  state.inFlight = Math.min(maxInFlight, Math.max(0, state.inFlight));
+  state.updating = state.total > 0 && state.done < state.total;
+}
 
 export function useMaxRoiProgress() {
   const [snap, setSnap] = React.useState<Store>(state);
@@ -44,18 +51,16 @@ export function beginBatch(n: number) {
   if (!n || n < 0) return;
   state.total += n;
   state.inFlight += n;
-  state.updating = true;
+  normalize();
   emit();
 }
 
 export function markDone(n: number) {
   if (!n || n < 0) return;
   state.done += n;
-  state.inFlight = Math.max(0, state.inFlight - n);
-  if (state.done >= state.total) {
-    state.updating = false;
-    state.lastCompletedAt = Date.now();
-  }
+  state.inFlight -= n;
+  normalize();
+  if (!state.updating && state.total > 0) state.lastCompletedAt = Date.now();
   emit();
 }
 
@@ -65,5 +70,6 @@ export function resetMaxRoiProgress() {
   state.inFlight = 0;
   state.updating = false;
   state.lastCompletedAt = undefined;
+  normalize();
   emit();
 }

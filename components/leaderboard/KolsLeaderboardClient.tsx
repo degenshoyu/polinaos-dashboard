@@ -17,6 +17,8 @@ import { LeaderboardRow, type CoinStat } from "./LeaderboardRow";
 import { Pagination, PAGE_SIZE_OPTIONS } from "./Pagination";
 import MobileRow from "./MobileRow";
 import KolTweetsModal from "./KolTweetsModal";
+import { usePriceRefreshQueue } from "@/hooks/usePriceRefreshQueue";
+import { resetMaxRoiProgress } from "@/hooks/useMaxRoiProgress";
 
 /** ---- Avg ROI helpers ---- */
 function computeAvgRoi(items: Array<{ roi?: number | null; maxRoi?: number | null }>): number | null {
@@ -32,6 +34,18 @@ function computeAvgRoi(items: Array<{ roi?: number | null; maxRoi?: number | nul
   if (!vals.length) return null;
   const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
   return Number(mean.toFixed(4));
+}
+
+/** ---- Single ROI helpers (max over coins; prefer maxRoi, fallback roi) ---- */
+function computeSingleRoi(items: Array<{ roi?: number | null; maxRoi?: number | null }>): number | null {
+  if (!Array.isArray(items)) return null;
+  let best: number | null = null;
+  for (const x of items) {
+    const m = typeof x?.maxRoi === "number" && isFinite(x.maxRoi) ? x.maxRoi : null;
+    if (m === null) continue;
+    if (best === null || m > best) best = m;
+  }
+  return best;
 }
 
 async function fetchAvgRoi(
@@ -58,6 +72,25 @@ async function fetchAvgRoi(
   return computeAvgRoi(items);
 }
 
+async function fetchSingleRoi(
+  handle: string,
+  basis: BasisKey,
+  days: 7 | 30,
+  signal?: AbortSignal,
+) {
+  const qs = new URLSearchParams({
+    handle,
+    mode: basis,
+    days: String(days),
+    limitPerKol: "64",
+  });
+  const r = await fetch(`/api/kols/coin-roi?${qs.toString()}`, { cache: "no-store", signal });
+  if (!r.ok) return null;
+  const j: any = await r.json().catch(() => ({}));
+  const items: Array<{ roi?: number | null; maxRoi?: number | null }> = Array.isArray(j?.items) ? j.items : [];
+  return computeSingleRoi(items);
+}
+
 /** Fill a batch of missing Avg ROI with limited concurrency (default: 4) */
 async function fillMissingAvgRoi(opts: {
   handles: string[];
@@ -76,6 +109,35 @@ async function fillMissingAvgRoi(opts: {
       const h = handles[idx];
       try {
         const v = await fetchAvgRoi(h, basis, days, signal);
+        if (signal?.aborted) return;
+        onValue(h, v);
+      } catch {
+        if (signal?.aborted) return;
+        onValue(h, null);
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, worker));
+}
+
+/** Fill a batch of missing Single ROI with limited concurrency (default: 4) */
+async function fillMissingSingleRoi(opts: {
+  handles: string[];
+  basis: BasisKey;
+  days: 7 | 30;
+  signal?: AbortSignal;
+  onValue: (handle: string, v: number | null) => void;
+  concurrency?: number;
+}) {
+  const { handles, basis, days, signal, onValue, concurrency = 4 } = opts;
+  let i = 0;
+  const limit = Math.min(concurrency, Math.max(1, handles.length));
+  async function worker() {
+    while (i < handles.length && !signal?.aborted) {
+      const idx = i++;
+      const h = handles[idx];
+      try {
+        const v = await fetchSingleRoi(h, basis, days, signal);
         if (signal?.aborted) return;
         onValue(h, v);
       } catch {
@@ -122,6 +184,7 @@ export default function KolsLeaderboardClient({
   // cache: handle|basis|days -> avgRoi
   const [avgRoiMap, setAvgRoiMap] = useState<Record<string, number | null>>({});
   const keyFor = (h: string) => `${h}|${basis}|${daysFromUrl}`;
+  const [singleRoiMap, setSingleRoiMap] = useState<Record<string, number | null>>({});
 
   const rows = initialRows ?? [];
 
@@ -187,6 +250,14 @@ export default function KolsLeaderboardClient({
     return out;
   }, [rows, query, coinKey]);
 
+  const priceQueue = usePriceRefreshQueue();
+
+  // When visible set likely changes, reset progress to avoid stale "Up to date"
+  useEffect(() => {
+    priceQueue.resetProgress?.();
+    resetMaxRoiProgress();
+  }, [sortKey, basis, daysFromUrl, pageSize, page]);
+
   /** ---- Improvement #2: Fetch missing Avg ROI with limited concurrency & abort on deps change ---- */
   useEffect(() => {
     const ac = new AbortController();
@@ -210,6 +281,29 @@ export default function KolsLeaderboardClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered, basis, daysFromUrl]);
 
+/** ---- Fetch missing Single ROI when needed (same pattern as Avg ROI) ---- */
+useEffect(() => {
+  if (sortKey !== "singleRoi") return;
+  const ac = new AbortController();
+  (async () => {
+    const missing = filtered
+      .map((r) => r.twitterUsername)
+      .filter((h) => singleRoiMap[keyFor(h)] === undefined);
+    if (!missing.length) return;
+    await fillMissingSingleRoi({
+      handles: missing,
+      basis,
+      days: daysFromUrl as 7 | 30,
+      signal: ac.signal,
+      concurrency: 4,
+      onValue: (handle, v) =>
+        setSingleRoiMap((m) => ({ ...m, [keyFor(handle)]: v })),
+    });
+  })();
+  return () => ac.abort();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [filtered, basis, daysFromUrl, sortKey]);
+
   /** ---- Improvement #1: use fallback sort key while Avg ROI is still loading to avoid jitter ---- */
   const waitingAvgRoi = useMemo(() => {
     if (sortKey !== "avgRoi") return false;
@@ -218,7 +312,15 @@ export default function KolsLeaderboardClient({
     );
   }, [filtered, sortKey, avgRoiMap, basis, daysFromUrl]); // keyFor uses basis/days
 
-  const effectiveSortKey: SortKey = waitingAvgRoi ? "engs" : sortKey; // fallback → engagements
+  const waitingSingleRoi = useMemo(() => {
+    if (sortKey !== "singleRoi") return false;
+    return filtered.some(
+      (r) => singleRoiMap[keyFor(r.twitterUsername)] === undefined,
+    );
+  }, [filtered, sortKey, singleRoiMap, basis, daysFromUrl]);
+
+  const effectiveSortKey: SortKey =
+    waitingAvgRoi || waitingSingleRoi ? "engs" : sortKey; // fallback → engagements
 
   /** ---- NEW: lightweight UI loading flags for period/sort/basis ---- */
   const [loadingDays, setLoadingDays] = useState(false);
@@ -256,7 +358,9 @@ export default function KolsLeaderboardClient({
 
   // Table/body busy when切换 或 AvgROI 等待中
   const tableBusy =
-    loadingDays || loadingSort || loadingBasis || (sortKey === "avgRoi" && waitingAvgRoi);
+  loadingDays || loadingSort || loadingBasis ||
+  (sortKey === "avgRoi" && waitingAvgRoi) ||
+  (sortKey === "singleRoi" && waitingSingleRoi);
 
   /** Enrich, compute totals & shills metrics, then sort by (scope × effectiveSortKey) */
   const ranked = useMemo(() => {
@@ -328,12 +432,22 @@ export default function KolsLeaderboardClient({
           // tie-breaker for stability
           return B.engs - A.engs;
         }
+        case "singleRoi": {
+          const aKey = keyFor((a.row as any).twitterUsername);
+          const bKey = keyFor((b.row as any).twitterUsername);
+          const ar = typeof singleRoiMap[aKey] === "number" ? (singleRoiMap[aKey] as number) : -Infinity;
+          const br = typeof singleRoiMap[bKey] === "number" ? (singleRoiMap[bKey] as number) : -Infinity;
+          if (br !== ar) return br - ar; // higher first
+          // tie-breakers
+          if (B.engs !== A.engs) return B.engs - A.engs;
+          return ((b.row as any).followers || 0) - ((a.row as any).followers || 0);
+        }
         default:
           return 0;
       }
     });
     return arr;
-  }, [filtered, scope, effectiveSortKey, avgRoiMap, basis, daysFromUrl]);
+  }, [filtered, scope, effectiveSortKey, avgRoiMap, singleRoiMap, basis, daysFromUrl]);
 
   const empty = ranked.length === 0;
   const total = ranked.length;
@@ -388,6 +502,8 @@ export default function KolsLeaderboardClient({
       ? "Engagements"
       : sortKey === "er"
       ? "Engagement Rate"
+      : sortKey === "singleRoi"
+      ? "Single ROI"
       : "Avg ROI";
 
   return (
@@ -419,9 +535,16 @@ export default function KolsLeaderboardClient({
           hideScope
           /* loading indicators in controls */
           loadingDays={loadingDays}
-          loadingSort={loadingSort || (sortKey === "avgRoi" && waitingAvgRoi)}
+          loadingSort={
+            loadingSort ||
+            (sortKey === "avgRoi" && waitingAvgRoi) ||
+            (sortKey === "singleRoi" && waitingSingleRoi)
+          }
           loadingBasis={loadingBasis}
-          waitingAvgRoi={sortKey === "avgRoi" && waitingAvgRoi}
+          waitingAvgRoi={
+            (sortKey === "avgRoi" && waitingAvgRoi) ||
+            (sortKey === "singleRoi" && waitingSingleRoi)
+          }
         />
       </div>
 

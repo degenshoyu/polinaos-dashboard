@@ -49,7 +49,8 @@ function RealtimeCell({
 export type CoinStat = { tokenKey: string; tokenDisplay: string; count: number };
 type RoiItem = {
   tokenKey: string;            // Contract address or raw key (keep original casing; Solana is case-sensitive)
-  tokenDisplay: string;        // Ticker for display
+  tokenDisplay: string;
+  isCA?: boolean;
   mentionPrice: number | null;
   currentPrice: number | null; // DB snapshot (may be overridden by live price)
   currentMc?: number | null;
@@ -61,6 +62,10 @@ type RoiItem = {
   chosenMentionId?: string | null;
   maxRoiFreshAt?: string | null;
 };
+
+function looksLikeCA(s: string) {
+  try { return /^[1-9A-HJ-NP-Za-km-z]{32,64}$/.test(String(s)); } catch { return false; }
+}
 
 /** Compact number formatter (tweets, views, etc.) */
 export function nCompact(n: number) {
@@ -223,8 +228,6 @@ function CoinsRoiList({
   const queue = usePriceRefreshQueue({ delayMs: [600, 1200], maxRetries: 2 });
   const liveGet = queue.get;
   const enqueueMany = queue.enqueueMany;
-  // Guard to avoid duplicate fetch in React 18 StrictMode (dev only)
-  const didRunOnceRef = React.useRef(false);
 
   /** Load DB-based ROI list once (and on filters change) */
   async function load(): Promise<RoiItem[]> {
@@ -259,13 +262,11 @@ function CoinsRoiList({
     let aborted = false;
     didEnqueueRef.current = false;
     (async () => {
-      if (process.env.NODE_ENV !== "production" && didRunOnceRef.current) return;
-      didRunOnceRef.current = true;
       const first = await load();
       if (aborted) return;
 
       // Enqueue ALL tokens once. The queue itself will skip refresh if the DB snapshot is within 10min.
-      const targets = first.filter((x) => !!x.tokenKey);
+      const targets = first.filter((x) => (x.isCA ?? looksLikeCA(x.tokenKey)) && !!x.tokenKey);
       if (targets.length && !didEnqueueRef.current) {
         didEnqueueRef.current = true;
         enqueueMany(targets.map((x) => ({ ca: x.tokenKey, network: "solana" as const })));
@@ -276,7 +277,8 @@ function CoinsRoiList({
         const stale = first.filter((x) => {
           const at = x.maxPriceAtSinceMention ? Date.parse(x.maxPriceAtSinceMention) : 0;
           const tooOld = !at || now - at > 10 * 60 * 1000;
-          return tooOld && x.chosenMentionId && x.tokenKey;
+          const isCA = x.isCA ?? looksLikeCA(x.tokenKey);
+          return isCA && tooOld && x.chosenMentionId && x.tokenKey;
         });
         if (stale.length) {
           beginMaxBatch(stale.length);
@@ -346,7 +348,8 @@ function CoinsRoiList({
         const mpTxt = formatDollar6(it.mentionPrice);
 
         // Prefer live price from queue; fallback to DB current
-        const liveCp = liveGet(it.tokenKey);
+        const ca = (it.isCA ?? looksLikeCA(it.tokenKey)) ? it.tokenKey : null;
+        const liveCp = ca ? liveGet(ca) : undefined;
         const cur = (liveCp ?? it.currentPrice) ?? null;
         const cpTxt = formatDollar6(cur);
 
@@ -364,12 +367,12 @@ function CoinsRoiList({
           ? (Date.now() - freshMs) <= 10 * 60 * 1000
           : (it.maxPriceAtSinceMention ? (Date.now() - Date.parse(it.maxPriceAtSinceMention) <= 10 * 60 * 1000) : false);
 
-        const liveMc = (queue as any).getMc?.(it.tokenKey);
+        const liveMc = ca ? (queue as any).getMc?.(ca) : undefined;
         const curMc = (liveMc ?? it.currentMc) ?? null;
         const mcTxt = curMc == null ? "—" : `$${nCompact(curMc)}`;
 
         const cnt = it.mentionCount ?? 1;
-        const isFresh = queue.isDbFresh(it.tokenKey);
+        const isFresh = ca ? queue.isDbFresh(ca) : true;
 
         return (
           <div

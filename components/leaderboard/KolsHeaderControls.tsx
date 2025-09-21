@@ -5,7 +5,7 @@
 import { CalendarDays, ArrowUpDown, Search, Filter } from "lucide-react";
 import { Dropdown, MenuItem } from "./primitives";
 
-export type SortKey = "tweets" | "views" | "engs" | "er" | "avgRoi";
+export type SortKey = "tweets" | "views" | "engs" | "er" | "avgRoi" | "singleRoi";
 export type ScopeKey = "total" | "shills";
 export type BasisKey = "earliest" | "latest" | "lowest" | "highest";
 
@@ -96,6 +96,7 @@ export function KolsHeaderControls({
               sortKey === "views" ? "Sort: Views" :
               sortKey === "engs" ? "Sort: Engagements" :
               sortKey === "er"    ? "Sort: ER" :
+              sortKey === "singleRoi" ? "Sort: Single ROI" :
               "Sort: Avg ROI"
             }
             icon={<ArrowUpDown size={16} className="text-gray-300" />}
@@ -105,6 +106,7 @@ export function KolsHeaderControls({
             <MenuItem active={sortKey === "engs"} onClick={() => onSetSortKey("engs")}>Engagements</MenuItem>
             <MenuItem active={sortKey === "er"} onClick={() => onSetSortKey("er")}>ER</MenuItem>
             <MenuItem active={sortKey === "avgRoi"} onClick={() => onSetSortKey("avgRoi")}>Avg ROI</MenuItem>
+            <MenuItem active={sortKey === "singleRoi"} onClick={() => onSetSortKey("singleRoi")}>Single ROI</MenuItem>
           </Dropdown>
           {(loadingSort || waitingAvgRoi) ? <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping" aria-hidden /> : null}
         </div>
