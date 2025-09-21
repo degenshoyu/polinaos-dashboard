@@ -1,0 +1,2 @@
+ALTER TABLE "tweet_token_mentions" ADD COLUMN "max_price_since_mention" numeric(18, 8);--> statement-breakpoint
+ALTER TABLE "tweet_token_mentions" ADD COLUMN "max_price_at_since_mention" timestamp with time zone;

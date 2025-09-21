@@ -101,7 +101,13 @@ export async function GET(req: NextRequest) {
         tokenKey: tweetTokenMentions.tokenKey, // raw key (CA or ticker)
         tokenDisplay: tweetTokenMentions.tokenDisplay, // ticker text (nullable)
         priceUsdAt: tweetTokenMentions.priceUsdAt, // string | null
-        createdAt: kolTweets.publishDate,
+        createdAt: kolTweets.publishDate, // Date
+        mentionId: tweetTokenMentions.id, // mention id
+        // raw columns (not modeled in drizzle schema):
+        maxPriceSinceMention: sql<
+          string | null
+        >`tweet_token_mentions.max_price_since_mention`,
+        maxPriceAtSinceMention: sql<Date | null>`tweet_token_mentions.max_price_at_since_mention`,
       })
       .from(kolTweets)
       .innerJoin(
@@ -123,6 +129,9 @@ export async function GET(req: NextRequest) {
       createdAt: Date;
       tokenDisplay: string | null;
       rawKey: string;
+      mentionId: string;
+      maxPriceSinceMention: string | null;
+      maxPriceAtSinceMention: Date | null;
     };
 
     /** Group raw mentions by a "normKey"
@@ -141,6 +150,9 @@ export async function GET(req: NextRequest) {
         createdAt: r.createdAt as Date,
         tokenDisplay: r.tokenDisplay,
         rawKey: raw,
+        mentionId: String(r.mentionId),
+        maxPriceSinceMention: r.maxPriceSinceMention,
+        maxPriceAtSinceMention: r.maxPriceAtSinceMention,
       });
       byNormKey.set(norm, list);
     }
@@ -227,20 +239,21 @@ export async function GET(req: NextRequest) {
       mentionPrice: number | null;
       mentionCount: number;
       _isCA: boolean; // marks CA groups
+      _chosenMention?: M;
     }> = [];
 
     for (const [gk, g] of groups) {
       // time ascending
       g.list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 
-      // Collect mention-time price samples
-      const samples: number[] = [];
+      // Collect candidates: (price sample, mention record)
+      const cands: Array<{ price: number; m: M }> = [];
       for (const m of g.list) {
         // Prefer embedded price_usd_at if present
         if (m.priceUsdAt != null) {
           const n = Number(m.priceUsdAt);
           if (!Number.isNaN(n)) {
-            samples.push(n);
+            cands.push({ price: n, m });
             continue;
           }
         }
@@ -259,7 +272,7 @@ export async function GET(req: NextRequest) {
             .limit(1);
           if (near[0]) {
             const n = Number(near[0].priceUsd);
-            if (!Number.isNaN(n)) samples.push(n);
+            if (!Number.isNaN(n)) cands.push({ price: n, m });
           }
         }
       }
@@ -268,21 +281,23 @@ export async function GET(req: NextRequest) {
 
       // Choose basis price according to "mode"
       let mentionPrice: number | null = null;
-      if (samples.length > 0) {
+      let chosen: { price: number; m: M } | null = null;
+      if (cands.length > 0) {
         switch (parse.mode) {
           case "earliest":
-            mentionPrice = samples[0];
+            chosen = cands[0];
             break;
           case "latest":
-            mentionPrice = samples[samples.length - 1];
+            chosen = cands[cands.length - 1];
             break;
           case "lowest":
-            mentionPrice = Math.min(...samples);
+            chosen = cands.reduce((a, b) => (a.price <= b.price ? a : b));
             break;
           case "highest":
-            mentionPrice = Math.max(...samples);
+            chosen = cands.reduce((a, b) => (a.price >= b.price ? a : b));
             break;
         }
+        mentionPrice = chosen?.price ?? null;
       }
 
       // Decide tokenKey for the frontend:
@@ -296,6 +311,7 @@ export async function GET(req: NextRequest) {
         mentionPrice,
         mentionCount,
         _isCA: Boolean(g.keyForPrice),
+        _chosenMention: chosen?.m,
       });
     }
 
@@ -324,6 +340,21 @@ export async function GET(req: NextRequest) {
           r.mentionPrice != null && cur != null && r.mentionPrice > 0
             ? (cur - r.mentionPrice) / r.mentionPrice
             : null;
+
+        // Compute max ROI from the chosen mention
+        const m = (r as any)._chosenMention as M | undefined;
+        const hasMention = r.mentionPrice != null && r.mentionPrice > 0;
+        // fallback: if no max in DB, use mentionPrice itself so MAX ROI=0% (better UX than "—")
+        const maxPx =
+          m?.maxPriceSinceMention != null
+            ? Number(m.maxPriceSinceMention)
+            : hasMention
+              ? r.mentionPrice!
+              : null;
+        const maxRoi =
+          hasMention && maxPx != null
+            ? (maxPx - r.mentionPrice!) / r.mentionPrice!
+            : null;
         return {
           tokenKey: r.tokenKey, // CA (canonical) or ticker
           tokenDisplay: r.tokenDisplay,
@@ -331,6 +362,11 @@ export async function GET(req: NextRequest) {
           currentPrice: to6(cur),
           currentMc: curMc, // keep number for compact display on client
           roi,
+          // NEW: expose max-* from the chosen mention
+          maxPriceSinceMention: maxPx == null ? null : to6(maxPx),
+          maxPriceAtSinceMention: m?.maxPriceAtSinceMention ?? null,
+          maxRoi,
+          chosenMentionId: m?.mentionId ?? null,
           mentionCount: r.mentionCount,
         };
       })
@@ -340,9 +376,7 @@ export async function GET(req: NextRequest) {
       })
       .slice(0, parse.limitPerKol);
 
-    if (!debug) {
-      return NextResponse.json({ items: out }, { status: 200 });
-    }
+    if (!debug) return NextResponse.json({ items: out }, { status: 200 });
     const dbgHit = latest.map((x) => String(x.contract_address));
     const dbgNeed = cas.filter((ca) => !latestBy.has(ca));
     return NextResponse.json(

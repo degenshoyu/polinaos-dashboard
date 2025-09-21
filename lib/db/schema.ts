@@ -316,6 +316,17 @@ export const tweetTokenMentions = pgTable(
     priceUsdAt: numeric("price_usd_at", { precision: 18, scale: 8 }).$type<
       string | null
     >(),
+    /**
+     * Maximum price observed since this mention and the timestamp for that max.
+     * Filled asynchronously by a windowed price scan job.
+     */
+    maxPriceSinceMention: numeric("max_price_since_mention", {
+      precision: 18,
+      scale: 8,
+    }).$type<string | null>(),
+    maxPriceAtSinceMention: timestamp("max_price_at_since_mention", {
+      withTimezone: true,
+    }),
     // Hide this mention from UI/analytics without deleting data.
     excluded: boolean("excluded").notNull().default(false),
     ...timestamps,

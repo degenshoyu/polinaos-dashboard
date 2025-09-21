@@ -2,6 +2,8 @@
 // GeckoTerminal helpers: primary pool selection + OHLCV with fallbacks.
 // + rate-limit aware fetch & gentle backoff for 429
 
+import "@/lib/net/proxy";
+
 export type Ohlcv = [number, number, number, number, number, number?]; // [ts, o, h, l, c, v]
 
 type FetchOpts = RequestInit & { retries?: number; retryDelayMs?: number };
@@ -91,7 +93,6 @@ export async function listTopPoolsByToken(
   const ranked = arr
     .map((d) => {
       const a = d?.attributes || {};
-      // ⛳ OHLCV 必须使用 attributes.address 作为 pool 标识
       const poolAddress = String(a?.address || "");
       const reserves = Number(a?.reserve_in_usd ?? a?.reserve_usd ?? 0);
       const vol24 = Number(a?.volume_usd_24h ?? 0);
@@ -105,23 +106,24 @@ export async function listTopPoolsByToken(
         score,
       };
     })
-    .filter((x) => x.address) // 防御：确保有地址
+    .filter((x) => x.address)
     .sort((a, b) => b.score - a.score);
   return ranked.slice(0, take).map(({ score, ...rest }) => rest);
 }
 
-/** Minute OHLCV (aggregate=1) before/at ts (sec). */
+/** Minute OHLCV (aggregate = 1 by default) before/at ts (sec). */
 export async function fetchOHLCVMinute(
   network: string,
   poolId: string,
   beforeTsSec: number,
   limit = 1,
+  aggregate = 1,
 ): Promise<Ohlcv[]> {
   const url = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(
     network,
   )}/pools/${encodeURIComponent(
     poolId,
-  )}/ohlcv/minute?aggregate=1&limit=${limit}&before_timestamp=${beforeTsSec}`;
+  )}/ohlcv/minute?aggregate=${aggregate}&limit=${limit}&before_timestamp=${beforeTsSec}`;
   const json = await fetchJson(url);
   const list = json?.data?.attributes?.ohlcv_list ?? [];
   return Array.isArray(list) ? (list as Ohlcv[]) : [];
@@ -173,17 +175,14 @@ export async function priceAtTsWithFallbacks(
   poolId: string,
   tsSec: number,
 ): Promise<number | null> {
-  // 1) 直接尝试最近的分钟（limit=1）
   let arr = await fetchOHLCVMinute(network, poolId, tsSec, 1).catch(() => []);
   let price = pickNearestAtOrBefore(arr, tsSec);
   if (price != null) return price;
 
-  // 2) 扩到 60 根分钟线，挑 ≤ ts 的最近一根
   arr = await fetchOHLCVMinute(network, poolId, tsSec, 60).catch(() => []);
   price = pickNearestAtOrBefore(arr, tsSec);
   if (price != null) return price;
 
-  // 3) 再退到日线（2 根），挑 ≤ ts 的最近一根
   arr = await fetchOHLCVDay(network, poolId, tsSec, 2).catch(() => []);
   price = pickNearestAtOrBefore(arr, tsSec);
   return price ?? null;

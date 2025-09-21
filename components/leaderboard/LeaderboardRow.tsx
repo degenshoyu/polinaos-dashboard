@@ -54,6 +54,11 @@ type RoiItem = {
   currentMc?: number | null;
   roi: number | null;
   mentionCount?: number;
+  maxPriceSinceMention?: number | null;
+  maxPriceAtSinceMention?: string | null; // ISO
+  maxRoi?: number | null;
+  chosenMentionId?: string | null;
+  maxRoiFreshAt?: string | null;
 };
 
 /** Compact number formatter (tweets, views, etc.) */
@@ -163,8 +168,8 @@ export function LeaderboardRow({
         </div>
       </div>
 
-      {/* Twitter Metrics (5 cols) — four rows: Total/values + Shills/values */}
-      <div className="col-span-5 pr-2 sm:pr-3 border-r border-white/10">
+      {/* Twitter Metrics (4 cols) — four rows: Total/values + Shills/values */}
+      <div className="col-span-4 pr-2 sm:pr-3 border-r border-white/10">
         <div className="text-[11px] font-medium text-gray-400 mb-1">Total</div>
         <div className="grid grid-cols-4 gap-x-2">
           <div className="text-sm tabular-nums text-white text-left">{nCompact(totals.tweets)}</div>
@@ -182,8 +187,8 @@ export function LeaderboardRow({
         </div>
       </div>
 
-      {/* Coins (ROI) — 5 cols: Token | Mention | Current | ROI */}
-      <div className="col-span-5">
+      {/* Coins (ROI) — 6 cols: Token | Mention | Current | ROI Now | MAX ROI | MC */}
+      <div className="col-span-6">
         <CoinsRoiList handle={r.twitterUsername} basis={basis} days={days} />
       </div>
     </div>
@@ -264,6 +269,62 @@ function CoinsRoiList({
         didEnqueueRef.current = true;
         enqueueMany(targets.map((x) => ({ ca: x.tokenKey, network: "solana" as const })));
       }
+
+      try {
+        const now = Date.now();
+        const stale = first.filter((x) => {
+          const at = x.maxPriceAtSinceMention ? Date.parse(x.maxPriceAtSinceMention) : 0;
+          const tooOld = !at || now - at > 10 * 60 * 1000;
+          return tooOld && x.chosenMentionId && x.tokenKey;
+        });
+        if (stale.length) {
+          const body = {
+            items: stale.map((s) => ({
+              ca: s.tokenKey!,
+              mentionId: s.chosenMentionId!,
+              publishDate: new Date().toISOString(),
+              network: "solana",
+              minutePatch: true,
+              minuteAgg: 15,
+              poolMode: "primary",
+            })),
+          };
+          const r2 = await fetch("/api/kols/maxroi/refresh", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const j2 = await r2.json();
+          if (r2.ok && Array.isArray(j2?.updated)) {
+            const map = new Map(j2.updated.map((u: any) => [String(u.id), u]));
+            setItems((prev) => {
+              const arr: RoiItem[] = (prev ?? []) as RoiItem[];
+              return arr.map((it: RoiItem) => {
+                if (!it.chosenMentionId) return it;
+
+                const u = map.get(String(it.chosenMentionId)) as
+                  | { id: string; maxPriceSinceMention: number | null; maxPriceAtSinceMention: string | null; refreshedAt?: string }
+                  | undefined;
+
+                if (!u) return it;
+
+                const maxPx = u.maxPriceSinceMention != null ? Number(u.maxPriceSinceMention) : null;
+
+                return {
+                  ...it,
+                  maxPriceSinceMention: maxPx ?? it.maxPriceSinceMention ?? null,
+                  maxPriceAtSinceMention: u.maxPriceAtSinceMention ?? it.maxPriceAtSinceMention ?? null,
+                  maxRoiFreshAt: u.refreshedAt ?? new Date().toISOString(),
+                  maxRoi:
+                    maxPx != null && it.mentionPrice != null && it.mentionPrice > 0
+                      ? (maxPx - it.mentionPrice) / it.mentionPrice
+                      : 0,
+                };
+              });
+            });
+          }
+        }
+      } catch {}
       // No immediate reload: UI reads live prices from queue state
     })();
     return () => { aborted = true; };
@@ -291,6 +352,15 @@ function CoinsRoiList({
         const roiTxt = (it.mentionPrice == null || cur == null)
           ? "—"
           : `${(((cur - it.mentionPrice) / it.mentionPrice) * 100).toFixed(1)}%`;
+        // Placeholder for MAX ROI until backend provides it (optional field)
+        const maxRoiTxt =
+          typeof it.maxRoi === "number" && isFinite(it.maxRoi)
+            ? `${(it.maxRoi * 100).toFixed(1)}%`
+            : "—";
+        const freshMs = it.maxRoiFreshAt ? Date.parse(it.maxRoiFreshAt) : 0;
+        const isMaxFresh = freshMs
+          ? (Date.now() - freshMs) <= 10 * 60 * 1000
+          : (it.maxPriceAtSinceMention ? (Date.now() - Date.parse(it.maxPriceAtSinceMention) <= 10 * 60 * 1000) : false);
 
         const liveMc = (queue as any).getMc?.(it.tokenKey);
         const curMc = (liveMc ?? it.currentMc) ?? null;
@@ -302,9 +372,9 @@ function CoinsRoiList({
         return (
           <div
             key={`${it.tokenKey}::${it.tokenDisplay}`}
-            className="grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr] items-center gap-2 text-xs"
+            className="grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr_1fr] items-center gap-2 text-xs"
           >
-            {/* Token pill + mention count */}
+            {/* Ticker pill + mention count */}
             <div className="truncate" title={it.tokenDisplay}>
               <span className="inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5
                                 bg-emerald-400/10 border-emerald-400/20 text-emerald-200
@@ -315,7 +385,7 @@ function CoinsRoiList({
               </span>
             </div>
 
-            {/* Mention price */}
+            {/* Ref. Px */}
             <div className="tabular-nums text-gray-300">{mpTxt}</div>
 
             <RealtimeCell
@@ -327,7 +397,7 @@ function CoinsRoiList({
 
 
 
-            {/* ROI (colored by gain/loss) */}
+            {/* ROI Now (colored by gain/loss) */}
             <div
               className={[
                 "tabular-nums",
@@ -338,6 +408,14 @@ function CoinsRoiList({
             >
               {roiTxt}
             </div>
+
+            {/* MAX ROI (RealtimeCell same as price/MC) */}
+            <RealtimeCell
+              text={maxRoiTxt}
+              isFresh={isMaxFresh}
+              srWhenFresh="Max ROI up to date"
+              srWhenRefreshing="Refreshing MAX ROI"
+            />
 
             <RealtimeCell
               text={mcTxt}
@@ -366,10 +444,11 @@ function CoinsRoiList({
 /** Simple skeleton row for initial loading state (unchanged style) */
 const SkeletonRow = React.memo(function SkeletonRow() {
   return (
-    <div className="grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr] items-center gap-2 text-xs">
+    <div className="grid grid-cols-[1.2fr_1fr_1fr_1fr_1fr_1fr] items-center gap-2 text-xs">
       <div className="h-5 w-32 rounded-full bg-white/10" />
       <div className="h-4 w-16 rounded bg-white/10" />
       <div className="h-4 w-16 rounded bg-white/10" />
+      <div className="h-4 w-10 rounded bg-white/10" />
       <div className="h-4 w-10 rounded bg-white/10" />
       <div className="h-4 w-16 rounded bg-white/10" />
     </div>

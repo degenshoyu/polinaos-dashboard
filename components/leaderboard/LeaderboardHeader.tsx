@@ -48,7 +48,7 @@ export function LeaderboardHeader({
         </div>
 
         {/* Twitter Metrics */}
-        <div className="col-span-5 rounded-xl border border-white/10 bg-white/[0.03] p-2">
+        <div className="col-span-4 rounded-xl border border-white/10 bg-white/[0.03] p-2">
           <div className="flex items-center gap-3 pb-1">
             <span className="text-sm font-extrabold text-white">Twitter Metrics</span>
             <Tooltip text={totalTooltip}>
@@ -64,7 +64,7 @@ export function LeaderboardHeader({
         </div>
 
         {/* Coins (ROI) card */}
-        <div className="col-span-5 rounded-xl border border-white/10 bg-white/[0.03] p-2">
+        <div className="col-span-6 rounded-xl border border-white/10 bg-white/[0.03] p-2">
           {/* Header row: title + mention price mode dropdown */}
           <div className="flex items-center justify-between pb-1">
             <div className="min-w-0">
@@ -131,11 +131,12 @@ export function LeaderboardHeader({
           </div>
 
           {/* Sub-headers for the ROI columns */}
-          <div className="grid grid-cols-5 text-[11px] text-gray-400">
-            <div className="text-left">Token</div>
-            <div className="text-left">Mention</div>
-            <div className="text-left">Current</div>
-            <div className="text-left">ROI</div>
+          <div className="grid grid-cols-6 text-[11px] text-gray-400">
+            <div className="text-left">Ticker</div>
+            <div className="text-left">Ref. Px</div>
+            <div className="text-left">Last Px</div>
+            <div className="text-left">ROI Now</div>
+            <div className="text-left">MAX ROI</div>
             <div className="text-left">MC</div>
           </div>
         </div>
