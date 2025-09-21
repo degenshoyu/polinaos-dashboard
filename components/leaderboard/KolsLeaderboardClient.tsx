@@ -113,7 +113,7 @@ export default function KolsLeaderboardClient({
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("views");
   const [scope, setScope] = useState<ScopeKey>("shills");
-  const [basis, setBasis] = useState<BasisKey>("earliest");
+  const [basis, setBasis] = useState<BasisKey>("lowest");
   const [coinKey, setCoinKey] = useState<string | null>(null);
   const [page, setPage] = useState<number>(1); // 1-based
   const [pageSize, setPageSize] =
