@@ -213,7 +213,7 @@ export default function InputCard({
                     symbol={it.symbol}
                     name={it.name}
                     imageUrl={it.logo ?? undefined}
-                    tokenAddress={it.tokenAddress}
+                    tokenAddress={it.tokenAddress ?? ""}
                     dex={it.dex ?? undefined}
                     priceUsd={it.priceUsd ?? undefined}
                     marketCapUsd={(it as any).marketCap ?? (it as any).fdv ?? undefined}
