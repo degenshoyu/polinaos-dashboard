@@ -5,7 +5,6 @@ import { sql, inArray } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import {
   computeMaxPairsForCA,
-  extractDebug,
   type MentionRow,
 } from "@/lib/pricing/mentionMax";
 
@@ -111,10 +110,7 @@ export async function POST(req: Request) {
       if (!mentions.length) continue;
 
       try {
-        const map = await computeMaxPairsForCA(ca, mentions, {
-          ...opts,
-          debug: wantDebug,
-        });
+        const map = await computeMaxPairsForCA(ca, mentions, opts);
 
         for (const m of mentions) {
           const pair = map.get(m.id) || { maxPrice: null, maxAt: null };
@@ -134,12 +130,6 @@ export async function POST(req: Request) {
             maxAt: pair.maxAt,
           });
           if (wantDebug) debug.push({ ca, network, id: m.id, opts, pair });
-        }
-
-        // attach the inner trace from mentionMax (pools/candles/reasons)
-        if (wantDebug) {
-          const trace = extractDebug(map);
-          if (trace?.length) debug.push({ ca, network, trace });
         }
       } catch (e: any) {
         const reason = e?.message || "computeMaxPairsForCA failed";

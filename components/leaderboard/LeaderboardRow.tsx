@@ -295,7 +295,11 @@ function CoinsRoiList({
               poolMode: "primary",
             })),
           };
-          const r2 = await fetch("/api/kols/maxroi/refresh", {
+          const debugSuffix =
+            (typeof window !== "undefined" && window.location.search.includes("debug=1"))
+              ? "?debug=1"
+              : "";
+          const r2 = await fetch(`/api/kols/maxroi/refresh${debugSuffix}`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(body),
@@ -309,16 +313,16 @@ function CoinsRoiList({
                 if (!it.chosenMentionId) return it;
 
                 const id = String(it.chosenMentionId);
-                const u = map.get(id) as
-                  | { id: string; maxPriceSinceMention: number | null; maxPriceAtSinceMention: string | null; refreshedAt?: string }
-                  | undefined;
+                const u = map.get(id) as any | undefined;
 
                 if (u) {
-                  const maxPx = u.maxPriceSinceMention != null ? Number(u.maxPriceSinceMention) : null;
+                  const maxPxRaw = u.maxPriceSinceMention ?? u.maxPrice ?? null;
+                  const maxAtRaw = u.maxPriceAtSinceMention ?? u.maxAt ?? null;
+                  const maxPx = maxPxRaw != null ? Number(maxPxRaw) : null;
                   return {
                     ...it,
                     maxPriceSinceMention: maxPx ?? it.maxPriceSinceMention ?? null,
-                    maxPriceAtSinceMention: u.maxPriceAtSinceMention ?? it.maxPriceAtSinceMention ?? null,
+                    maxPriceAtSinceMention: maxAtRaw ?? it.maxPriceAtSinceMention ?? null,
                     maxRoiFreshAt: u.refreshedAt ?? refreshedAt,
                     maxRoi:
                       maxPx != null && it.mentionPrice != null && it.mentionPrice > 0

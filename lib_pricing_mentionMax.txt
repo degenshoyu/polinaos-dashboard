@@ -1,0 +1,385 @@
+// lib/pricing/mentionMax.ts
+// Max price since each mention's publish time (t0), with rich debug info.
+// - Works for Solana by passing the token CA (mint) and a normalized network name ("solana").
+// - Candles are merged from minute + day; timestamps normalized to milliseconds.
+// - Debug info is attached on the returned Map via a non-enumerable "__debug" property.
+
+import {
+  fetchOHLCVDay,
+  fetchOHLCVMinute,
+  listTopPoolsByToken,
+} from "@/lib/pricing/geckoterminal";
+
+export type MentionRow = { id: string; publishDate: string | Date };
+export type MaxPair = { maxPrice: number | null; maxAt: string | null };
+
+export type FetchOptions = {
+  network?: string;                 // e.g. "solana" | "ethereum"
+  poolMode?: "primary" | "top3";    // pool selection strategy
+  minVolume?: number;               // 24h USD volume filter (default 0)
+  minutePatch?: boolean;            // fetch minute candles (fallback to day)
+  minuteAgg?: number;               // minute aggregation window (e.g. 15)
+  signal?: AbortSignal;             // optional abort signal
+  debug?: boolean | ((e: DebugEvent) => void); // enable or pipe debug events
+};
+
+/** ----- Debug plumbing ----- */
+export type DebugEvent = { tag: string; data?: any };
+function makeDebugger(sink?: FetchOptions["debug"]) {
+  const store: DebugEvent[] = [];
+  const push = (e: DebugEvent) => {
+    store.push(e);
+    if (typeof sink === "function") sink(e);
+  };
+  return {
+    log: push,
+    attachTo<T extends object>(obj: T): T {
+      try {
+        Object.defineProperty(obj, "__debug", {
+          value: store,
+          enumerable: false,
+          configurable: true,
+          writable: false,
+        });
+      } catch {} // non-fatal
+      return obj;
+    },
+    snapshot: () => store as DebugEvent[],
+  };
+}
+
+/** Extract debug events that computeMaxPairsForCA attached onto the Map. */
+export function extractDebug(map: Map<string, MaxPair>): DebugEvent[] | undefined {
+  return (map as any).__debug as DebugEvent[] | undefined;
+}
+
+/** ----- Time helpers ----- */
+
+// Parse Date|string to a millisecond timestamp.
+// - numeric string: detect seconds vs milliseconds by magnitude.
+// - "YYYY-MM-DD HH:mm[:ss[.SSS]]": treat as UTC.
+// - other date strings: Date.parse fallback.
+function toTs(v: string | Date): number {
+  if (v instanceof Date) return v.getTime();
+  const s = String(v).trim();
+
+  // numeric string like "1695926400" or "1695926400000"
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const num = Number(s);
+    return num < 1e12 ? num * 1000 : num; // seconds -> ms
+  }
+
+  // "YYYY-MM-DD HH:mm[:ss[.SSS]]" -> treat as UTC
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/.test(s)) {
+    return Date.parse(s.replace(" ", "T") + "Z");
+  }
+
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : NaN;
+}
+
+// Normalize candle time to milliseconds.
+// Accepts: { t | time | timestamp | ts } or array-like [t, ..., close].
+function cTime(c: any): number {
+  const v =
+    c?.t ??
+    c?.time ??
+    c?.timestamp ??
+    c?.ts ??
+    (Array.isArray(c) ? c[0] : undefined);
+
+  if (typeof v === "number") return v < 1e12 ? v * 1000 : v; // seconds -> ms
+  const n = Number(v);
+  if (Number.isFinite(n)) return n < 1e12 ? n * 1000 : n; // seconds -> ms
+  const d = Date.parse(String(v));
+  return Number.isFinite(d) ? d : NaN;
+}
+
+// Normalize candle close/price from object/array shapes.
+function cClose(c: any): number {
+  const v = c?.c ?? c?.close ?? c?.price ?? (Array.isArray(c) ? c[4] : undefined);
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+// Merge multiple candle arrays -> sorted, de-duplicated by timestamp.
+function mergeCandles(...lists: any[][]): { t: number; c: number }[] {
+  const out: { t: number; c: number }[] = [];
+  for (const arr of lists) {
+    for (const c of arr || []) {
+      const t = cTime(c);
+      const price = cClose(c);
+      if (Number.isFinite(t) && Number.isFinite(price)) out.push({ t, c: price });
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
+  const dedup: { t: number; c: number }[] = [];
+  let lastT = -1;
+  for (const k of out) {
+    if (k.t !== lastT) {
+      dedup.push(k);
+      lastT = k.t;
+    }
+  }
+  return dedup;
+}
+
+/** ----- Pool selection ----- */
+
+function pickPoolAddress(p: any): string | null {
+  return (
+    p?.address ||
+    p?.pool_address ||
+    p?.id ||
+    p?.attributes?.address ||
+    p?.attributes?.pool_address ||
+    p?.attributes?.id ||
+    null
+  );
+}
+
+function numOr(x: any, fallback = 0): number {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function poolMetrics(p: any) {
+  // be tolerant to provider field names
+  const vol =
+    numOr(p?.trade_volume_usd_24h, NaN) ??
+    numOr(p?.volume_usd_24h, NaN) ??
+    numOr(p?.volume_24h_usd, NaN);
+
+  // some providers expose non-USD volume fields like volume24h
+  const volAlt = numOr(p?.volume24h, NaN);
+
+  // liquidity / reserves fallbacks (use if all volumes are missing/zero)
+  const liq =
+    numOr(p?.liquidityUsd, NaN) ??
+    numOr(p?.liquidity_usd, NaN);
+  const res =
+    numOr(p?.reservesUsd, NaN) ??
+    numOr(p?.reserveUsd, NaN);
+
+  // choose a usable "volumeUSD" number (NaN → 0 so we don't exclude when minVolume=0)
+  const volumeUSD = Number.isFinite(vol) ? vol : (Number.isFinite(volAlt) ? volAlt : 0);
+  const liquidityUSD = Number.isFinite(liq) ? liq : (Number.isFinite(res) ? res : 0);
+
+  return { volumeUSD, liquidityUSD };
+}
+
+async function choosePools(
+  network: string,
+  ca: string,
+  minVolume: number,
+  mode: "primary" | "top3",
+  dbg: (e: { tag: string; data?: any }) => void,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const pools = (await listTopPoolsByToken(network, ca, 10).catch(() => [])) as any[];
+  dbg({ tag: "pools.list", data: { network, ca, count: pools?.length ?? 0, sample: (pools || []).slice(0, 3) } });
+
+  // compute metrics for each pool
+  const withMetrics = (pools || []).map((p) => {
+    const addr = String(pickPoolAddress(p) || "").trim();
+    const m = poolMetrics(p);
+    return { raw: p, addr, ...m };
+  }).filter((x) => !!x.addr);
+
+  // filter by minVolume (treat missing volume as 0, so minVolume=0 won't exclude)
+  const filtered = withMetrics.filter((x) => x.volumeUSD >= (minVolume || 0));
+  dbg({
+    tag: "pools.filtered",
+    data: {
+      minVolume,
+      count: filtered.length,
+      sample: filtered.slice(0, 3).map((x) => ({ addr: x.addr, vol: x.volumeUSD, liq: x.liquidityUSD })),
+    },
+  });
+
+  // if nothing passes volume, fallback to all pools by liquidity/reserves
+  const candidates = filtered.length ? filtered : withMetrics;
+
+  // sort: primary by volume desc; fallback by liquidity/reserves desc
+  candidates.sort((a, b) => {
+    if (a.volumeUSD !== b.volumeUSD) return b.volumeUSD - a.volumeUSD;
+    return b.liquidityUSD - a.liquidityUSD;
+  });
+
+  const chosen = (mode === "top3" ? candidates.slice(0, 3) : candidates.slice(0, 1))
+    .map((x) => x.addr);
+  dbg({ tag: "pools.chosen", data: { mode, addrs: chosen } });
+
+  return Array.from(new Set(chosen));
+}
+
+/** ----- Core compute ----- */
+
+export async function computeMaxPairsForCA(
+  ca: string,
+  mentions: MentionRow[],
+  opts: FetchOptions = {},
+): Promise<Map<string, MaxPair>> {
+  const dbg = makeDebugger(opts.debug);
+  const network = (opts.network || "solana").toLowerCase();
+  const poolMode = opts.poolMode || "primary";
+  const minVolume = typeof opts.minVolume === "number" ? opts.minVolume : 0; // relaxed default
+  const minutePatch = opts.minutePatch ?? true;
+  const minuteAgg = opts.minuteAgg ?? 15;
+
+  dbg.log({ tag: "input.opts", data: { network, poolMode, minVolume, minutePatch, minuteAgg, ca } });
+  dbg.log({ tag: "input.mentions", data: mentions });
+
+  // 1) parse t0 per mention
+  const metas = mentions
+    .map((m) => ({ id: m.id, t0: toTs(m.publishDate) }))
+    .filter((x) => Number.isFinite(x.t0));
+  if (!metas.length) {
+    const empty = new Map<string, MaxPair>();
+    for (const m of mentions) empty.set(m.id, { maxPrice: null, maxAt: null });
+    return dbg.attachTo(empty);
+  }
+  const tEarliest = Math.min(...metas.map((m) => m.t0));
+  dbg.log({
+    tag: "t0.window",
+    data: {
+      earliest: new Date(tEarliest).toISOString(),
+      ids: metas.map((m) => ({ id: m.id, t0: new Date(m.t0).toISOString() })),
+    },
+  });
+
+  // 2) choose pools
+  const poolAddrs = await choosePools(network, ca, minVolume, poolMode, dbg.log, opts.signal);
+  if (!poolAddrs.length) {
+    const out = new Map<string, MaxPair>();
+    for (const m of mentions) out.set(m.id, { maxPrice: null, maxAt: null });
+    dbg.log({ tag: "exit.noPools", data: { reason: "no pools after volume filter" } });
+    return dbg.attachTo(out);
+  }
+
+  // 3) fetch minute + day candles
+  const now = Date.now();
+  const startDay = new Date(tEarliest);
+  startDay.setUTCHours(0, 0, 0, 0);
+  const fromDay = startDay.getTime() - 24 * 3600 * 1000;
+  const toDay = now + 24 * 3600 * 1000;
+
+  let minutes: any[] = [];
+  if (minutePatch) {
+    try {
+      const spanMs = (now + 60_000) - Math.max(tEarliest - 2 * 3600 * 1000, 0);
+      const barsNeeded = Math.ceil(spanMs / (minuteAgg * 60_000));
+      const limit = Math.max(50, Math.min(barsNeeded + 20, 2000));
+      minutes = await fetchOHLCVMinute(network, poolAddrs[0], minuteAgg, limit);
+      dbg.log({
+        tag: "candles.minute",
+        data: {
+          pool: poolAddrs[0],
+          agg: minuteAgg,
+          limit,
+          count: minutes?.length ?? 0,
+          head: minutes?.[0],
+          tail: minutes?.[minutes.length - 1],
+        },
+      });
+    } catch (e: any) {
+      dbg.log({ tag: "candles.minute.error", data: { error: e?.message || String(e) } });
+      minutes = [];
+    }
+  }
+
+  const daySets: any[][] = [];
+  const daysNeeded = Math.ceil((toDay - fromDay) / 86_400_000) + 2;
+  const dayLimit = Math.max(7, Math.min(daysNeeded, 1000));
+  for (const p of poolAddrs) {
+    try {
+      const arr = await fetchOHLCVDay(network, p, dayLimit);
+      daySets.push(arr || []);
+      dbg.log({
+        tag: "candles.day",
+        data: { pool: p, limit: dayLimit, count: arr?.length ?? 0, head: arr?.[0], tail: arr?.[arr.length - 1] },
+      });
+    } catch (e: any) {
+      dbg.log({ tag: "candles.day.error", data: { pool: p, error: e?.message || String(e) } });
+    }
+  }
+
+  const merged = mergeCandles(minutes, ...daySets);
+  dbg.log({
+    tag: "candles.merged",
+    data: {
+      count: merged.length,
+      headISO: merged.length ? new Date(merged[0].t).toISOString() : null,
+      tailISO: merged.length ? new Date(merged[merged.length - 1].t).toISOString() : null,
+    },
+  });
+
+  // 4) compute max for each mention
+  const out = new Map<string, MaxPair>();
+  for (const m of metas) {
+    let bestPrice = NaN;
+    let bestTime = NaN;
+    for (const c of merged) {
+      if (c.t >= m.t0 && Number.isFinite(c.c)) {
+        if (!Number.isFinite(bestPrice) || c.c > bestPrice) {
+          bestPrice = c.c;
+          bestTime = c.t;
+        }
+      }
+    }
+    if (Number.isFinite(bestPrice) && Number.isFinite(bestTime)) {
+      out.set(m.id, { maxPrice: bestPrice, maxAt: new Date(bestTime).toISOString() });
+      dbg.log({
+        tag: "result.mention",
+        data: { id: m.id, maxPrice: bestPrice, maxAt: new Date(bestTime).toISOString() },
+      });
+    } else {
+      out.set(m.id, { maxPrice: null, maxAt: null });
+      // Diagnose why it's null
+      const after = merged.find((c) => c.t >= m.t0);
+      dbg.log({
+        tag: "result.mention.null",
+        data: {
+          id: m.id,
+          reason: merged.length === 0
+            ? "no candles at all"
+            : after ? "candles after t0 exist but all close invalid/NaN"
+            : "no candle with t >= t0",
+          t0ISO: new Date(m.t0).toISOString(),
+          mergedHeadISO: merged.length ? new Date(merged[0].t).toISOString() : null,
+          mergedTailISO: merged.length ? new Date(merged[merged.length - 1].t).toISOString() : null,
+          mergedCount: merged.length,
+        },
+      });
+    }
+  }
+
+  // fill nulls for mentions that failed to parse t0
+  for (const m of mentions) if (!out.has(m.id)) out.set(m.id, { maxPrice: null, maxAt: null });
+
+  return dbg.attachTo(out);
+}
+
+/** Helper: compute multiple CAs where groups is Map<CA, Mentions[]> (kept for compatibility). */
+export async function computeMaxPairsForGroups(
+  groups: Map<string, MentionRow[]>,
+  opts: FetchOptions = {},
+): Promise<Map<string, MaxPair>> {
+  const result = new Map<string, MaxPair>();
+  for (const [ca, items] of groups) {
+    const pairs = await computeMaxPairsForCA(ca, items, opts);
+    for (const it of items) result.set(it.id, pairs.get(it.id) ?? { maxPrice: null, maxAt: null });
+  }
+  return result;
+}
+
+/** ----- Usage note for API route (optional) -----
+ * If you want to pipe debug info back to the client, do:
+ *
+ *   const pairs = await computeMaxPairsForCA(ca, mentions, { ...opts, debug: wantDebug });
+ *   const debug = extractDebug(pairs); // array of { tag, data }
+ *   // include `debug` in your JSON response when wantDebug is true.
+ *
+ * This keeps the original return type (Map) intact while exposing rich diagnostics.
+ */
+

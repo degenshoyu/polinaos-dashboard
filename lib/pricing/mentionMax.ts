@@ -1,317 +1,491 @@
 // lib/pricing/mentionMax.ts
-// Compute per-mention max price since t0 using GeckoTerminal OHLCV.
-// Adds rate limit handling: pacing + exponential backoff retry.
-// Minute-patch is best-effort — if 429 persists, we degrade to day-only.
+// Compute max price since mention publish time (t0) using GeckoTerminal Public API.
+// - Calls GT directly with correct query params (timeframe/aggregate/limit).
+// - No auth required (per GT docs); add `accept: application/json` header.
+// - Timestamps normalized to ms; robust pool selection; rich debug trace.
 
-import {
-  fetchOHLCVDay,
-  fetchOHLCVMinute,
-  listTopPoolsByToken,
-} from "@/lib/pricing/geckoterminal";
-import type { Ohlcv as OhlcvCandle } from "@/lib/pricing/geckoterminal";
+type AnyObj = Record<string, any>;
 
-// ----------------------------- Types -----------------------------
-
-/** Minimal DB shape the caller should provide (joined with kol_tweets to get publishDate). */
-export type MentionRow = {
-  id: string; // tweet_token_mentions.id
-  tokenKey: string; // normalized contract address (CA)
-  publishDate: string; // ISO string from kol_tweets.publish_date
-};
-
-export type MaxPair = { maxPrice: number | null; maxAt: Date | null };
+export type MentionRow = { id: string; publishDate: string | Date };
+export type MaxPair = { maxPrice: number | null; maxAt: string | null };
 
 export type FetchOptions = {
-  /** Use only the best-ranked pool ("primary") or merge top 3 pools and take the global max ("top3"). */
-  poolMode?: "primary" | "top3";
-  /** Filter out candles with tiny volume spikes. 0 disables filtering. */
-  minVolume?: number;
-  /** Patch minute candles for t0-day remainder and today to better catch intraday spikes. */
-  minutePatch?: boolean;
-  /** Force network name if known (e.g. "solana" | "ethereum"). If omitted, we infer from CA format. */
-  network?: string;
-  /** Minute aggregation for GT minute OHLCV. Default 15 (i.e., 15m bars). */
-  minuteAgg?: number;
+  network?: string; // e.g. "solana"
+  poolMode?: "primary" | "top3"; // how to pick pools
+  minVolume?: number; // USD 24h volume filter; default 0
+  minutePatch?: boolean; // fetch minute candles as well
+  minuteAgg?: number; // minute aggregate 1|5|15; default 15
+  signal?: AbortSignal; // optional abort signal
+  debug?: boolean | ((e: DebugEvent) => void); // debug sink or flag
 };
 
-// ----------------------------- Rate limit helpers -----------------------------
+export type DebugEvent = { tag: string; data?: any };
 
-const DEFAULT_NETWORK = process.env.GT_DEFAULT_NETWORK ?? "solana";
-
-/**
- * Global pacing to keep RPS low even when caller uses concurrency.
- * With 1 worker, SPACING_MS≈450ms ~= 2.2 req/s total across all GT endpoints.
- * Adjust if你们有自己的全局限速器。
- */
-const SPACING_MS = Number(process.env.GT_PACING_MS ?? 450);
-
-/** Exponential backoff baseline (ms) and attempts. */
-const RETRY_BASE_MS = Number(process.env.GT_RETRY_BASE_MS ?? 800);
-const RETRY_MAX = Number(process.env.GT_RETRY_MAX ?? 5);
-
-/** Simple jitter in [0,base). */
-const jitter = (base: number) => Math.floor(Math.random() * base);
-
-/** Sleep helper */
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Global simple pacer (coarse, process-wide). */
-let lastCallAt = 0;
-async function pace() {
-  const now = Date.now();
-  const wait = lastCallAt + SPACING_MS - now;
-  if (wait > 0) await sleep(wait);
-  lastCallAt = Date.now();
+function makeDebugger(sink?: FetchOptions["debug"]) {
+  const store: DebugEvent[] = [];
+  const log = (e: DebugEvent) => {
+    store.push(e);
+    if (typeof sink === "function") sink(e);
+  };
+  return {
+    log,
+    attachTo<T extends object>(obj: T): T {
+      Object.defineProperty(obj, "__debug", {
+        value: store,
+        enumerable: false,
+        configurable: true,
+      });
+      return obj;
+    },
+    snapshot: () => store as DebugEvent[],
+  };
 }
 
-/** Detect GT 429 from error object/text */
-function is429(err: unknown): boolean {
-  const msg = String((err as any)?.message ?? err ?? "");
-  if (msg.includes("HTTP 429")) return true;
-  const status = (err as any)?.status ?? (err as any)?.response?.status;
-  return status === 429;
+export function extractDebug(
+  map: Map<string, MaxPair>,
+): DebugEvent[] | undefined {
+  return (map as any).__debug;
 }
 
-/** Parse Retry-After seconds if present in error; fallback to null */
-function retryAfterMs(err: any): number | null {
+/* ---------------------- time helpers ---------------------- */
+
+function toTs(v: string | Date): number {
+  if (v instanceof Date) return v.getTime();
+  const s = String(v).trim();
+  // numeric string: seconds vs milliseconds
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const num = Number(s);
+    return num < 1e12 ? num * 1000 : num;
+  }
+  // "YYYY-MM-DD HH:mm[:ss[.SSS]]" (UTC)
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?$/.test(s)) {
+    return Date.parse(s.replace(" ", "T") + "Z");
+  }
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : NaN;
+}
+
+function cTime(c: any): number {
   const v =
-    err?.response?.headers?.["retry-after"] ??
-    err?.headers?.["retry-after"] ??
-    err?.retryAfter ??
-    null;
-  if (!v) return null;
+    c?.t ??
+    c?.time ??
+    c?.timestamp ??
+    c?.ts ??
+    (Array.isArray(c) ? c[0] : undefined);
+  if (typeof v === "number") return v < 1e12 ? v * 1000 : v;
   const n = Number(v);
-  return Number.isFinite(n) ? n * 1000 : null;
+  if (Number.isFinite(n)) return n < 1e12 ? n * 1000 : n;
+  const d = Date.parse(String(v));
+  return Number.isFinite(d) ? d : NaN;
 }
 
-/** Wrap a GT call with pacing + exponential backoff on 429 */
-async function gtCall<T>(label: string, fn: () => Promise<T>): Promise<T> {
-  for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
-    try {
-      await pace();
-      return await fn();
-    } catch (err) {
-      if (!is429(err)) throw err; // non-429: bubble up
-      const ra = retryAfterMs(err);
-      const base = ra ?? RETRY_BASE_MS * Math.pow(2, attempt - 1);
-      const waitMs = base + jitter(250);
-      // Optional: you可以在此处接入日志上报
-      await sleep(waitMs);
+function cClose(c: any): number {
+  const v =
+    c?.c ?? c?.close ?? c?.price ?? (Array.isArray(c) ? c[4] : undefined);
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function mergeCandles(...lists: any[][]): { t: number; c: number }[] {
+  const out: { t: number; c: number }[] = [];
+  for (const arr of lists) {
+    for (const c of arr || []) {
+      const t = cTime(c);
+      const price = cClose(c);
+      if (Number.isFinite(t) && Number.isFinite(price))
+        out.push({ t, c: price });
     }
   }
-  // 最后一次再执行，若失败就抛
-  await pace();
-  return await fn();
-}
-
-// ----------------------------- Utils -----------------------------
-
-const nowSec = () => Math.floor(Date.now() / 1000);
-const startOfDaySec = (ts: number) => Math.floor(ts / 86400) * 86400;
-
-/** Heuristic network inference if not provided by caller. */
-function inferNetworkFromCA(ca: string): string {
-  return ca?.startsWith("0x") ? "ethereum" : DEFAULT_NETWORK;
-}
-
-/** Binary search: first index i where arr[i] >= t0Sec. */
-function lowerBound(arr: number[], t0Sec: number) {
-  let lo = 0,
-    hi = arr.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (arr[mid] < t0Sec) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-/** Build suffix maxima (max high, tie-broken by latest timestamp) for ascending candles. */
-function buildSuffixMax(candles: OhlcvCandle[]) {
-  const n = candles.length;
-  const best: Array<{ h: number; ts: number }> = new Array(n);
-  let curH = -Infinity;
-  let curTs = 0;
-  for (let i = n - 1; i >= 0; i--) {
-    const ts = candles[i][0]!;
-    const h = candles[i][2]!;
-    if (h > curH || (h === curH && ts > curTs)) {
-      curH = h;
-      curTs = ts;
-    }
-    best[i] = { h: curH, ts: curTs };
-  }
-  const tsArr = candles.map((c) => c[0]!);
-  return { tsArr, best };
-}
-
-/** Merge day + minute arrays, ascending, with optional volume filter. */
-function mergeAndFilter(
-  day: OhlcvCandle[],
-  minute: OhlcvCandle[] | null,
-  minVolume = 0,
-): OhlcvCandle[] {
-  const merged = minute && minute.length ? [...day, ...minute] : [...day];
-  merged.sort((a, b) => a[0]! - b[0]!);
-  return minVolume > 0
-    ? merged.filter((c) => (c[5] ?? 0) >= minVolume)
-    : merged;
-}
-
-// ------------------------- OHLCV fetching ------------------------
-
-/**
- * Fetch an OHLCV span for a given pool set covering [tStartSec, now]:
- * - Paginates daily candles backwards using `before_timestamp`
- * - Optionally patches minute candles for (t0-day remainder) and (today)
- * - All GT calls are wrapped with gtCall() => pacing + backoff
- */
-async function fetchOhlcvSpanForPools(
-  network: string,
-  poolIds: string[],
-  tStartSec: number,
-  minutePatch: boolean,
-  minVolume: number,
-  minuteAgg: number,
-): Promise<OhlcvCandle[]> {
-  const dayAll: OhlcvCandle[] = [];
-  const minAll: OhlcvCandle[] = [];
-
-  for (const poolId of poolIds) {
-    // Backward pagination on day candles until tStartSec is covered
-    let cursor = nowSec() + 86400; // push a bit beyond "today" to ensure inclusion
-    const limit = 200;
-    let guard = 0;
-    while (guard++ < 60) {
-      const batch = await gtCall("ohlcv_day", () =>
-        fetchOHLCVDay(network, poolId, cursor, limit),
-      );
-      if (!batch.length) break;
-      dayAll.push(...batch);
-      const oldest = batch[0][0]!;
-      if (oldest <= tStartSec) break;
-      cursor = oldest - 1; // continue further back
-    }
-
-    if (minutePatch) {
-      // Patch minute candles for edges; if 429 persists we degrade silently to day-only.
-      const t0DayEnd = startOfDaySec(tStartSec) + 86400;
-      const todayEnd = nowSec() + 60;
-      const perDayBars = Math.ceil(1440 / Math.max(1, minuteAgg)); // 96 when minuteAgg=15
-
-      try {
-        const m1 = await gtCall("ohlcv_min_t0_day", () =>
-          fetchOHLCVMinute(network, poolId, t0DayEnd, perDayBars, minuteAgg),
-        );
-        if (m1?.length) minAll.push(...m1);
-      } catch {
-        // degrade
-      }
-
-      try {
-        const m2 = await gtCall("ohlcv_min_today", () =>
-          fetchOHLCVMinute(network, poolId, todayEnd, perDayBars, minuteAgg),
-        );
-        if (m2?.length) minAll.push(...m2);
-      } catch {
-        // degrade
-      }
+  out.sort((a, b) => a.t - b.t);
+  const dedup: { t: number; c: number }[] = [];
+  let lastT = -1;
+  for (const k of out) {
+    if (k.t !== lastT) {
+      dedup.push(k);
+      lastT = k.t;
     }
   }
-
-  return mergeAndFilter(dayAll, minAll, minVolume);
+  return dedup;
 }
 
-/** Select pools to use according to poolMode. */
-async function selectPools(
-  network: string,
-  tokenCA: string,
-  mode: "primary" | "top3",
-): Promise<string[]> {
-  // listTopPoolsByToken can itself hit 429; wrap it.
-  const pools = await gtCall("list_pools", () =>
-    listTopPoolsByToken(network, tokenCA, 3),
+/* ---------------------- pool helpers ---------------------- */
+
+function pickPoolAddress(p: any): string | null {
+  return (
+    p?.address ||
+    p?.pool_address ||
+    p?.id ||
+    p?.attributes?.address ||
+    p?.attributes?.pool_address ||
+    p?.attributes?.id ||
+    null
   );
-  if (!pools?.length) return [];
-  if (mode === "top3") return pools.slice(0, 3).map((p) => p.address);
-  return [pools[0]!.address];
 }
 
-// ------------------------- Public API ----------------------------
+function numOr(x: any, fallback = 0): number {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
 
-/**
- * Compute (max price, when) since t0 for every mention of a given CA,
- * by fetching OHLCV once and answering each mention from a suffix maxima table.
- *
- * @param ca       normalized contract address
- * @param mentions mentions of this CA (must include publishDate)
- * @param opts     tuning knobs (poolMode/minVolume/minutePatch/network)
- */
+function poolMetrics(p: any) {
+  const vol =
+    numOr(p?.trade_volume_usd_24h, NaN) ??
+    numOr(p?.volume_usd_24h, NaN) ??
+    numOr(p?.volume_24h_usd, NaN);
+  const volAlt = numOr(p?.volume24h, NaN);
+  const liq = numOr(p?.liquidityUsd, NaN) ?? numOr(p?.liquidity_usd, NaN);
+  const res = numOr(p?.reservesUsd, NaN) ?? numOr(p?.reserveUsd, NaN);
+  const volumeUSD = Number.isFinite(vol)
+    ? vol
+    : Number.isFinite(volAlt)
+      ? volAlt
+      : 0;
+  const liquidityUSD = Number.isFinite(liq)
+    ? liq
+    : Number.isFinite(res)
+      ? res
+      : 0;
+  return { volumeUSD, liquidityUSD };
+}
+
+/* ---------------------- direct GT fetchers ---------------------- */
+/** Normalizes GT ohlcv response to [{t, c}] in ms. */
+function normalizeGT(resp: AnyObj): { t: number; c: number }[] {
+  // GT public API returns shape { data: { attributes: { ohlcv_list: [[ts, o,h,l,c,v], ...] } } }
+  const list: any[] = resp?.data?.attributes?.ohlcv_list ?? [];
+  const out: { t: number; c: number }[] = [];
+  for (const row of list) {
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const tsSec = Number(row[0]);
+    const close = Number(row[4]);
+    if (Number.isFinite(tsSec) && Number.isFinite(close)) {
+      out.push({ t: tsSec * 1000, c: close });
+    }
+  }
+  return out;
+}
+
+async function gtFetchOHLCV(
+  network: string,
+  pool: string,
+  timeframe: "minute" | "day" | "hour",
+  params: {
+    aggregate?: number; // 1|5|15 for minute; 1 for day
+    limit?: number; // default 100, max 1000
+    beforeSec?: number; // seconds since epoch
+    signal?: AbortSignal;
+  },
+): Promise<{ t: number; c: number }[]> {
+  const u = new URL(
+    `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(network)}/pools/${encodeURIComponent(
+      pool,
+    )}/ohlcv/${timeframe}`,
+  );
+  if (params.aggregate)
+    u.searchParams.set("aggregate", String(params.aggregate));
+  if (params.limit) u.searchParams.set("limit", String(params.limit));
+  if (params.beforeSec)
+    u.searchParams.set(
+      "before_timestamp",
+      String(Math.floor(params.beforeSec)),
+    );
+  // currency/token left as default "usd"/"base" per docs
+
+  const res = await fetch(u.toString(), {
+    method: "GET",
+    headers: {
+      // GT public API example uses this header
+      // https://apiguide.geckoterminal.com/getting-started
+      accept: "application/json",
+      "user-agent": "PolinaOS-Dashboard/1.0 (+https://github.com/)", // friendly UA
+    },
+    signal: params.signal,
+    // Next.js fetch caches by default in RSC; we are in a server action/route context
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `GT ${res.status} ${res.statusText} ${u.pathname}${u.search} :: ${text.slice(0, 200)}`,
+    );
+  }
+
+  const json = await res.json().catch(() => ({}));
+  return normalizeGT(json);
+}
+
+/* ---------------------- choose pools ---------------------- */
+
+async function choosePools(
+  network: string,
+  ca: string,
+  minVolume: number,
+  mode: "primary" | "top3",
+  dbg: (e: DebugEvent) => void,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  // Lightweight pool discovery using GT /tokens/{ca}/pools
+  const url = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(
+    network,
+  )}/tokens/${encodeURIComponent(ca)}/pools?page=1`;
+  let pools: any[] = [];
+  try {
+    const r = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal,
+      cache: "no-store",
+    });
+    const j = await r.json();
+    // Normalize both "data: []" and flat list forms
+    pools = Array.isArray(j?.data)
+      ? j.data.map((x: any) => x?.attributes ?? x)
+      : Array.isArray(j)
+        ? j
+        : [];
+  } catch {
+    pools = [];
+  }
+
+  dbg({
+    tag: "pools.list",
+    data: {
+      network,
+      ca,
+      count: pools?.length ?? 0,
+      sample: (pools || []).slice(0, 3),
+    },
+  });
+
+  const withMetrics = (pools || [])
+    .map((p) => {
+      const addr = String(pickPoolAddress(p) || "").trim();
+      const m = poolMetrics(p);
+      return { raw: p, addr, ...m };
+    })
+    .filter((x) => !!x.addr);
+
+  const filtered = withMetrics.filter((x) => x.volumeUSD >= (minVolume || 0));
+  dbg({
+    tag: "pools.filtered",
+    data: {
+      minVolume,
+      count: filtered.length,
+      sample: filtered
+        .slice(0, 3)
+        .map((x) => ({ addr: x.addr, vol: x.volumeUSD, liq: x.liquidityUSD })),
+    },
+  });
+
+  const candidates = filtered.length ? filtered : withMetrics;
+
+  candidates.sort((a, b) => {
+    if (a.volumeUSD !== b.volumeUSD) return b.volumeUSD - a.volumeUSD;
+    return b.liquidityUSD - a.liquidityUSD;
+  });
+
+  const chosen = (
+    mode === "top3" ? candidates.slice(0, 3) : candidates.slice(0, 1)
+  ).map((x) => x.addr);
+  dbg({ tag: "pools.chosen", data: { mode, addrs: chosen } });
+
+  return Array.from(new Set(chosen));
+}
+
+/* ---------------------- core compute ---------------------- */
+
 export async function computeMaxPairsForCA(
   ca: string,
   mentions: MentionRow[],
   opts: FetchOptions = {},
 ): Promise<Map<string, MaxPair>> {
-  const out = new Map<string, MaxPair>();
-  if (!mentions?.length) return out;
-
-  const poolMode = opts.poolMode ?? "primary";
-  const minVolume = opts.minVolume ?? 0;
+  const dbg = makeDebugger(opts.debug);
+  const network = opts.network || "solana";
+  const poolMode = opts.poolMode || "primary";
+  const minVolume = typeof opts.minVolume === "number" ? opts.minVolume : 0; // relax default
   const minutePatch = opts.minutePatch ?? true;
-  const network = opts.network ?? inferNetworkFromCA(ca);
   const minuteAgg = opts.minuteAgg ?? 15;
 
-  // 1) earliest t0 across mentions for this CA
-  const earliest = mentions.reduce<number>((acc, m) => {
-    const ts = Math.floor(new Date(m.publishDate).getTime() / 1000);
-    return Math.min(acc, ts);
-  }, Number.POSITIVE_INFINITY);
+  dbg.log({
+    tag: "input.opts",
+    data: { network, poolMode, minVolume, minutePatch, minuteAgg, ca },
+  });
+  dbg.log({ tag: "input.mentions", data: mentions });
 
-  // 2) choose pools
-  const poolIds = await selectPools(network, ca, poolMode);
-  if (!poolIds.length) {
-    // No pools found -> null everything
-    for (const m of mentions) out.set(m.id, { maxPrice: null, maxAt: null });
-    return out;
+  const metas = mentions
+    .map((m) => ({ id: m.id, t0: toTs(m.publishDate) }))
+    .filter((x) => Number.isFinite(x.t0));
+
+  if (!metas.length) {
+    const empty = new Map<string, MaxPair>();
+    for (const m of mentions) empty.set(m.id, { maxPrice: null, maxAt: null });
+    return dbg.attachTo(empty);
   }
 
-  // 3) fetch a single OHLCV span (day + optional minute patch), merged & filtered
-  const candles = await fetchOhlcvSpanForPools(
+  const tEarliest = Math.min(...metas.map((m) => m.t0));
+  dbg.log({
+    tag: "t0.window",
+    data: {
+      earliest: new Date(tEarliest).toISOString(),
+      ids: metas.map((m) => ({ id: m.id, t0: new Date(m.t0).toISOString() })),
+    },
+  });
+
+  const pools = await choosePools(
     network,
-    poolIds,
-    earliest,
-    minutePatch,
+    ca,
     minVolume,
-    minuteAgg,
+    poolMode,
+    dbg.log,
+    opts.signal,
   );
-  if (!candles.length) {
+  if (!pools.length) {
+    const out = new Map<string, MaxPair>();
     for (const m of mentions) out.set(m.id, { maxPrice: null, maxAt: null });
-    return out;
-  }
-
-  // 4) build suffix maxima once, answer each mention with a binary search
-  const { tsArr, best } = buildSuffixMax(candles);
-  for (const m of mentions) {
-    const t0 = Math.floor(new Date(m.publishDate).getTime() / 1000);
-    const j = lowerBound(tsArr, t0);
-    if (j >= tsArr.length) {
-      out.set(m.id, { maxPrice: null, maxAt: null });
-      continue;
-    }
-    const { h, ts } = best[j];
-    out.set(m.id, {
-      maxPrice: Number.isFinite(h) ? h : null,
-      maxAt: Number.isFinite(ts) ? new Date(ts * 1000) : null,
+    dbg.log({
+      tag: "exit.noPools",
+      data: { reason: "no pools after volume/liquidity filter" },
     });
+    return dbg.attachTo(out);
   }
 
-  return out;
+  const nowMs = Date.now();
+
+  // minute candles (latest N bars, aggregate = minuteAgg, no before_timestamp)
+  let minutes: { t: number; c: number }[] = [];
+  if (minutePatch) {
+    try {
+      const spanMs = nowMs + 60_000 - Math.max(tEarliest - 2 * 3600 * 1000, 0);
+      const barsNeeded = Math.ceil(spanMs / (minuteAgg * 60_000));
+      const limit = Math.max(50, Math.min(barsNeeded + 20, 1000)); // GT max 1000
+      minutes = await gtFetchOHLCV(network, pools[0], "minute", {
+        aggregate: minuteAgg,
+        limit,
+        signal: opts.signal,
+      });
+      dbg.log({
+        tag: "candles.minute",
+        data: {
+          pool: pools[0],
+          agg: minuteAgg,
+          limit,
+          count: minutes.length,
+          headISO: minutes[0] ? new Date(minutes[0].t).toISOString() : null,
+          tailISO: minutes[minutes.length - 1]
+            ? new Date(minutes[minutes.length - 1].t).toISOString()
+            : null,
+        },
+      });
+    } catch (e: any) {
+      dbg.log({
+        tag: "candles.minute.error",
+        data: { error: e?.message || String(e) },
+      });
+      minutes = [];
+    }
+  }
+
+  // day candles (latest N days for each selected pool)
+  const daySets: { t: number; c: number }[][] = [];
+  const startDay = new Date(tEarliest);
+  startDay.setUTCHours(0, 0, 0, 0);
+  const fromDay = startDay.getTime() - 24 * 3600 * 1000;
+  const toDay = nowMs + 24 * 3600 * 1000;
+  const daysNeeded = Math.ceil((toDay - fromDay) / 86_400_000) + 2;
+  const dayLimit = Math.max(7, Math.min(daysNeeded, 1000)); // GT max 1000
+
+  for (const p of pools) {
+    try {
+      const arr = await gtFetchOHLCV(network, p, "day", {
+        aggregate: 1,
+        limit: dayLimit,
+        signal: opts.signal,
+      });
+      daySets.push(arr);
+      dbg.log({
+        tag: "candles.day",
+        data: {
+          pool: p,
+          limit: dayLimit,
+          count: arr.length,
+          headISO: arr[0] ? new Date(arr[0].t).toISOString() : null,
+          tailISO: arr[arr.length - 1]
+            ? new Date(arr[arr.length - 1].t).toISOString()
+            : null,
+        },
+      });
+    } catch (e: any) {
+      dbg.log({
+        tag: "candles.day.error",
+        data: { pool: p, error: e?.message || String(e) },
+      });
+    }
+  }
+
+  const merged = mergeCandles(minutes, ...daySets);
+  dbg.log({
+    tag: "candles.merged",
+    data: {
+      count: merged.length,
+      headISO: merged.length ? new Date(merged[0].t).toISOString() : null,
+      tailISO: merged.length
+        ? new Date(merged[merged.length - 1].t).toISOString()
+        : null,
+    },
+  });
+
+  const out = new Map<string, MaxPair>();
+  for (const m of metas) {
+    let bestPrice = NaN;
+    let bestTime = NaN;
+    for (const c of merged) {
+      if (c.t >= m.t0 && Number.isFinite(c.c)) {
+        if (!Number.isFinite(bestPrice) || c.c > bestPrice) {
+          bestPrice = c.c;
+          bestTime = c.t;
+        }
+      }
+    }
+    if (Number.isFinite(bestPrice) && Number.isFinite(bestTime)) {
+      const at = new Date(bestTime).toISOString();
+      out.set(m.id, { maxPrice: bestPrice, maxAt: at });
+      dbg.log({
+        tag: "result.mention",
+        data: { id: m.id, maxPrice: bestPrice, maxAt: at },
+      });
+    } else {
+      out.set(m.id, { maxPrice: null, maxAt: null });
+      const after = merged.find((c) => c.t >= m.t0);
+      dbg.log({
+        tag: "result.mention.null",
+        data: {
+          id: m.id,
+          reason:
+            merged.length === 0
+              ? "no candles at all"
+              : after
+                ? "candles after t0 exist but all close invalid/NaN"
+                : "no candle with t >= t0",
+          t0ISO: new Date(m.t0).toISOString(),
+          mergedHeadISO: merged.length
+            ? new Date(merged[0].t).toISOString()
+            : null,
+          mergedTailISO: merged.length
+            ? new Date(merged[merged.length - 1].t).toISOString()
+            : null,
+          mergedCount: merged.length,
+        },
+      });
+    }
+  }
+
+  // fill nulls for mentions failed to parse t0
+  for (const m of mentions)
+    if (!out.has(m.id)) out.set(m.id, { maxPrice: null, maxAt: null });
+
+  return dbg.attachTo(out);
 }
 
-/**
- * Convenience: compute pairs for multiple CAs in one go.
- * The caller groups mentions by CA; we iterate groups sequentially (or let the caller parallelize).
- */
 export async function computeMaxPairsForGroups(
   groups: Map<string, MentionRow[]>,
   opts: FetchOptions = {},
@@ -319,9 +493,8 @@ export async function computeMaxPairsForGroups(
   const result = new Map<string, MaxPair>();
   for (const [ca, items] of groups) {
     const pairs = await computeMaxPairsForCA(ca, items, opts);
-    for (const it of items) {
+    for (const it of items)
       result.set(it.id, pairs.get(it.id) ?? { maxPrice: null, maxAt: null });
-    }
   }
   return result;
 }
