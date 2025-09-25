@@ -19,6 +19,106 @@ import {
   AvatarCircle,
 } from "./LeaderboardBits";
 
+// ===== Age helpers (borrowed from InputCard, trimmed) =====
+const createdAtCache = new Map<string, string>(); // CA -> ISO string (inline cache)
+
+function normalizeCreatedAtInline(v: unknown, allowFutureDays = 3): string | undefined {
+  if (v == null) return undefined;
+  let ms: number | null = null;
+  if (typeof v === "number") {
+    ms = v < 2_000_000_000 ? v * 1000 : v;
+  } else if (typeof v === "string") {
+    if (/^\d+$/.test(v)) {
+      const n = Number(v);
+      ms = n < 2_000_000_000 ? n * 1000 : n;
+    } else {
+      const t = Date.parse(v);
+      ms = Number.isNaN(t) ? null : t;
+    }
+  }
+  if (ms == null || !Number.isFinite(ms)) return undefined;
+  const now = Date.now();
+  const maxFuture = now + allowFutureDays * 86400000;
+  if (ms > maxFuture) return undefined;
+  if (ms > now) ms = now;
+  const min = Date.UTC(2013, 0, 1);
+  if (ms < min) return undefined;
+  return new Date(ms).toISOString();
+}
+
+function ageTextInline(createdAt?: string | number) {
+  const iso = normalizeCreatedAtInline(createdAt);
+  if (!iso) return "-";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "-";
+  const days = Math.max(0, Math.floor((Date.now() - t) / 86400000));
+  if (days < 1) return "new";
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  const rest = days % 30;
+  return `${months}mo${rest ? ` ${rest}d` : ""}`;
+}
+
+function pickBestPairCreatedAtInline(pairs: any[]): unknown {
+  if (!Array.isArray(pairs) || pairs.length === 0) return undefined;
+  const pref = new Set(["SOL", "WETH", "ETH", "USDC", "USDT"]);
+  const scored = pairs
+    .map((p) => ({
+      liq: Number(p?.liquidity?.usd ?? p?.liquidityUSD ?? p?.reserveUsd ?? p?.liquidity ?? 0),
+      isPref: pref.has(p?.quoteToken?.symbol?.toUpperCase?.() || ""),
+      created: p?.pairCreatedAt ?? p?.createdAtMs ?? p?.createdAt,
+    }))
+    .filter((x) => x.created != null)
+    .sort((a, b) => (a.isPref !== b.isPref ? (a.isPref ? -1 : 1) : b.liq - a.liq));
+  return scored[0]?.created;
+}
+
+function useCreatedAt(row: any, index: number) {
+  const [createdAt, setCreatedAt] = React.useState<string | undefined>(() => {
+    // priority: row.createdAt -> cache
+    if (row?.createdAt) return normalizeCreatedAtInline(row.createdAt);
+    if (row?.contractAddress && createdAtCache.has(row.contractAddress)) {
+      return createdAtCache.get(row.contractAddress);
+    }
+    return undefined;
+  });
+
+  React.useEffect(() => {
+    if (createdAt) return;
+    if (!row?.contractAddress) return;
+    // only fetch for first screen (reduce bursts)
+    if (index >= 20) return;
+
+    let aborted = false;
+    (async () => {
+      try {
+        const qs = new URLSearchParams({
+          chain: String(row?.networkId || "solana"),
+          address: String(row?.contractAddress),
+        });
+        const r = await fetch(`/api/dexscreener/info?${qs.toString()}`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const picked =
+          normalizeCreatedAtInline(data?.createdAt) ||
+          normalizeCreatedAtInline(pickBestPairCreatedAtInline(data?.pairs));
+        if (!aborted && picked) {
+          createdAtCache.set(String(row.contractAddress), picked);
+          setCreatedAt(picked);
+        }
+      } catch {
+        // silent fail; Age stays "-"
+      }
+    })();
+
+    return () => {
+      aborted = true;
+    };
+  }, [createdAt, row?.contractAddress, row?.networkId, index]);
+
+  return createdAt;
+}
+
 export type TopCoinRow = {
   tokenKey: string;
   tokenDisplay: string;
@@ -197,6 +297,7 @@ export default function TopTokensByMentions({
             const pinned = openId === rowId;
             const copied = copiedId === rowId;
             const hasCA = !!r.contractAddress;
+            const createdInline = useCreatedAt(r, idx);
 
             const cleanTicker = (r.tokenDisplay || r.tokenKey || "")
               .replace(/^\$+/, "")
@@ -302,6 +403,7 @@ export default function TopTokensByMentions({
                       data={pv?.data}
                       ticker={cleanTicker}
                       contractAddress={r.contractAddress ?? undefined}
+                      createdOverride={createdInline}
                     />
 
                     {/* metrics (moved below token preview) */}
@@ -392,11 +494,13 @@ function TokenPreviewBlock({
   data,
   ticker,
   contractAddress,
+  createdOverride,
 }: {
   loading?: boolean;
   data?: TokenPreviewData;
   ticker: string;
   contractAddress?: string;
+  createdOverride?: string | undefined;
 }) {
   const imageUrl = data?.imageUrl ?? null;
   const price = data?.priceUsd ?? null;
@@ -414,7 +518,7 @@ function TokenPreviewBlock({
   const website = data?.website ?? null;
   const twitter = data?.twitter ?? null;
   const telegram = data?.telegram ?? null;
-  const created = data?.createdAt;
+  const created = data?.createdAt ?? createdOverride;
 
   return (
     <div className="relative mt-3 rounded-xl border border-white/10 bg-white/[0.06] p-3">
@@ -657,6 +761,12 @@ async function fetchPreview(r: TopCoinRow): Promise<TokenPreviewData | null> {
       const fdv  = toNum(p?.attributes?.fdv_usd);
       const capOrFdv = mcap || fdv || 0;
       const score = scorePool(vol24h, liq, capOrFdv);
+      const createdRaw =
+        p?.attributes?.pool_created_at ??
+        p?.attributes?.pair_created_at ??
+        p?.attributes?.created_at ??
+        p?.attributes?.launched_at ??
+        null;
       return {
         chain,
         score,
@@ -667,6 +777,7 @@ async function fetchPreview(r: TopCoinRow): Promise<TokenPreviewData | null> {
         fdv,
         logo: base?.attributes?.image_url ?? null,
         dexName: (dexId && (dexById.get(dexId)?.attributes?.name || dexId)) || null,
+        createdRaw,
       };
     });
     candidates.sort((a, b) => b.score - a.score);
@@ -679,11 +790,16 @@ async function fetchPreview(r: TopCoinRow): Promise<TokenPreviewData | null> {
       if (r2.ok) dexInfo = await r2.json();
     } catch {}
 
-    const createdBest = pickBestPairCreatedAt(dexInfo);
-    const created =
-      normalizeCreatedAt(dexInfo?.createdAt, { allowFutureDays: 3 }) ||
-      normalizeCreatedAt(createdBest, { allowFutureDays: 3 }) ||
-      undefined;
+    // ① Prefer GeckoTerminal pool-created time
+    const createdGecko =
+      best?.createdRaw != null
+        ? normalizeCreatedAt(best.createdRaw, { allowFutureDays: 7 })
+        : undefined;
+    // ② Fallback to Dexscreener top-level / best pair
+    const createdBestPair = pickBestPairCreatedAt(dexInfo);
+    const createdDexTop   = normalizeCreatedAt(dexInfo?.createdAt, { allowFutureDays: 3 });
+    const createdDexPair  = normalizeCreatedAt(createdBestPair, { allowFutureDays: 3 });
+    const created = createdGecko || createdDexTop || createdDexPair || undefined;
 
     return {
       imageUrl: best?.logo ?? dexInfo?.imageUrl ?? dexInfo?.logo ?? null,

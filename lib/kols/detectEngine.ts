@@ -8,7 +8,18 @@ import { canonAddr } from "@/lib/chains/address";
 const SOL_CA_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
 
 /** Majors we never want as signals */
-const BLOCK_TICKERS = new Set(["BTC", "ETH", "SOL", "USDT", "USDC"]);
+const BLOCK_TICKERS = new Set([
+  "BTC",
+  "ETH",
+  "SOL",
+  "USDT",
+  "USDC",
+  "TRON",
+  "ASTER",
+  "AVNT",
+  "GIGGLE",
+  "STBL",
+]);
 
 /** Strip trailing noise like "<name> coin"/"<name> token" */
 const stripCoinSuffix = (raw: string) =>
