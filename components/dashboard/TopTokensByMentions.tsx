@@ -120,9 +120,14 @@ export type TopCoinRow = {
 
   topKols?: Array<{
     handle: string;
-    views: number;
-    followers?: number | null;
     avatarUrl?: string | null;
+    followers?: number | null;
+    /** Tweets about this coin within the selected window */
+    tweets?: number;
+    /** Aggregated views from those tweets (used for ranking) */
+    views: number;
+    /** Total engagements = likes + retweets + replies */
+    engs?: number;
   }>;
 };
 
@@ -404,46 +409,49 @@ export default function TopTokensByMentions({ rows, days, title = "Top Coins" }:
                       createdOverride={createdInline}
                     />
 
-                    {/* metrics */}
-                    <div className="mt-3 grid grid-cols-2 gap-2">
-                      <Metric label="Mentions" value={fmtCompact(r.mentions)} />
-                      <Metric label="Shillers" value={fmtCompact(r.shillers)} />
-                      <Metric label="Views" value={fmtCompact(r.views)} />
-                      <Metric label="Engs" value={fmtCompact(r.engs)} />
-                      <Metric label="ER" value={fmtPct(r.er)} />
-                      <Metric label="Velocity" value={r.velocity?.toFixed(2)} />
+                    {/* activity metrics */}
+                    <div className="mt-3">
+                      <div className="text-[11px] text-gray-400 mb-1">CT Activity</div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {chip("Mentions", fmtCompact(r.mentions))}
+                        {chip("Shillers", fmtCompact(r.shillers))}
+                        {chip("Views", fmtCompact(r.views))}
+                        {chip("Engs", fmtCompact(r.engs))}
+                        {chip("ER", fmtPct(r.er))}
+                      </div>
                     </div>
 
                     {Array.isArray(r.topKols) && r.topKols.length > 0 ? (
                       <div className="relative mt-3">
-                        <div className="text-[11px] text-gray-400 mb-1">
-                          Top KOLs by this coin’s views
-                        </div>
+                        <div className="text-[11px] text-gray-400 mb-1">Top KOLs · by views</div>
                         <ul className="space-y-1">
-                          {r.topKols.slice(0, 10).map((k, i) => (
+                          {([...r.topKols]
+                            .sort((a, b) => (Number(b?.views ?? 0) - Number(a?.views ?? 0)))
+                            .slice(0, 3)
+                          ).map((k, i) => (
                             <li
                               key={k.handle}
                               className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.06] px-2 py-1.5"
                             >
                               <div className="flex items-center gap-2 min-w-0">
                                 <AvatarCircle src={k.avatarUrl ?? undefined} sizePx={24} />
-                                <span className="w-6 text-center text-[13px]">
-                                  {rankEmoji(i)}
-                                </span>
-                                <HandlePill
-                                  handle={k.handle}
-                                  href={`https://x.com/${k.handle}`}
-                                  className="px-2 py-0.5"
-                                />
-                                {typeof k.followers === "number" ? (
-                                  <span className="text-[11px] text-gray-400 tabular-nums">
-                                    · {fmtCompact(k.followers)} followers
-                                  </span>
-                                ) : null}
+                               <span className="w-6 text-center text-[13px]">{rankEmoji(i)}</span>
+                                <HandlePill handle={k.handle} href={`https://x.com/${k.handle}`} className="px-2 py-0.5" />
                               </div>
-                              <span className="text-[11px] text-gray-300 tabular-nums">
-                                {fmtCompact(k.views)} views
-                              </span>
+                              <div className="flex items-center gap-1.5 text-[11px] text-gray-300 shrink-0">
+                                <span className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.07] px-1.5 py-0.5 tabular-nums">
+                                  <span className="text-gray-400">Tweets</span>
+                                  <span>{typeof k.tweets === "number" ? fmtCompact(k.tweets) : "-"}</span>
+                                </span>
+                                <span className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.07] px-1.5 py-0.5 tabular-nums">
+                                  <span className="text-gray-400">Views</span>
+                                  <span>{fmtCompact(k.views)}</span>
+                                </span>
+                                <span className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.07] px-1.5 py-0.5 tabular-nums">
+                                  <span className="text-gray-400">Engs</span>
+                                  <span>{typeof k.engs === "number" ? fmtCompact(k.engs) : "-"}</span>
+                                </span>
+                              </div>
                             </li>
                           ))}
                         </ul>

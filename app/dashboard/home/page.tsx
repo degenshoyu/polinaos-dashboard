@@ -337,16 +337,21 @@ async function getTopCoins(days: 7 | 30): Promise<TopCoinRow[]> {
     } satisfies TopCoinRow;
   });
 
-  // 为“每个币的 Top KOLs（按 views）”准备明细：按 CA 列出
   const cas = Array.from(new Set(parsed.map((p) => p.contractAddress).filter(Boolean))) as string[];
-  let perCoinTopKols: Record<string, Array<{ handle: string; views: number; followers?: number; profile_img_url?: string | null }>> = {};
+  let perCoinTopKols: Record<
+    string,
+    Array<{ handle: string; tweets: number; views: number; engs: number; followers?: number; profile_img_url?: string | null }>
+  > = {};
+
   if (cas.length > 0) {
     const per = await db.execute(sql`
       WITH base AS (
         SELECT
           CASE WHEN tm.source='ca' THEN tm.token_key ELSE cct.contract_address END AS ca,
           kt.twitter_username AS handle,
-          SUM(kt.views) AS v
+          COUNT(*)                               AS t,          -- tweets
+          SUM(kt.views)                          AS v,          -- views
+          SUM(kt.likes + kt.retweets + kt.replies) AS e         -- engs
         FROM ${tweetTokenMentions} tm
         JOIN ${kolTweets} kt ON kt.tweet_id = tm.tweet_id
         LEFT JOIN ${coinCaTicker} cct
@@ -356,30 +361,45 @@ async function getTopCoins(days: 7 | 30): Promise<TopCoinRow[]> {
           AND kt.publish_date <  ${until}
           AND tm.source IN ('ticker','phrase','ca')
           AND tm.excluded = false
+          AND kt.type = ANY (ARRAY['tweet','quote']::tweet_type[])
         GROUP BY ca, handle
       )
-      SELECT b.ca, b.handle, b.v::numeric AS views, k.followers, k.profile_img_url
+      SELECT b.ca, b.handle,
+             b.t::numeric  AS tweets,
+             b.v::numeric  AS views,
+             b.e::numeric  AS engs,
+             k.followers,
+             k.profile_img_url
       FROM base b
       LEFT JOIN ${kols} k ON LOWER(k.twitter_username) = LOWER(b.handle)
       WHERE b.ca IN (${sql.join(cas.map((ca) => sql`${ca}`), sql`, `)})
       ORDER BY b.ca, views DESC;
     `);
 
-    for (const r of (per as any).rows as Array<{ ca: string; handle: string; views: number; followers: number | null; profile_img_url: string | null }>) {
+    for (const r of (per as any).rows as Array<{ ca: string; handle: string; tweets: number; views: number; engs: number; followers: number | null; profile_img_url: string | null }>) {
       (perCoinTopKols[r.ca] ||= []).push({
         handle: r.handle,
+        tweets: Number(r.tweets) || 0,
         views: Number(r.views),
+        engs: Number(r.engs) || 0,
         followers: toNum(r.followers) || 0,
         profile_img_url: r.profile_img_url,
       });
     }
   }
 
-  // 将 perCoinTopKols 附到每个 coin 上（TopTokensByMentions 会读取）
-  const withKols = parsed.map((p) => ({
-    ...p,
-    __topKols: (perCoinTopKols[p.contractAddress ?? ""] || []).slice(0, 10), // 取前 10
-  })) as unknown as TopCoinRow[];
+  const withKols = parsed.map((p) => {
+    const raw = perCoinTopKols[p.contractAddress ?? ""] || [];
+    const topKols = raw.slice(0, 10).map((k) => ({
+      handle: k.handle,
+      tweets: Number(k.tweets) || 0,
+      views: Number(k.views) || 0,
+      engs: Number(k.engs) || 0,
+      followers: typeof k.followers === "number" ? k.followers : 0,
+      avatarUrl: k.profile_img_url ?? null,
+    }));
+    return { ...p, topKols } as unknown as TopCoinRow;
+  });
 
   return withKols;
 }
