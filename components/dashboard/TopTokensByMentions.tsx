@@ -367,8 +367,8 @@ export default function TopTokensByMentions({ rows, days, title = "Top Coins" }:
                   </div>
 
                   {/* Right side: score only */}
-                  <div className="tabular-nums text-[11px] text-gray-400">
-                    score {(scoreMap[`${r.tokenKey}-${r.contractAddress ?? "noca"}`] ?? 0).toFixed(2)}
+                  <div className="tabular-nums text-gray-200 font-semibold">
+                    {`score ${(scoreMap[`${r.tokenKey}-${r.contractAddress ?? "noca"}`] ?? 0).toFixed(2)}`}
                   </div>
                 </div>
 

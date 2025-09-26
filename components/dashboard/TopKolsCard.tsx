@@ -24,16 +24,71 @@ export type TopKolsData = {
   coinsEngs: KolRow[];
 };
 
-type Metric = "avgRoi" | "coinShills" | "coinsViews" | "coinsEngs";
+type Metric = "avgRoi" | "efficiency";
 
 export default function TopKolsCard({ days, data }: { days: 7 | 30; data: TopKolsData }) {
   const [metric, setMetric] = React.useState<Metric>("avgRoi");
-  const rows = (data[metric] ?? []).slice(0, 10);
 
-  const metricLabel = (k: Metric) =>
-    k === "avgRoi" ? "Avg ROI" : k === "coinShills" ? "Coin Shills" : k === "coinsViews" ? "Coins Views" : "Coins Engs";
+  // --- Compute Efficiency (client-side) ---
+  // Merge three leaderboards by handle, normalize with log1p -> minmax, then weighted sum.
+  const effRows = React.useMemo(() => {
+    // Index by handle
+    type Acc = { handle: string; avatarUrl: string | null; followers: number; shills: number; views: number; engs: number };
+    const m = new Map<string, Acc>();
+    const upsert = (arr: KolRow[], key: "shills" | "views" | "engs") => {
+      for (const r of arr || []) {
+        const cur = m.get(r.handle) ?? {
+          handle: r.handle,
+          avatarUrl: r.avatarUrl ?? null,
+          followers: r.followers ?? 0,
+          shills: 0, views: 0, engs: 0,
+        };
+        if (!cur.avatarUrl && r.avatarUrl) cur.avatarUrl = r.avatarUrl;
+        if ((cur.followers ?? 0) < (r.followers ?? 0)) cur.followers = r.followers ?? 0;
+        cur[key] = (cur[key] ?? 0) + (r.value ?? 0);
+        m.set(r.handle, cur);
+      }
+    };
+    upsert(data.coinShills || [], "shills");
+    upsert(data.coinsViews || [], "views");
+    upsert(data.coinsEngs || [], "engs");
 
-  const rightValue = (r: KolRow) => (metric === "avgRoi" ? fmtPct(r.value) : fmtCompact(r.value));
+    const rows = Array.from(m.values());
+    if (rows.length === 0) return [] as KolRow[];
+
+    // log1p then min-max
+    const arrS = rows.map((x) => Math.log1p(Math.max(0, x.shills)));
+    const arrV = rows.map((x) => Math.log1p(Math.max(0, x.views)));
+    const arrE = rows.map((x) => Math.log1p(Math.max(0, x.engs)));
+    const mm = (arr: number[]) => {
+      const min = Math.min(...arr), max = Math.max(...arr);
+      if (!isFinite(min) || !isFinite(max) || max === min) return arr.map(() => 0);
+      const d = max - min; return arr.map((v) => (v - min) / d);
+    };
+    const nS = mm(arrS), nV = mm(arrV), nE = mm(arrE);
+
+    // Weights: Views 0.50, Engs 0.30, Shills 0.20
+    const W = { s: 0.20, v: 0.50, e: 0.30 };
+
+    const out: KolRow[] = rows
+      .map((x, i) => ({
+        handle: x.handle,
+        avatarUrl: x.avatarUrl,
+        followers: x.followers,
+        value: W.s * nS[i] + W.v * nV[i] + W.e * nE[i], // 0..1
+      }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
+    return out;
+  }, [data.coinShills, data.coinsViews, data.coinsEngs]);
+
+  const rows = React.useMemo(() => {
+    return metric === "avgRoi" ? (data.avgRoi || []).slice(0, 10) : effRows;
+  }, [metric, data.avgRoi, effRows]);
+
+  const metricLabel = (k: Metric) => (k === "avgRoi" ? "Avg ROI" : "Efficiency");
+
+  const rightValue = (r: KolRow) => (metric === "avgRoi" ? fmtPct(r.value) : r.value.toFixed(2));
 
   return (
     <div
@@ -62,7 +117,7 @@ export default function TopKolsCard({ days, data }: { days: 7 | 30; data: TopKol
 
         {/* Metric tabs */}
         <div className="flex items-center gap-2">
-          {(["avgRoi", "coinShills", "coinsViews", "coinsEngs"] as const).map((k) => {
+          {(["avgRoi", "efficiency"] as const).map((k) => {
             const active = metric === k;
             return (
               <button
@@ -103,10 +158,20 @@ export default function TopKolsCard({ days, data }: { days: 7 | 30; data: TopKol
                 <HandlePill handle={r.handle} href={`https://x.com/${r.handle}`} />
 
                 {/* Followers (tiny note) */}
-                <span className="text-[11px] text-gray-400 tabular-nums">· {fmtCompact(r.followers)} followers</span>
+                <span
+                  className="inline-flex items-center gap-1 rounded-md border border-white/10
+                             bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/90 tabular-nums"
+                  title="Followers"
+                >
+                  <span className="text-gray-300/90">Followers</span>
+                  <span>{fmtCompact(r.followers)}</span>
+                </span>
               </div>
 
-              <span className="tabular-nums text-gray-200 font-semibold">{rightValue(r)}</span>
+              {/* For efficiency, show 'score xx' to hint it's a 0..1 index */}
+              <span className="tabular-nums text-gray-200 font-semibold">
+                {metric === "avgRoi" ? rightValue(r) : `score ${rightValue(r)}`}
+              </span>
             </li>
           ))}
         </ul>
@@ -114,4 +179,3 @@ export default function TopKolsCard({ days, data }: { days: 7 | 30; data: TopKol
     </div>
   );
 }
-
