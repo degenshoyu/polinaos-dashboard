@@ -22,6 +22,7 @@ const BLOCK_TICKERS = new Set([
   "HYPE",
   "DOGE",
   "PEPE",
+  "XPL",
 ]);
 
 /** Strip trailing noise like "<name> coin"/"<name> token" */
