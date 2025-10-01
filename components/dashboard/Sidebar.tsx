@@ -33,7 +33,7 @@ const campaignItems: NavItem[] = [
 
 const leaderboardItems: NavItem[] = [
   { href: "/dashboard/leaderboard/kols",     label: "KOLs",     locked: false, Icon: Users },
-  { href: "/dashboard/leaderboard/projects", label: "Projects", locked: true,  Icon: Folder },
+  { href: "/dashboard/leaderboard/projects", label: "Projects", locked: false,  Icon: Folder },
 ];
 
 const dashboardItems: NavItem[] = [
